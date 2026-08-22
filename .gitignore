@@ -1,0 +1,31 @@
+# Planning and tooling artifacts stay local. This repository is the deliverable,
+# not the process that produced it.
+_bmad/
+_bmad-output/
+.memlog.md
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Models and data caches (never commit weights)
+models/
+.cache/
+*.onnx
+*.safetensors
+*.bin
+
+# Results are committed deliberately, scratch output is not
+out/
+scratch/
+
+# OS / editor
+.DS_Store
+*.swp
