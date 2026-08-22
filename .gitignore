@@ -1,9 +1,11 @@
 # Planning and tooling artifacts stay local. This repository is the deliverable,
-# not the process that produced it.
+# not the process that produced it. Anything here that earns publication gets
+# added deliberately with `git add -f`, never by accident.
 _bmad/
 _bmad-output/
 .memlog.md
 .claude/
+docs/
 
 # Python
 __pycache__/
