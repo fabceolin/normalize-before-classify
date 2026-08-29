@@ -236,8 +236,11 @@ alphabet is sixty-four characters wide and therefore claims ordinary CamelCase i
 floor is where the noise stops rather than where decoding stops being possible: over this
 repository's own `src/**/*.py`, a floor of 16 makes 193 candidate runs and a floor of 24 makes 5.
 `tests/canon/test_decode.py` re-measures that and requires the reduction, so the number is compared
-to its evidence. The cost, stated: a plaintext shorter than eighteen bytes is not recovered from
-base64.
+to its evidence. The cost, stated: a plaintext shorter than **sixteen** bytes is not recovered
+from base64 -- twenty-four characters carry *up to* eighteen bytes, but sixteen bytes already
+produce twenty-four characters once the padding is counted, and story 3.4's
+`corpus/roundtrip.py::min_payload_bytes` derives that number from this constant rather than
+restating it. This paragraph said eighteen until the derivation existed to contradict it.
 
 **`min_entropy_bits_per_char = 3.0`** — base64 of ASCII text measures about 4.4 to 5.2 bits per
 character and the floor sits well below that, because a *short* base64 run of repetitive plaintext

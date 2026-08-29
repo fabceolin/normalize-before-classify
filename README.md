@@ -257,8 +257,8 @@ expansion, not this. Measuring it is future work and is not attempted here.
 
 **7. Part of the recall recovery is true by construction, and you should discount it accordingly.** The
 code that encodes the payloads and the layer that decodes them draw on the same character tables, bound by
-a test that fails the build if the layer does not undo its own corpus's dressing. That binding exists for a
-good reason — without it the layer could silently fail to strip a character it emitted, quietly depressing
+a test that fails the build if the layer does not undo its own corpus's dressing — `tests/corpus/test_roundtrip.py`,
+over the contract in `src/nbc/corpus/roundtrip.py`. That binding exists for a good reason — without it the layer could silently fail to strip a character it emitted, quietly depressing
 the headline number with nothing failing loudly — but it has a consequence worth stating plainly: on the
 dressings the layer was written for, the canonicalized encoded document *is* the canonicalized clean
 document, so recovery is total by definition and could not have come out any other way. That column shows
@@ -270,6 +270,14 @@ in their own registry and exempt from the binding above precisely so that someth
 badly. Read those. One held-out encoding, `rot13`, is included knowing the layer cannot touch it: it is
 there to mark the boundary of what normalization can reach, not to be recovered, and it is reported and
 excluded from the pass/fail condition for that reason.
+
+Two things the binding does **not** cover, named here rather than left for a reader to find. A chain is
+exempt only by being held out — the scope is a filter over the registries, so a bound chain cannot be
+excused by anyone adding it to anything. And a payload the layer declines to decode by its own published
+candidate floor — shorter than sixteen bytes, or repetitive enough to fall under the entropy floor — is
+exempt from the round trip and **counted**: the corpus build's draw report publishes
+`payloads_below_decode_floor`, how many drawn payloads carry rows that no ceiling and no character mapping
+will recover. Divide it by the drawn positives before reading the encoded columns.
 
 **8.** *(reserved for what the run actually revealed — written after the numbers exist)*
 

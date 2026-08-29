@@ -23,10 +23,10 @@ held-out halves of the table from collapsing into each other: a bound dressing c
 character the layer has never heard of, and a held-out encoding cannot be built out of the layer's
 own alphabet.
 
-**What is not here.** The round-trip contract -- `canonicalize(d(p)).text == canonicalize(p).text`
-over the built corpus, under a raised test-only ceiling -- is story 3.4's, and so is the
-statement of its scope. This module supplies the character source that makes it satisfiable; it
-does not claim the contract holds.
+**What is not here.** The round-trip contract -- `canonicalize(d(p)).text == canonicalize(p).text`,
+under a raised test-only ceiling -- is `corpus/roundtrip.py`, and so is the statement of its scope.
+This module supplies the character source that makes it satisfiable; the claim that the layer
+actually undoes what is emitted here is made, and checked, there.
 """
 
 from __future__ import annotations
@@ -78,9 +78,12 @@ def to_base64(text: str) -> str:
 
     **No wrapper.** No `decode this:` prefix, no delimiters. A wrapper would add plaintext that is
     not the payload, and the recall column would then be partly a measurement of whether the
-    classifier reacts to the wrapper. The cost, stated: a payload shorter than eighteen bytes
+    classifier reacts to the wrapper. The cost, stated: a payload shorter than **sixteen** bytes
     produces a run below the layer's `min_encoded_chars` and is not recovered -- the same floor
-    `decode.py` already publishes.
+    `decode.py` publishes, and the number is derived from it by
+    `corpus/roundtrip.py::min_payload_bytes` rather than written down here. This sentence said
+    eighteen until that derivation existed: twenty-four base64 characters carry up to eighteen
+    bytes, but sixteen bytes already produce twenty-four characters with padding.
     """
     return _base64.b64encode(text.encode("utf-8")).decode("ascii")
 

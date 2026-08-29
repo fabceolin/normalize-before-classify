@@ -117,6 +117,11 @@ STAGE_IMPORTERS: dict[str, str] = {
         "zero-width dressing, per story 3.4's requirement that the dressings and the layer share "
         "one character source. It calls no entry point, which the test below enforces"
     ),
+    "nbc/corpus/roundtrip.py": (
+        "reads decode.BASE64, decode.HEX and decode.shannon_bits_per_char to scope the round-trip "
+        "contract by the layer's own published candidate floors rather than by a second "
+        "declaration of them. It calls no entry point, which the test below enforces"
+    ),
 }
 """Every module under `src/` that may import a stage module at all, each with its reason.
 

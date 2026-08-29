@@ -54,6 +54,7 @@ from typing import Callable, Final, Iterable, Mapping, Sequence
 
 from nbc.corpus.dressings import dress
 from nbc.corpus.exclusion import ExclusionIndex, filter_rows
+from nbc.corpus.roundtrip import payloads_below_decode_floor
 from nbc.corpus.matrix import (
     CHAINS,
     CLEAN_CHAIN,
@@ -356,6 +357,7 @@ class AttackDrawReport:
     rows_by_split: Mapping[str, int]
     positives_by_split: Mapping[str, int]
     blank_positive_rows: int
+    payloads_below_decode_floor: int
     unique_positives: int
     removed_by_exclusion: int
     surviving_positives: int
@@ -379,6 +381,14 @@ class AttackDrawReport:
                 # discrepancy this project already shipped came from a truncation nobody
                 # reported, and it was found by rederiving a number rather than by reading one.
                 "blank_positive_rows": self.blank_positive_rows,
+                # Story 3.4's round-trip contract exempts a payload the layer declines by its own
+                # published candidate floor -- too short, or too repetitive, for `decode.py` to
+                # open. The exemption is structural and narrow, and it is counted here because an
+                # exemption nobody counts is an exemption nobody can size: these payloads carry
+                # rows on every encoded chain that no ceiling and no character mapping will
+                # recover, and a reader dividing this by `drawn_positives` knows how much of the
+                # encoded columns is unrecoverable before any classifier ran.
+                "payloads_below_decode_floor": self.payloads_below_decode_floor,
                 "unique_positives": self.unique_positives,
                 "removed_by_exclusion": self.removed_by_exclusion,
                 "surviving_positives": self.surviving_positives,
@@ -468,6 +478,9 @@ def draw_attack_items(
         rows_by_split=_count_by_split(rows),
         positives_by_split=_count_by_split(positive_rows),
         blank_positive_rows=blank,
+        payloads_below_decode_floor=len(
+            payloads_below_decode_floor(drawn, [tuple(chain) for chain in chains])
+        ),
         unique_positives=len(unique_positives),
         removed_by_exclusion=len(filtered.removed),
         surviving_positives=len(survivors),
