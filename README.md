@@ -204,11 +204,24 @@ on attacks it has seen, and the false-positive rate looks better on benign text 
 Reading model cards is not enough to catch this. The attack corpus used here declares on its own card that
 it was seeded from two datasets that one of the baselines declares training on, one hop that no model card
 reveals; measured literally, that reached **48% of the benign rows and 17% of the attack rows** before
-filtering. So the build downloads every declared training source it can and removes every corpus row that
-appears in one, and reports how many rows each source removed. What remains undeclared or unreachable
-remains a limit: one training source common to **both** baselines is access-restricted and returns HTTP
-401, so overlap against it is unmeasurable for any corpus this experiment could have chosen. That is stated
-here rather than quietly assumed to be zero. And that one source is a floor on what is missing, not a
+filtering. Read those two figures as a floor rather than as the removal: they were measured against those
+two seeds alone, and the exclusion set the build actually applies is wider — every source either baseline
+declares training on, plus every seed the attack dataset's own card names, twelve today, each pinned in
+`pins.toml` by repository and — where the hub will resolve one — revision, and derived from those
+declarations rather than listed beside them,
+so a lineage that grows and an exclusion set that does not is a file that no longer loads. Two texts are
+the same row under a declared normalization: NFKC, lowercased, whitespace collapsed. So the build downloads
+every declared training source it can and removes every corpus row that appears in one, and reports how
+many rows each source removed. What remains undeclared or unreachable remains a limit, and there are two
+of those. One training source common to **both** baselines is access-restricted and returns HTTP 401, so
+overlap against it is unmeasurable for any corpus this experiment could have chosen. A second — one of the
+four seeds the attack dataset names — resolves at its pinned commit and publishes its rows through a
+loading script the pinned reader refuses, so its overlap is unmeasurable too, for a different reason and
+with a different remedy. Both are stated here rather than quietly assumed to be zero: each is named in the
+results with the status it returned and the refusal it raised, its removal count is reported as absent
+rather than as zero, and the pins record which of the two failures it is. Neither is one of the two seeds
+the declared one-hop reach runs through — those two the build may not proceed without, and it aborts if it
+cannot read them. And that one source is a floor on what is missing, not a
 full accounting: the primary baseline's card names far fewer training datasets in prose than its own
 metadata tallies, so the number of sources this filter never sees is itself unknown. What the filter
 reaches is what the cards name and what can be downloaded, which is not the same as what these models

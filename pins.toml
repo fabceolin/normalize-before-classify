@@ -323,3 +323,169 @@ licence, find a licensed pool that clears the same AD-26 lineage bar, or state a
 position in the README and accept the exposure. Recorded here so the decision is taken before the \
 corpus is built rather than after it ships.\
 """
+
+# --- exclusion sources -------------------------------------------------------------------------
+#
+# Every source the corpus build must remove the corpus' overlap with, pinned with the same
+# seriousness as the corpus itself, because a moving exclusion set silently changes which rows
+# survive.
+#
+# **This array is derived, not chosen.** `load_pins` computes the set from the two blocks above --
+# every source a baseline declares `trained-on`, plus every seed a pinned dataset's own card names
+# -- and refuses this file when the array and that set disagree in either direction. Adding a
+# training source above and forgetting to pin it here is a load failure, not a source the filter
+# silently never downloads. That is why no entry restates *why* it is here: a restated reason is a
+# second place the obligation can drift from the declarations that create it.
+#
+# The strictly smaller set the *declared hops* oblige is `Pins.required_exclusion_sources()`, which
+# today is `VMware/open-instruct` and `jackhhao/jailbreak-classification`. The corpus build must
+# actually download and intersect those two or abort; the rest are removed where they can be read
+# and named where they cannot.
+#
+# **Every `revision` below was resolved from the live hub on `checked_on`**, unauthenticated, at
+# `https://huggingface.co/api/datasets/<id>`. `http_status` is what that request answered, and it
+# is not decoration: the build probes each source and compares the status it observes against this
+# number, in both directions.
+#
+# `checked_on` is metadata here and not a gate, unlike the `card_revision` fields above. There is
+# no card being read and no reading to go stale: what these entries claim about the world is
+# `revision` and `http_status`, and both are compared against the live hub -- the revision by
+# `python -m nbc.pins --verify` and the status by the build's own probe. The date says when a human
+# last looked, and nothing rests on it.
+
+[[exclusion_source]]
+key = "natolambert-xstest-v2-copy"
+repository = "natolambert/xstest-v2-copy"
+revision = "b71afe2a6d10e5a6254ea8bcb006c48b095a15d5"
+availability = "available"
+http_status = 200
+checked_on = "2026-08-29"
+evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[[exclusion_source]]
+key = "vmware-open-instruct"
+repository = "VMware/open-instruct"
+revision = "9e53e85f37988e3bfbebbee4dc9ad4942cfd37fa"
+availability = "available"
+http_status = 200
+checked_on = "2026-08-29"
+# One of the two seeds a declared hop makes REQUIRED: the primary baseline declares training on
+# it and the pinned attack dataset's card names it among the four it was built from.
+evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[[exclusion_source]]
+key = "alespalla-chatbot-instruction-prompts"
+repository = "alespalla/chatbot_instruction_prompts"
+revision = "6ea5ce09647e5451860801a46db6a46b28e259bf"
+availability = "available"
+http_status = 200
+checked_on = "2026-08-29"
+evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[[exclusion_source]]
+key = "huggingfaceh4-grok-conversation-harmless"
+repository = "HuggingFaceH4/grok-conversation-harmless"
+revision = "01185ad52860775c65cbd6d0c9254ac8e9089fe0"
+availability = "available"
+http_status = 200
+checked_on = "2026-08-29"
+# Its text lives inside nested `messages`/`chosen`/`rejected` lists of role/content records, not
+# in a top-level string column. That is why the build walks a row for every string it holds
+# rather than reading a declared column name per source.
+evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[[exclusion_source]]
+key = "harelix-prompt-injection-mixed-techniques-2024"
+repository = "Harelix/Prompt-Injection-Mixed-Techniques-2024"
+# NO REVISION, and the absence is the declaration. A 401 hands back no commit, so there is no sha
+# to pin; a placeholder here would be a revision this file cannot say where it came from. The
+# reader refuses an entry the hub answers for that carries no revision, and an `unreachable` entry
+# that carries one, so neither shape is silent.
+#
+# This is the source declared by BOTH pinned baselines, and the one caveat 3d in the README names:
+# overlap against it is unmeasurable for any corpus this experiment could have chosen. It is
+# reported as unmeasured, never as zero.
+availability = "unreachable"
+http_status = 401
+checked_on = "2026-08-29"
+evidence = "hub API answered 401 (gated or private) with no sha, unauthenticated"
+
+[[exclusion_source]]
+key = "opensafetylab-salad-data"
+repository = "OpenSafetyLab/Salad-Data"
+revision = "d21a325e276a99bd69b1fbb8aa51a9f249486b72"
+availability = "available"
+http_status = 200
+checked_on = "2026-08-29"
+evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[[exclusion_source]]
+key = "jackhhao-jailbreak-classification"
+repository = "jackhhao/jailbreak-classification"
+revision = "2f2ceeb39658696fd3f462403562b6eea5306287"
+availability = "available"
+http_status = 200
+checked_on = "2026-08-29"
+# The second of the two REQUIRED seeds.
+evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[[exclusion_source]]
+key = "rubend18-chatgpt-jailbreak-prompts"
+repository = "rubend18/ChatGPT-Jailbreak-Prompts"
+revision = "b93e4982f8f8ad2d82c6d35e3c00d161844ad70a"
+availability = "available"
+http_status = 200
+checked_on = "2026-08-29"
+evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[[exclusion_source]]
+key = "deepset-prompt-injections"
+repository = "deepset/prompt-injections"
+revision = "4f61ecb038e9c3fb77e21034b22511b523772cdd"
+availability = "available"
+http_status = 200
+checked_on = "2026-08-29"
+evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[[exclusion_source]]
+key = "jasperls-prompt-injections"
+repository = "JasperLS/prompt-injections"
+revision = "9f62f4a9788f030e52fe85a816b338f507c48187"
+availability = "available"
+http_status = 200
+checked_on = "2026-08-29"
+evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[[exclusion_source]]
+key = "huggingfaceh4-helpful-instructions"
+repository = "HuggingFaceH4/helpful_instructions"
+revision = "ae2e0b22166b6369dd67e516f751b05cbf314e9b"
+# The SECOND source this filter cannot read, and it fails in a different way from the 401 above:
+# the hub answers 200 and the sha resolves, so this pin is verified like every other one -- and
+# the repository publishes its rows through a `helpful_instructions.py` loading script, which the
+# pinned `datasets` 5.0.1 refuses outright ("Dataset scripts are no longer supported"). Reading it
+# would mean unpinning the reader, which trades a named gap for an unnamed one.
+#
+# This is one of the four seeds the pinned attack dataset's own card names, so it is a real hole in
+# the exclusion set and it is reported as one. It is NOT one of the two seeds a declared hop
+# requires: no baseline's card declares training on it, so the build proceeds and names it.
+availability = "unreadable"
+http_status = 200
+checked_on = "2026-08-29"
+evidence = """\
+hub API answered 200 with this sha, unauthenticated; datasets==5.0.1 refuses the repository with \
+`RuntimeError: Dataset scripts are no longer supported, but found helpful_instructions.py`\
+"""
+
+[[exclusion_source]]
+key = "fka-awesome-chatgpt-prompts"
+repository = "fka/awesome-chatgpt-prompts"
+revision = "e6da2332534f7b940358dc167fce4cbcdabae486"
+availability = "available"
+http_status = 200
+checked_on = "2026-08-29"
+# The id above is the one the pinned dataset's card names, and it is the one pinned here. The hub
+# answers it with canonical id `fka/prompts.chat`: the repository was renamed and the old id still
+# resolves. Recorded because a reader comparing this file against the hub's page will see a
+# different name and needs to know it is the same artifact, not a mis-pin.
+evidence = "hub API answered 200 with this sha, unauthenticated; canonical id is fka/prompts.chat"

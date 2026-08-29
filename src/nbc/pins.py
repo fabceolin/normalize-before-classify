@@ -45,7 +45,13 @@ so a rule can read it instead of a person:
    aborts, which is the failure that got through twice.
 
 The third tooth -- measured text overlap, computed and removed at build time -- is the corpus
-builder's, not this module's. This module states the obligation; `corpus/` discharges it.
+builder's, not this module's. This module states the obligation; `corpus/` discharges it. What
+this module adds is that the obligation is now *pinned*: `[[exclusion_source]]` names every
+source the two declaration blocks imply -- every source a baseline declares `trained-on`, and
+every seed a pinned dataset's own card names -- and the file is refused when that array and the
+derived set disagree in either direction. One of those sources answers HTTP 401 and hands back
+no commit, so it is declared `unavailable` with the status it returns and pinned without a
+revision, which is the only shape that is honest about it.
 
 **A check that was never re-run after a pin moved is visible rather than assumed.** Every lineage
 and provenance declaration records the card revision it was performed against, and the file is
@@ -84,8 +90,14 @@ from nbc.errors import NbcError
 
 __all__ = [
     "AttackDataset",
+    "ExclusionSource",
     "Baseline",
     "BaselineIneligible",
+    "EXCLUSION_AVAILABILITIES",
+    "EXCLUSION_AVAILABLE",
+    "EXCLUSION_UNREACHABLE",
+    "EXCLUSION_UNREADABLE",
+    "HTTP_OK",
     "LINEAGE_RELATIONSHIPS",
     "Lineage",
     "Licence",
@@ -113,6 +125,7 @@ __all__ = [
     "TRAINED_ON",
     "TRAINING_SOURCE_RELATIONSHIPS",
     "WINDOW_POLICIES",
+    "canonical_source_id",
     "hf_cache_root",
     "load_pins",
     "main",
@@ -222,6 +235,42 @@ TRAINING_SOURCE_RELATIONSHIPS: Final[frozenset[str]] = frozenset({NOT_DECLARED, 
 *dataset*, reached through a seed. A relationship to the seed itself is only ever read from the
 baseline's own card, so it is declared or it is not.
 """
+
+EXCLUSION_AVAILABLE: Final[str] = "available"
+"""The hub answers for this source and the pinned reader returns its rows."""
+
+EXCLUSION_UNREACHABLE: Final[str] = "unreachable"
+"""The hub does not answer for this source at all, so there is not even a revision to pin.
+
+An access-restricted training source contributes an unknown number of overlapping rows, not
+zero. Declaring it here is what lets the corpus build *name* it in the results instead of
+leaving a reader to assume the filter reached everything it lists.
+"""
+
+EXCLUSION_UNREADABLE: Final[str] = "unreadable"
+"""The hub answers, the revision pins, and the pinned reader refuses to load the rows.
+
+A distinct value rather than a shade of `unreachable`, because the two are different facts with
+different evidence and different remedies. This one is a repository published as a loading
+script, which `datasets` 5 refuses outright: the sha resolves and `verify_revisions` checks it
+like any other pin, and the rows are still unreadable. Collapsing it into `unreachable` would
+mean discarding a revision that does resolve, and calling it `available` would mean the build
+crashes on a source the pins called fine.
+"""
+
+EXCLUSION_AVAILABILITIES: Final[frozenset[str]] = frozenset(
+    {EXCLUSION_AVAILABLE, EXCLUSION_UNREACHABLE, EXCLUSION_UNREADABLE}
+)
+"""What an `[[exclusion_source]]` may say about itself. Closed, because the build reads it.
+
+The build probes and loads each source and compares what it observes against this value, in
+**both** directions: a source declared available that no longer resolves or no longer loads, and
+a source declared unreachable or unreadable that suddenly works, are all moves in the exclusion
+set -- and a moving exclusion set silently changes which rows survive into the corpus.
+"""
+
+HTTP_OK: Final[int] = 200
+"""The status an `available` exclusion source must declare, and the one the build must observe."""
 
 _REDUCED_PRECISION: Final[re.Pattern[str]] = re.compile(
     r"fp16|float16|bf16|bfloat16|mixed|int8|uint8|quant|_q4|_q8", re.IGNORECASE
@@ -551,6 +600,18 @@ def _canonical(value: str) -> str:
     return re.sub(r"[\s_-]+", "", value.strip().casefold())
 
 
+def canonical_source_id(value: str) -> str:
+    """The comparison key a repository id is joined on, for a caller outside this module.
+
+    The corpus build joins `required_exclusion_sources()` against the `[[exclusion_source]]`
+    array, which is the same join `_canonical` already does inside this file for the one-hop
+    reach. A second spelling-folding rule in `corpus/` would be a second answer to "are these two
+    ids the same source", and the one place that question has ever been answered wrongly here is
+    exactly a second answer.
+    """
+    return _canonical(value)
+
+
 @dataclass(frozen=True, slots=True)
 class Provenance:
     """What a pinned dataset's *own card* says it was built from, and when that was read.
@@ -607,12 +668,20 @@ class RemoteArtifact:
         return root / self.cache_directory / "snapshots" / self.revision
 
     @property
-    def api_url(self) -> str:
+    def repository_url(self) -> str:
+        """The hub's API endpoint for the repository, with no revision in it.
+
+        Split out from `api_url` because one artifact this project pins has no revision to name:
+        an access-restricted exclusion source answers 401 and hands back no commit, so the only
+        URL that can be asked about it is this one. Both forms are built here so the hub's API
+        layout has a single home.
+        """
         endpoint = _KIND_ENDPOINT[self.kind]
-        return (
-            f"https://huggingface.co/api/{endpoint}/{self.repository}"
-            f"/revision/{self.revision}"
-        )
+        return f"https://huggingface.co/api/{endpoint}/{self.repository}"
+
+    @property
+    def api_url(self) -> str:
+        return f"{self.repository_url}/revision/{self.revision}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -700,6 +769,101 @@ class AttackDataset:
 
 
 @dataclass(frozen=True, slots=True)
+class ExclusionSource:
+    """One training source the corpus build must remove its overlap with, pinned.
+
+    The set these entries form is **derived** from the two lineage blocks and refused when it
+    disagrees with them (`Pins.derived_exclusion_sources()`), so this array carries identity and
+    reachability and never the reason -- a restated reason is a second place the obligation can
+    drift from the declarations that create it.
+
+    `revision` is absent exactly when `availability` is `unavailable`. A source that answers 401
+    hands back no commit, so there is no sha to pin; admitting a placeholder would put a fake
+    revision under a `revision` key. The absence is never silent: an `available` entry without a
+    revision is refused, and an `unavailable` entry with one is refused, because a sha for a
+    source nobody can read came from somewhere this file cannot name.
+
+    `http_status` is the declared status, and it is not decoration: the build probes `probe_url`
+    and compares what it observes against this number, so `Harelix/...`'s 401 is a checked fact
+    rather than a sentence in a comment.
+    """
+
+    key: str
+    repository: str
+    revision: str
+    availability: str
+    http_status: int
+    checked_on: str
+    evidence: str
+
+    @property
+    def resolvable(self) -> bool:
+        """Whether this source declares a revision the ordinary pin verification can resolve.
+
+        True for `unreadable` too: the sha resolves and must keep resolving even though nothing
+        can read the rows at it. That is the whole reason `unreadable` is not `unreachable`.
+        """
+        return bool(self.revision)
+
+    @property
+    def loadable(self) -> bool:
+        """Whether the pinned reader is expected to return this source's rows."""
+        return self.availability == EXCLUSION_AVAILABLE
+
+    @property
+    def artifact(self) -> RemoteArtifact:
+        return RemoteArtifact("dataset", self.repository, self.revision)
+
+    @property
+    def probe_url(self) -> str:
+        """What the build asks the hub about: the pinned revision, or the bare repository.
+
+        A source with no revision still has to be probed -- that is the whole point of declaring
+        it -- and the only question the hub can answer about it is whether the repository is
+        reachable at all.
+        """
+        return self.artifact.api_url if self.revision else self.artifact.repository_url
+
+    def as_run_fields(self) -> dict[str, object]:
+        return {
+            "key": self.key,
+            "repository": self.repository,
+            "revision": self.revision,
+            "availability": self.availability,
+            "http_status": self.http_status,
+            "checked_on": self.checked_on,
+            "evidence": self.evidence,
+        }
+
+
+def _derived_exclusion_sources(
+    baselines: Sequence["Baseline"], attack_datasets: Sequence["AttackDataset"]
+) -> dict[str, str]:
+    """Canonical id -> raw spelling, for every source the build owes the corpus a removal against.
+
+    Two contributors, both read from declarations already in this file:
+
+    - every source a baseline declares `trained-on`, because a corpus row that appears in one is
+      text that baseline was taught, and the counter-metric is the number that suffers most;
+    - every source a pinned dataset's own card names as a seed, because the dataset is that
+      source at one remove whether or not any baseline declares the hop today.
+
+    Derived rather than restated, so the `[[exclusion_source]]` array cannot drift away from the
+    declarations that create the obligation. `Pins.required_exclusion_sources()` is the strictly
+    smaller set the *declared hops* oblige, and it is what the build must actually download.
+    """
+    derived: dict[str, str] = {}
+    for baseline in baselines:
+        for source, relationship in baseline.lineage.training_sources.items():
+            if relationship == TRAINED_ON:
+                derived.setdefault(_canonical(source), source)
+    for dataset in attack_datasets:
+        for seed in dataset.provenance.seeds:
+            derived.setdefault(_canonical(seed), seed)
+    return {key: value for key, value in derived.items() if key}
+
+
+@dataclass(frozen=True, slots=True)
 class Pins:
     """Every remote artifact this project touches, as data."""
 
@@ -708,12 +872,33 @@ class Pins:
     verified_against: str
     baselines: tuple[Baseline, ...]
     attack_datasets: tuple[AttackDataset, ...]
+    exclusion_sources: tuple[ExclusionSource, ...]
     path: Path
 
     def remote_artifacts(self) -> tuple[RemoteArtifact, ...]:
+        """Every pinned artifact whose revision `verify_revisions` can ask the world about.
+
+        Exclusion sources are in here, and that is the point: their revisions decide which rows
+        survive into the corpus, so a pin that quietly stopped resolving has to fail the same
+        gate every other pin fails. The one that declares no revision is not in here, because
+        there is no sha to compare -- the corpus build probes it instead, and compares the
+        status it observes against the status this file declares.
+        """
         return tuple(
             [baseline.artifact for baseline in self.baselines]
             + [dataset.artifact for dataset in self.attack_datasets]
+            + [source.artifact for source in self.exclusion_sources if source.resolvable]
+        )
+
+    def derived_exclusion_sources(self) -> tuple[str, ...]:
+        """Every source the lineage and provenance blocks imply the build must remove against.
+
+        `load_pins` refuses a file whose `[[exclusion_source]]` array is not exactly this set, so
+        adding a training source or a seed and forgetting to pin it is a load failure rather than
+        a source the filter silently never sees.
+        """
+        return tuple(
+            sorted(_derived_exclusion_sources(self.baselines, self.attack_datasets).values())
         )
 
     def one_hop_reaches(self) -> dict[tuple[str, str], tuple[str, ...]]:
@@ -758,9 +943,15 @@ class Pins:
                 "attack_datasets": [
                     dataset.as_run_fields() for dataset in self.attack_datasets
                 ],
+                "exclusion_sources": [
+                    source.as_run_fields() for source in self.exclusion_sources
+                ],
                 # Derived, not declared: a reader can recompute it from the two blocks above,
                 # and the corpus build reads it rather than a second copy of the same list.
                 "required_exclusion_sources": list(self.required_exclusion_sources()),
+                # The wider set: what a declared hop obliges is a subset of what the two lineage
+                # blocks imply, and the array above must name exactly this.
+                "derived_exclusion_sources": list(self.derived_exclusion_sources()),
             }
         }
 
@@ -1314,6 +1505,90 @@ def _read_attack_dataset(
     )
 
 
+def _read_exclusion_source(
+    reader: _Reader, table: Mapping[str, Any], index: int
+) -> ExclusionSource:
+    where = f"exclusion_source[{index}]"
+    key = reader.string(table, "key", where)
+    if key:
+        where = f"exclusion_source[{index}] ({key})"
+
+    repository = reader.matching(
+        reader.string(table, "repository", where),
+        _REPOSITORY,
+        f"{where}.repository",
+        "a `namespace/name` repository id",
+    )
+
+    availability = reader.string(table, "availability", where)
+    if availability and availability not in EXCLUSION_AVAILABILITIES:
+        reader.note(
+            f"{where}.availability is {availability!r}, and the admitted values are "
+            f"{', '.join(sorted(EXCLUSION_AVAILABILITIES))}. The corpus build reads this value "
+            f"and compares it against what the hub actually answers, so a spelling nothing "
+            f"matches would leave the comparison to a reader"
+        )
+
+    http_status = reader.integer(table, "http_status", where)
+    if "http_status" in table and not 100 <= http_status <= 599:
+        reader.note(
+            f"{where}.http_status must be an HTTP status code, got {http_status!r}"
+        )
+
+    # The revision, the status and the availability decide each other, in both directions. A
+    # source the hub does not answer for hands back no commit, so a sha beside `unreachable`
+    # came from somewhere this file cannot name; and any source the hub DOES answer for is
+    # pinned by revision like every other artifact here, whether or not its rows can be read,
+    # because a moving exclusion set silently changes which rows survive into the corpus.
+    declared_revision = table.get("revision")
+    revision = ""
+    if availability in {EXCLUSION_AVAILABLE, EXCLUSION_UNREADABLE}:
+        if declared_revision is None:
+            reader.note(
+                f"{where}.revision is missing and this source declares itself "
+                f"{availability!r}; the hub answers for it, so it resolves to a commit and is "
+                f"pinned by it like every other artifact in this file"
+            )
+        else:
+            revision = reader.matching(
+                reader.string(table, "revision", where),
+                _SHA,
+                f"{where}.revision",
+                "a 40-character lowercase hex commit sha",
+            )
+        if "http_status" in table and http_status != HTTP_OK:
+            reader.note(
+                f"{where} declares {availability!r} and http_status {http_status}; both "
+                f"{EXCLUSION_AVAILABLE!r} and {EXCLUSION_UNREADABLE!r} describe a source the "
+                f"hub answers {HTTP_OK} for -- they differ in whether its rows load, not in "
+                f"whether it resolves"
+            )
+    elif availability == EXCLUSION_UNREACHABLE:
+        if declared_revision is not None:
+            reader.note(
+                f"{where}.revision is declared and this source declares itself "
+                f"{EXCLUSION_UNREACHABLE!r}; a source the hub does not answer for hands back no "
+                f"commit, so a revision here was copied from somewhere this file cannot name"
+            )
+        if "http_status" in table and http_status == HTTP_OK:
+            reader.note(
+                f"{where} declares {EXCLUSION_UNREACHABLE!r} and http_status {HTTP_OK}, which "
+                f"is the status of a source the hub answers for"
+            )
+
+    return ExclusionSource(
+        key=key,
+        repository=repository,
+        revision=revision,
+        availability=availability,
+        http_status=http_status,
+        checked_on=reader.calendar_date(
+            reader.string(table, "checked_on", where), f"{where}.checked_on"
+        ),
+        evidence=reader.string(table, "evidence", where),
+    )
+
+
 def _note_stale_check(
     reader: _Reader,
     where: str,
@@ -1524,17 +1799,24 @@ def load_pins(root: Path | str | None = None) -> Pins:
         _read_attack_dataset(reader, table, index)
         for index, table in enumerate(_entries(reader, document, "attack_dataset"))
     )
+    exclusion_sources = tuple(
+        _read_exclusion_source(reader, table, index)
+        for index, table in enumerate(_entries(reader, document, "exclusion_source"))
+    )
 
     _note_duplicates(reader, "baseline", [b.key for b in baselines], "key")
     _note_duplicates(reader, "attack_dataset", [d.key for d in attack_datasets], "key")
+    _note_duplicates(reader, "exclusion_source", [s.key for s in exclusion_sources], "key")
     # Across sections, not within them. Hugging Face keeps models and datasets in separate
     # namespaces, so one id can legally name both -- and `verify_revisions` reports its
     # resolutions by repository id, where two artifacts sharing one would collapse into one
     # line and one of the two pins would go unreported while looking verified.
     _note_duplicates(
         reader,
-        "baseline/attack_dataset",
-        [b.repository for b in baselines] + [d.repository for d in attack_datasets],
+        "baseline/attack_dataset/exclusion_source",
+        [b.repository for b in baselines]
+        + [d.repository for d in attack_datasets]
+        + [s.repository for s in exclusion_sources],
         "repository",
     )
 
@@ -1588,6 +1870,35 @@ def load_pins(root: Path | str | None = None) -> Pins:
                     f"to remove and no exclusion source the declaration would buy"
                 )
 
+    # The exclusion array against the declarations that create the obligation, in both
+    # directions. A missing entry is a training source the filter never downloads and therefore
+    # never removes; an extra entry is a source pinned for a reason that has stopped being true,
+    # which is how an exclusion set outlives the lineage it came from. The comparison is on the
+    # canonical form because the hub resolves ids case-insensitively and the two blocks are
+    # written by hand from two different cards.
+    declared_exclusions: dict[str, str] = {}
+    for source in exclusion_sources:
+        if source.repository:
+            declared_exclusions.setdefault(_canonical(source.repository), source.repository)
+    derived_exclusions = _derived_exclusion_sources(baselines, attack_datasets)
+    for missing in sorted(
+        derived_exclusions[name] for name in derived_exclusions.keys() - declared_exclusions.keys()
+    ):
+        reader.note(
+            f"no [[exclusion_source]] pins {missing}, which this file declares either as a "
+            f"training source of a pinned baseline or as a seed on a pinned dataset's own card; "
+            f"a corpus row that appears in it is text a baseline was taught to call safe, and a "
+            f"source the build never downloads is one it silently treats as contributing zero"
+        )
+    for extra in sorted(
+        declared_exclusions[name] for name in declared_exclusions.keys() - derived_exclusions.keys()
+    ):
+        reader.note(
+            f"[[exclusion_source]] pins {extra}, which no pinned baseline declares training on "
+            f"and no pinned dataset's card names as a seed; an exclusion source nothing derives "
+            f"removes rows from the corpus for a reason this file no longer states"
+        )
+
     if problems:
         raise PinsFileInvalid(*problems)
 
@@ -1601,6 +1912,7 @@ def load_pins(root: Path | str | None = None) -> Pins:
         verified_against=verified_against,
         baselines=baselines,
         attack_datasets=attack_datasets,
+        exclusion_sources=exclusion_sources,
         path=path,
     )
 

@@ -25,6 +25,10 @@ import pytest
 import nbc
 from nbc import pins as pins_module
 from nbc.pins import (
+    EXCLUSION_AVAILABLE,
+    EXCLUSION_UNREACHABLE,
+    EXCLUSION_UNREADABLE,
+    HTTP_OK,
     LINEAGE_RELATIONSHIPS,
     MINIMUM_BASELINES,
     NOT_DECLARED,
@@ -59,6 +63,7 @@ from nbc.pins import (
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_D = "d" * 40
+SHA_E = "e" * 40
 
 # The pinned dataset's card names four seeds and one baseline declares training on two of them.
 # The fixtures keep that shape -- two seeds, neither declared by default -- so a test that wants
@@ -151,17 +156,51 @@ def _dataset(**overrides: Any) -> dict[str, Any]:
     return entry
 
 
+def _exclusion_source(repository: str, **overrides: Any) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "key": repository.replace("/", "-"),
+        "repository": repository,
+        "revision": SHA_E,
+        "availability": EXCLUSION_AVAILABLE,
+        "http_status": HTTP_OK,
+        "checked_on": "2026-08-29",
+        "evidence": "fixture",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _derived_exclusions(
+    baselines: list[dict[str, Any]], datasets: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The array `load_pins` requires, computed from the fixture's own two lineage blocks.
+
+    The fixture builds a *loadable* file, so it has to satisfy the derivation gate the same way
+    `pins.toml` does. Every test that wants the gate to fire overrides `exclusion_source`
+    explicitly -- which is the only way the two sides of that comparison come from different
+    places.
+    """
+    names: list[str] = []
+    for entry in baselines:
+        for source, relationship in entry.get("lineage", {}).get(
+            "training_sources", {}
+        ).items():
+            if relationship == TRAINED_ON and source not in names:
+                names.append(source)
+    for entry in datasets:
+        for seed in entry.get("provenance", {}).get("seeds", []):
+            if seed not in names:
+                names.append(seed)
+    return [_exclusion_source(name) for name in names]
+
+
 def _document(
     baselines: list[dict[str, Any]] | None = None,
     datasets: list[dict[str, Any]] | None = None,
+    exclusion_sources: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "meta": {
-            "schema_version": SCHEMA_VERSION,
-            "verified_on": "2026-08-28",
-            "verified_against": "the live artifacts",
-        },
-        "baseline": baselines
+    resolved_baselines = (
+        baselines
         if baselines is not None
         else [
             _baseline(),
@@ -172,8 +211,20 @@ def _document(
                 architecture_family="bert",
                 tokenizer_family="wordpiece",
             ),
-        ],
-        "attack_dataset": datasets if datasets is not None else [_dataset()],
+        ]
+    )
+    resolved_datasets = datasets if datasets is not None else [_dataset()]
+    return {
+        "meta": {
+            "schema_version": SCHEMA_VERSION,
+            "verified_on": "2026-08-28",
+            "verified_against": "the live artifacts",
+        },
+        "baseline": resolved_baselines,
+        "attack_dataset": resolved_datasets,
+        "exclusion_source": exclusion_sources
+        if exclusion_sources is not None
+        else _derived_exclusions(resolved_baselines, resolved_datasets),
     }
 
 
@@ -214,6 +265,8 @@ def write_pins(root: Path, document: dict[str, Any]) -> Path:
         _write_table(lines, "baseline", entry, array=True)
     for entry in document.get("attack_dataset", []):
         _write_table(lines, "attack_dataset", entry, array=True)
+    for entry in document.get("exclusion_source", []):
+        _write_table(lines, "exclusion_source", entry, array=True)
     path = root / PINS_FILENAME
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -816,9 +869,14 @@ def test_a_training_source_that_is_nobody_s_seed_is_admitted(tmp_path: Path) -> 
     document["baseline"][0]["lineage"]["training_sources"]["example/some-other-corpus"] = (
         TRAINED_ON
     )
+    # Admitted, but not for free: a declared training source is an exclusion source whether or
+    # not any dataset names it as a seed, so the array has to grow with it or the file is
+    # refused. That is the obligation this record buys.
+    document["exclusion_source"].append(_exclusion_source("example/some-other-corpus"))
     write_pins(tmp_path, document)
 
     pins = load_pins(tmp_path)
+    assert "example/some-other-corpus" in pins.derived_exclusion_sources()
     assert pins.baselines[0].lineage.trains_on("example/some-other-corpus")
     assert pins.required_exclusion_sources() == ()
 
@@ -1072,6 +1130,11 @@ def test_verification_passes_when_every_pin_resolves_to_itself(tmp_path: Path) -
         "example/first-model": f"{SHA_A}@{CHECKED_AGAINST_HUB}",
         "example/second-model": f"{SHA_B}@{CHECKED_AGAINST_HUB}",
         "example/attacks": f"{SHA_D}@{CHECKED_AGAINST_HUB}",
+        # The exclusion sources are verified by the same gate as everything else: their
+        # revisions decide which rows survive into the corpus, so a pin that stopped resolving
+        # has to be as visible as a model that moved.
+        SEED_ONE: f"{SHA_E}@{CHECKED_AGAINST_HUB}",
+        SEED_TWO: f"{SHA_E}@{CHECKED_AGAINST_HUB}",
     }
 
 
@@ -1112,7 +1175,11 @@ def test_an_unresolvable_pin_aborts_rather_than_passing_quietly(tmp_path: Path) 
 
     with pytest.raises(PinMismatch) as abort:
         verify_revisions(pins, lambda artifact: None)
-    assert len(abort.value.problems) == 3
+    # One problem per artifact the pins name, read from the pins rather than transcribed: a
+    # count written here as a literal would stop tracking the set it claims to describe the
+    # first time the file grew a section, which is exactly what it did.
+    assert len(abort.value.problems) == len(pins.remote_artifacts())
+    assert len(pins.remote_artifacts()) > len(pins.baselines)
     assert "could not be resolved" in str(abort.value)
 
 
@@ -1770,4 +1837,293 @@ def test_no_sha_repository_id_or_sample_size_is_hardcoded_in_a_test(
     assert not offenders, (
         "a pinned identifier is hardcoded in a test, so pins.toml is no longer the only place "
         f"it lives: {'; '.join(offenders)}"
+    )
+
+
+ACCESS_RESTRICTED_SOURCES = 1
+"""How many declared exclusion sources the hub does not answer for at all, today.
+
+Reviewed rather than derived: if this changes, the README's caveat about what the filter cannot
+reach changes with it, and a test that read the number out of the file would let both move
+together in silence.
+"""
+
+DECLARED_HOP_SEEDS = 2
+"""How many seeds the one declared `seeded-from-declared-training-source` runs through, today.
+
+Same reason. This is the size of the obligation the exemption bought, and the corpus build may
+not proceed without discharging every one of them.
+"""
+
+
+# --- the exclusion set is derived, not chosen -------------------------------------------------
+#
+# The obligation `seeded-from-declared-training-source` buys is discharged by the corpus build,
+# and until this section existed nothing forced anyone to discharge it: the exemption was granted
+# in this file and `required_exclusion_sources()` was read by nothing outside it. The gate below
+# is the other half -- the array of sources the build downloads cannot drift away from the two
+# declaration blocks that create the obligation.
+
+
+def test_the_committed_file_pins_every_source_its_declarations_derive(
+    committed_pins: Any,
+) -> None:
+    declared = {source.repository for source in committed_pins.exclusion_sources}
+
+    assert declared == set(committed_pins.derived_exclusion_sources())
+    assert set(committed_pins.required_exclusion_sources()) <= declared
+
+
+def test_the_committed_file_names_one_access_restricted_source_declared_by_both(
+    committed_pins: Any,
+) -> None:
+    """Caveat 3d publishes an HTTP 401 on a source **both** baselines declare. Checked here.
+
+    The repository id is deliberately not written out -- a test carrying one is a second home for
+    a pin. The claim is structural instead, and it is the claim the README actually makes: there
+    is exactly one unreadable source, it answers 401, it pins no revision because a 401 hands
+    back none, and every pinned baseline declares training on it. That last part is what makes it
+    unmeasurable for any corpus this experiment could have chosen rather than a limitation of one
+    pin, and it is the half a reader has no way to check for themselves.
+    """
+    unreachable = [
+        source
+        for source in committed_pins.exclusion_sources
+        if source.availability == EXCLUSION_UNREACHABLE
+    ]
+
+    assert len(unreachable) == ACCESS_RESTRICTED_SOURCES
+    source = unreachable[0]
+    assert source.http_status == 401
+    assert source.revision == ""
+    assert all(
+        baseline.lineage.trains_on(source.repository)
+        for baseline in committed_pins.baselines
+    )
+    assert len(committed_pins.baselines) >= MINIMUM_BASELINES
+
+
+def test_the_required_exclusion_set_is_exactly_what_a_declared_hop_bought(
+    committed_pins: Any,
+) -> None:
+    """Decision D-C's obligation, sized and characterized rather than transcribed.
+
+    Every required source must be both a seed on a pinned dataset's card and a training source
+    the baseline declares -- that conjunction is what "one hop" means. The count is asserted so
+    that a lineage edit changing which sources the build must remove against makes a human look,
+    which is the whole reason the number is reviewed rather than derived.
+    """
+    required = set(committed_pins.required_exclusion_sources())
+    seeds = {
+        seed
+        for dataset in committed_pins.attack_datasets
+        for seed in dataset.provenance.seeds
+    }
+
+    assert len(required) == DECLARED_HOP_SEEDS
+    assert required < seeds, "a required source that is nobody's seed is not a one-hop reach"
+    for name in required:
+        assert any(
+            baseline.lineage.trains_on(name) for baseline in committed_pins.baselines
+        ), name
+    assert required <= set(committed_pins.derived_exclusion_sources())
+
+
+def test_a_derived_source_nobody_pinned_is_refused(tmp_path: Path) -> None:
+    """The gate's failing input: drop one entry and the file stops loading."""
+    document = _document()
+    dropped = document["exclusion_source"].pop()
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+
+    assert dropped["repository"] in str(abort.value)
+    assert "no [[exclusion_source]] pins" in str(abort.value)
+
+
+def test_an_exclusion_source_nothing_derives_is_refused(tmp_path: Path) -> None:
+    """The other direction: a source pinned for a reason this file no longer states."""
+    document = _document()
+    document["exclusion_source"].append(_exclusion_source("example/nobody-declares-this"))
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+
+    assert "example/nobody-declares-this" in str(abort.value)
+
+
+def test_a_new_seed_cannot_drift_away_from_the_exclusion_array(tmp_path: Path) -> None:
+    """Decision D-C, as a mechanism: growing the reach without pinning it fails to load.
+
+    This is the shape the defect actually takes. Somebody re-reads a dataset card, adds the seed
+    it names, records the baseline's training on it -- and the build silently never downloads it,
+    because the exclusion set was a list somebody maintained by hand.
+    """
+    document = _document()
+    third = "example/seed-three"
+    document["attack_dataset"][0]["provenance"]["seeds"].append(third)
+    document["baseline"][0]["lineage"]["training_sources"][third] = TRAINED_ON
+    document["baseline"][1]["lineage"]["training_sources"][third] = NOT_DECLARED
+    document["baseline"][0]["lineage"]["attack_datasets"]["example/attacks"] = (
+        SEEDED_FROM_TRAINING_SOURCE
+    )
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+    assert third in str(abort.value)
+
+    # And with the entry added, the same file loads and the new seed is required.
+    document["exclusion_source"].append(_exclusion_source(third))
+    write_pins(tmp_path, document)
+    pins = load_pins(tmp_path)
+
+    assert third in pins.required_exclusion_sources()
+
+
+def test_the_two_blocks_are_joined_on_the_canonical_id_not_the_spelling(tmp_path: Path) -> None:
+    """The hub resolves ids case-insensitively and the blocks are written from two cards."""
+    document = _document()
+    document["exclusion_source"][0]["repository"] = SEED_ONE.upper()
+    write_pins(tmp_path, document)
+
+    pins = load_pins(tmp_path)
+
+    assert SEED_ONE.upper() in {source.repository for source in pins.exclusion_sources}
+
+
+def test_an_available_source_without_a_revision_is_refused(tmp_path: Path) -> None:
+    document = _document()
+    del document["exclusion_source"][0]["revision"]
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+
+    assert "revision is missing" in str(abort.value)
+
+
+def test_an_unreachable_source_carrying_a_revision_is_refused(tmp_path: Path) -> None:
+    """A sha for a source the hub does not answer for came from somewhere this file cannot name."""
+    document = _document()
+    document["exclusion_source"][0].update(
+        {"availability": EXCLUSION_UNREACHABLE, "http_status": 401}
+    )
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+
+    assert "hands back no commit" in str(abort.value)
+
+
+def test_an_available_source_declaring_a_failure_status_is_refused(tmp_path: Path) -> None:
+    document = _document()
+    document["exclusion_source"][0]["http_status"] = 404
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+
+    assert "they differ in whether its rows load" in str(abort.value)
+
+
+def test_an_unreachable_source_declaring_success_is_refused(tmp_path: Path) -> None:
+    document = _document()
+    document["exclusion_source"][0].update(
+        {"availability": EXCLUSION_UNREACHABLE, "http_status": HTTP_OK}
+    )
+    del document["exclusion_source"][0]["revision"]
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+
+    assert "is the status of a source the hub answers for" in str(abort.value)
+
+
+def test_an_unreadable_source_keeps_its_revision_and_loads(tmp_path: Path) -> None:
+    """The second way a source can be out of reach: it resolves and its rows will not load.
+
+    Not a shade of unreachable. The sha is real, `verify_revisions` checks it like every other
+    pin, and only `loadable` is false -- which is what tells the build to expect the refusal
+    rather than to crash on it.
+    """
+    document = _document()
+    document["exclusion_source"][0]["availability"] = EXCLUSION_UNREADABLE
+    write_pins(tmp_path, document)
+
+    pins = load_pins(tmp_path)
+    source = pins.exclusion_sources[0]
+
+    assert source.revision == SHA_E
+    assert source.resolvable is True
+    assert source.loadable is False
+    assert source.artifact in pins.remote_artifacts()
+
+
+def test_an_unreadable_source_without_a_revision_is_refused(tmp_path: Path) -> None:
+    """It resolves, so it is pinned by its commit like everything else that resolves."""
+    document = _document()
+    document["exclusion_source"][0]["availability"] = EXCLUSION_UNREADABLE
+    del document["exclusion_source"][0]["revision"]
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+
+    assert "revision is missing" in str(abort.value)
+
+
+def test_an_availability_outside_the_vocabulary_is_refused(tmp_path: Path) -> None:
+    """Closed, because the build reads this value and compares it against the hub's answer."""
+    document = _document()
+    document["exclusion_source"][0]["availability"] = "probably-fine"
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+
+    assert "probably-fine" in str(abort.value)
+
+
+def test_a_status_outside_the_http_range_is_refused(tmp_path: Path) -> None:
+    document = _document()
+    document["exclusion_source"][0]["http_status"] = 7
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+
+    assert "must be an HTTP status code" in str(abort.value)
+
+
+def test_two_exclusion_sources_sharing_a_repository_are_refused(tmp_path: Path) -> None:
+    """`verify_revisions` reports by repository id, where two entries collapse into one line."""
+    document = _document()
+    duplicate = dict(document["exclusion_source"][0])
+    duplicate["key"] = "a-second-key"
+    document["exclusion_source"].append(duplicate)
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+
+    assert "share repository" in str(abort.value)
+
+
+def test_the_run_fields_publish_both_exclusion_sets(committed_pins: Any) -> None:
+    """A reader recomputes the derived set from the two blocks; the array is what was pinned."""
+    fields = committed_pins.as_run_fields()["pins"]
+
+    assert [entry["repository"] for entry in fields["exclusion_sources"]] == [
+        source.repository for source in committed_pins.exclusion_sources
+    ]
+    assert fields["derived_exclusion_sources"] == list(
+        committed_pins.derived_exclusion_sources()
+    )
+    assert set(fields["required_exclusion_sources"]) <= set(
+        fields["derived_exclusion_sources"]
     )
