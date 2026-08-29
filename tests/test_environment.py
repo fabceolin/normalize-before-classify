@@ -351,3 +351,93 @@ def test_the_running_interpreter_is_the_one_the_confusables_data_is_pinned_to() 
     assert sys.implementation.name == "cpython"
     assert sys.version_info[:2] == (3, 13)
     assert unicodedata.unidata_version == "15.1.0"
+
+
+# --- Pass 7: the README states the command, and CI runs it --------------------------------------
+#
+# FR20 puts the exact reproduction command in the README, above the results. It was not there:
+# the file contained no `uv sync`, no `uv run` and no `pytest`. A reproduction claim whose command
+# lives only in a maintainer's shell history is a claim nobody can act on.
+
+
+def _readme(repo_root: Path) -> str:
+    return (repo_root / "README.md").read_text(encoding="utf-8")
+
+
+def test_the_readme_names_the_reproduction_command(repo_root: Path) -> None:
+    """And it is the frozen sync, which is the one that needs no network beyond the first fetch."""
+    assert "uv sync --frozen" in _readme(repo_root)
+
+
+def test_the_readme_states_the_platform_floor_it_will_be_held_to(repo_root: Path) -> None:
+    """A stranger's machine failing for a reason the README never gave them is NFR6's own failure.
+
+    Per decision D-A the floor is Linux-only, which SC3's "clean CPU-only machine" does not say
+    on its own, so the README says it.
+    """
+    readme = _readme(repo_root)
+    assert "glibc 2.28" in readme
+    assert "CPython 3.13" in readme
+    assert "Linux" in readme
+
+
+def test_the_readme_reproduction_block_precedes_the_results(repo_root: Path) -> None:
+    """FR20: above the results, not in an appendix under them."""
+    readme = _readme(repo_root)
+    command = readme.index("uv sync --frozen")
+    for marker in ("<!-- RESULTS:START -->", "## Status"):
+        if marker in readme:
+            assert command < readme.index(marker)
+            return
+    pytest.fail("neither the results markers nor the status block was found in README.md")
+
+
+def test_a_ci_workflow_exists_and_runs_the_targets_nothing_else_runs(repo_root: Path) -> None:
+    """The five smoke tests were deselected on every run since the marker was created.
+
+    So were the only two tests naming the production pin resolvers. Until this workflow existed,
+    nothing in the repository would ever go red, which is why so many defects survived here with
+    a demonstrated regression.
+    """
+    workflows = sorted((repo_root / ".github" / "workflows").glob("*.yml"))
+    assert workflows, "no CI workflow: the verification tiers addressed to CI run nowhere"
+
+    ci = "\n".join(path.read_text(encoding="utf-8") for path in workflows)
+    assert "pytest -m smoke" in ci, "the model-touching tests still run nowhere"
+    assert "uv sync --locked" in ci, "nothing refuses a lockfile out of sync with pyproject"
+    assert "--require-glibc" in ci, "the platform abort is still a code path nothing takes"
+    assert "git diff --exit-code" in ci, "nothing stops CI writing the published artifacts"
+
+
+def test_every_command_the_readme_documents_is_runnable(repo_root: Path) -> None:
+    """Prose naming a command nothing verifies is how a reproduction claim rots.
+
+    This caught its own author: an earlier draft of the reproduction block documented
+    `uv run nbc all`, which does not exist -- there is no `[project.scripts]` entry and the
+    entrypoint arrives with the measurement harness. A README is the one surface a stranger
+    actually touches, so what it says can be run has to be runnable.
+    """
+    readme = _readme(repo_root)
+    fenced = re.findall(r"```\n(.*?)```", readme, re.S)
+    commands = [
+        line.split("#")[0].strip()
+        for block in fenced
+        for line in block.splitlines()
+        if line.strip().startswith("uv ")
+    ]
+    assert commands, "the README documents no command at all"
+
+    pyproject_text = (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+    for command in commands:
+        if "-m " in command:
+            module = command.split("-m ", 1)[1].split()[0]
+            path = repo_root / "src" / Path(module.replace(".", "/") + ".py")
+            assert path.exists(), f"README runs `{command}` and {module} does not exist"
+            assert "__main__" in path.read_text(encoding="utf-8"), (
+                f"README runs `{command}` and {module} has no `__main__` entry point"
+            )
+        elif command.startswith("uv run ") and "python" not in command:
+            entry = command.removeprefix("uv run ").split()[0]
+            assert entry == "pytest" or f'{entry} =' in pyproject_text, (
+                f"README documents `{command}` and nothing declares the `{entry}` command"
+            )

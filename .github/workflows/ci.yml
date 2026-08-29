@@ -1,0 +1,119 @@
+# The clean-machine proof of the claims this repository makes about itself.
+#
+# Until this file existed, nothing in the repository would ever go red: the five smoke tests were
+# deselected by `addopts` on every run since the marker was created, and the two production pin
+# resolvers are named by exactly one test, which is one of those five. That is why so many defects
+# survived here with a demonstrated regression -- there was no runner to demonstrate it to.
+#
+# Three properties, three jobs, and the split is deliberate:
+#
+#   unit     -- the offline suite on a clean CPU-only machine, which is SC3's promise.
+#   lockfile -- `uv sync --locked`, because `uv sync --frozen` DOES NOT VALIDATE. Verified
+#               against uv 0.12.5: with a dependency added to pyproject.toml and never re-locked,
+#               `--frozen` exits 0 and silently installs the stale lock. The documented
+#               reproduction command stays `--frozen` (it is what a stranger runs, and it is
+#               offline); the gate that refuses drift is a separate job.
+#   smoke    -- the only tests that ever touch a pinned artifact. Deselected by default, so
+#               without this job they have never executed anywhere.
+#
+# It never writes the published artifacts. A smoke run that overwrote results/results.json or
+# README.md would replace the headline table with a 20-item one that looks structurally identical,
+# with a small n as the only tell.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Linux only, per decision D-A: the platform floor is glibc and manylinux wheel tags, both Linux
+# facts, and `platform.py` aborts on any other platform rather than approving a machine that has
+# no wheel.
+env:
+  UV_VERSION: "0.12.5"
+
+jobs:
+  unit:
+    name: offline unit suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          # pyproject pins `required-version = "==0.12.5"`, so any other uv refuses to run in
+          # this project at all. Pinning the action to the same value keeps CI from being the
+          # one place a different resolver is allowed.
+          version: ${{ env.UV_VERSION }}
+
+      - name: Sync the frozen environment
+        run: uv sync --frozen --extra build --group dev
+
+      - name: Run the offline unit suite
+        run: uv run pytest
+
+      - name: Prove the platform abort fires
+        # A floor above the runner's own, so the gate is exercised rather than assumed. Without
+        # this the abort is a code path nothing has ever taken.
+        run: |
+          if uv run python -m nbc.platform --require-glibc 99.0; then
+            echo "::error::the platform preflight approved a machine below an injected floor"
+            exit 1
+          fi
+
+      - name: Verify the pins load and the caveats section exists
+        # AD-16 steps 0 and 1, which the entrypoint will run before any inference.
+        run: uv run python -m nbc.pins
+
+      - name: Refuse a dirty tree
+        # The suite must not write into the working tree. A test that leaves a file behind is a
+        # test that could have left a *different* file behind.
+        run: git diff --exit-code
+
+  lockfile:
+    name: lockfile is in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Refuse a lockfile that does not match pyproject.toml
+        # `--locked` is the flag that fails; `--frozen` is the flag that installs silently. The
+        # difference is the whole reason this is its own job.
+        run: uv sync --locked --extra build --group dev
+
+  smoke:
+    name: model-touching smoke run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Sync the frozen environment
+        run: uv sync --frozen --extra build --group dev
+
+      - name: Cache the Hugging Face hub
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          # The pins are the cache identity: a pin change must not be served a stale artifact.
+          key: hf-${{ hashFiles('pins.toml') }}
+
+      - name: Run the smoke tests
+        # The only tests that open a pinned graph. They are deselected by `addopts`, so this is
+        # the one place they run.
+        run: uv run pytest -m smoke
+
+      - name: Refuse a dirty tree
+        # CI never writes the published artifacts. A smoke run that overwrote
+        # results/results.json or README.md would ship a 20-item table that looks structurally
+        # identical to the headline one, with a small n as the only tell.
+        run: git diff --exit-code

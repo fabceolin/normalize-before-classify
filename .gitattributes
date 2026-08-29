@@ -1,0 +1,9 @@
+# The caveats section is located by a `^## ` heading match, and a README checked out with CRLF
+# line endings reports as having no such heading at all -- so the entrypoint aborts with
+# `CaveatsSectionMissing` on a file that plainly contains it. Verified. This is not cosmetic:
+# it is a stranger on Windows being told the honesty section is missing when it is not.
+README.md text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.py text eol=lf
+*.jsonl text eol=lf

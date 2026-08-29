@@ -34,7 +34,38 @@ a 95% interval, and the false-positive rate is reported **per benign class**, ne
 | baseline classifier | | | |
 | baseline + canonicalization | | | |
 
-That is the shape, hand-drawn and empty. The filled one is generated from `results/results.json` and
+## Reproducing this
+
+The published run is one command, and it does not exist yet: the entrypoint that performs the whole
+sequence arrives with the measurement harness. Stating it here before it runs would be a reproduction
+claim nobody can act on, which is the defect the rest of this file exists to refuse.
+
+What does run today, on a clean CPU-only Linux machine:
+
+```
+uv sync --frozen --extra build --group dev
+uv run python -m nbc.platform    # the platform floor, checked before anything else
+uv run python -m nbc.pins        # every pinned artifact, verified against this machine
+uv run pytest                    # the offline unit suite, no network, no model download
+```
+
+`uv` is pinned to an exact version by `pyproject.toml` and refuses to run under any other, so the
+environment a table came from is the environment you get. The models and the corpus are pinned by
+revision in `pins.toml`, and `nbc.pins` reports whether each one was checked against the hub or read
+off a directory name in this machine's cache — those are different guarantees and it says which.
+
+Linux specifically, and the reason is stated rather than implied: the pinned `onnxruntime`
+publishes only `manylinux_2_28` wheels and no source distribution at any version, so the floor is
+**glibc 2.28 or newer** on `x86_64` or `aarch64`. The interpreter is **CPython 3.13 exactly** —
+not the 3.11-to-3.14 the wheels would admit — because the vendored Unicode confusables table is
+pinned to a revision that moves with the interpreter's minor version. All of that is checked
+before anything else runs, and it names what it found:
+
+```
+uv run python -m nbc.platform
+```
+
+The table above is the shape, hand-drawn and empty. The filled one is generated from `results/results.json` and
 injected between the two markers below, which are empty because no run has produced a table yet. Nothing
 between them is ever written or edited by hand, so a number in the table that no run produced cannot
 exist.
