@@ -415,6 +415,21 @@ def open_baseline(
     repository shipping two `tokenizer.json` at one revision is not hypothetical -- it is the
     reason the pins name paths at all.
     """
+    # The windower is a seam, which is what lets the window policy be applied identically for
+    # every adapter rather than grown inside one -- and a seam is also where two halves of one
+    # baseline can be crossed. Measured: scoring a canonical injection through the right graph
+    # with the other baseline's tokenizer moves p_injection from 0.99999981 to 0.0000020, with
+    # nothing anywhere aborting. Two pinned baselines with different vocabularies is exactly the
+    # independence SC5 was rebuilt to buy, so the crossing is available by construction.
+    windower_key = getattr(windower, "key", None)
+    if windower_key is not None and windower_key != baseline.key:
+        raise InferenceSessionInvalid(
+            f"baseline {baseline.key!r} was handed the windower for {windower_key!r}. A document "
+            f"tokenized by one baseline's vocabulary and scored by another's graph produces a "
+            f"number that looks like a score and is not one: measured on the pinned pair, a "
+            f"crossed pair moves p_injection by six orders of magnitude with no error raised"
+        )
+
     snapshot = baseline.artifact.snapshot_dir(cache_root)
     graph = snapshot / baseline.graph_path
     config = snapshot / baseline.config_path

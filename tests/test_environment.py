@@ -441,3 +441,18 @@ def test_every_command_the_readme_documents_is_runnable(repo_root: Path) -> None
             assert entry == "pytest" or f'{entry} =' in pyproject_text, (
                 f"README documents `{command}` and nothing declares the `{entry}` command"
             )
+
+
+def test_the_readme_does_not_claim_a_command_verifies_more_than_it_does(repo_root: Path) -> None:
+    """`python -m nbc.pins` without `--verify` loads the FILE; it asks the world nothing.
+
+    Both the README line and the CI step named it as the verification of every pinned artifact.
+    That is the claims-versus-code defect this repository is about, written by the pass that was
+    fixing that defect elsewhere.
+    """
+    readme = _readme(repo_root)
+    for line in readme.splitlines():
+        if "nbc.pins" in line and ("verif" in line.lower() or "check" in line.lower()):
+            assert "--verify" in line, (
+                f"this line claims verification from a command that does not verify: {line!r}"
+            )

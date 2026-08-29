@@ -542,7 +542,13 @@ def _canonical(value: str) -> str:
 
     The raw spelling is what `as_run_fields` publishes; this is only ever the comparison key.
     """
-    return re.sub(r"[\s_-]+", "-", value.strip().casefold())
+    # Separators are REMOVED rather than normalized to one of them, which is what makes this
+    # closed under both spellings that occur in practice. Folding CamelCase to a separator fixes
+    # `DebertaV2` and breaks `SentencePiece`, which becomes `sentence-piece`; dropping separators
+    # entirely collapses `DebertaV2`, `deberta-v2`, `deberta_v2` and `SentencePiece Unigram` onto
+    # the forms the pinned file already uses, with no case left where one spelling of a family
+    # reads as a second family.
+    return re.sub(r"[\s_-]+", "", value.strip().casefold())
 
 
 @dataclass(frozen=True, slots=True)
@@ -1196,7 +1202,11 @@ def _read_oq2(
             f"{at}.hits is {hits} over a sample of {sample_size}: a recall cannot count more "
             f"items than it scored"
         )
-    elif hits and sample_size and clean_recall:
+    elif sample_size and "hits" in table and "clean_recall" in table:
+        # Guarded on PRESENCE, not truthiness. `hits and sample_size and clean_recall` skipped the
+        # check whenever any of the three was zero -- so `hits = 0` beside `clean_recall = 0.836`
+        # loaded clean, and `floor` then computed above `ceiling`. A cross-check disabled by one
+        # of its own operands is the shape this file was fixed to remove, reintroduced by the fix.
         # The rate is derived from two integers this block also records, so it is checkable.
         # Recording a rate nothing recomputes is how a transposed digit survives publication.
         places = len(str(clean_recall).partition(".")[2]) or 4

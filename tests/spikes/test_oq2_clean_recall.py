@@ -230,3 +230,89 @@ def test_a_split_is_read_whole_and_only_its_own_shards(
 ) -> None:
     """A count over one shard of a split is the same error as a count over one split."""
     assert spike._is_shard_of(name, split) is expected
+
+
+# --- Pass 10: the function that produced every published OQ2 number -----------------------------
+#
+# `measure()` had no test at all. It computes the hits, the rate and the interval behind 0.836 and
+# 0.8721, and it survived being mutated to a hard-coded `p > 0.5` -- which is a different
+# comparison from the one it claims (`>=`, at the baseline's own pinned threshold) and would
+# silently drop every item scoring exactly at the threshold.
+
+
+class _StubScorer:
+    """Returns declared probabilities, so `measure`'s arithmetic is the only thing under test."""
+
+    def __init__(self, probabilities):
+        self._probabilities = list(probabilities)
+        self.batches: list[int] = []
+
+    def score(self, texts):
+        self.batches.append(len(texts))
+        taken = self._probabilities[: len(texts)]
+        self._probabilities = self._probabilities[len(texts) :]
+        return [type("S", (), {"p_injection": p})() for p in taken]
+
+
+@pytest.fixture()
+def _stubbed_boundary(monkeypatch: pytest.MonkeyPatch):
+    """Swap the model boundary for a stub, so this runs offline with no graph."""
+
+    def install(probabilities):
+        scorer = _StubScorer(probabilities)
+        monkeypatch.setattr(spike, "ensure_cached", lambda baseline: None)
+        monkeypatch.setattr(spike, "open_windower", lambda baseline: object())
+        monkeypatch.setattr(spike, "open_baseline", lambda baseline, windower: scorer)
+        return scorer
+
+    return install
+
+
+def _baseline_double(threshold: float = 0.5):
+    return type("B", (), {"key": "stub", "threshold": threshold})()
+
+
+def test_measure_counts_at_or_above_the_threshold_not_strictly_above(_stubbed_boundary) -> None:
+    """The boundary case, which is the one a hard-coded `>` gets wrong and nothing else does.
+
+    A probability exactly at the threshold is a hit: the threshold is the decision point, and
+    excluding it drops items in the one region where an encoded payload actually sits.
+    """
+    _stubbed_boundary([0.49, 0.5, 0.51])
+
+    measured = spike.measure(_baseline_double(0.5), ["a", "b", "c"], chunk=8)
+
+    assert measured.hits == 2, "0.5 at a threshold of 0.5 is a hit"
+    assert measured.n == 3
+
+
+def test_measure_uses_the_baselines_own_threshold(_stubbed_boundary) -> None:
+    """Not 0.5. The threshold is a per-baseline pin and a repinnable one."""
+    _stubbed_boundary([0.6, 0.8, 0.95])
+
+    measured = spike.measure(_baseline_double(0.9), ["a", "b", "c"], chunk=8)
+
+    assert measured.hits == 1
+    assert measured.threshold == 0.9
+
+
+def test_measure_scores_every_item_across_chunk_boundaries(_stubbed_boundary) -> None:
+    """An item dropped at a chunk edge is a denominator that is quietly wrong."""
+    scorer = _stubbed_boundary([0.9] * 7)
+
+    measured = spike.measure(_baseline_double(0.5), [f"t{i}" for i in range(7)], chunk=3)
+
+    assert measured.n == 7
+    assert measured.hits == 7
+    assert scorer.batches == [3, 3, 1], "chunking must not change what gets scored"
+
+
+def test_measure_derives_its_rate_and_interval_from_its_own_counts(_stubbed_boundary) -> None:
+    """The published 0.836 is `hits / n`, and the interval is Wilson over the same two."""
+    _stubbed_boundary([0.9] * 84 + [0.1] * 16)
+
+    measured = spike.measure(_baseline_double(0.5), ["t"] * 100, chunk=32)
+
+    assert (measured.hits, measured.n) == (84, 100)
+    assert measured.interval.low < measured.hits / measured.n < measured.interval.high
+    assert measured.interval == spike.wilson_interval(84, 100)

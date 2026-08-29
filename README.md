@@ -45,13 +45,13 @@ What does run today, on a clean CPU-only Linux machine:
 ```
 uv sync --frozen --extra build --group dev
 uv run python -m nbc.platform    # the platform floor, checked before anything else
-uv run python -m nbc.pins        # every pinned artifact, verified against this machine
+uv run python -m nbc.pins --verify   # every pinned artifact, resolved and checked
 uv run pytest                    # the offline unit suite, no network, no model download
 ```
 
 `uv` is pinned to an exact version by `pyproject.toml` and refuses to run under any other, so the
 environment a table came from is the environment you get. The models and the corpus are pinned by
-revision in `pins.toml`, and `nbc.pins` reports whether each one was checked against the hub or read
+revision in `pins.toml`, and `nbc.pins --verify` reports whether each one was checked against the hub or read
 off a directory name in this machine's cache — those are different guarantees and it says which.
 
 Linux specifically, and the reason is stated rather than implied: the pinned `onnxruntime`

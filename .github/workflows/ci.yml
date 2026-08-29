@@ -85,9 +85,13 @@ jobs:
             exit 1
           fi
 
-      - name: Verify the pins load and the caveats section exists
-        # AD-16 steps 0 and 1, which the entrypoint will run before any inference.
-        run: uv run python -m nbc.pins
+      - name: Verify the pins resolve
+        # AD-16 step 1, which the entrypoint will run before any inference. `--verify` is the
+        # half that asks: without it the command loads and validates the FILE and prints its run
+        # fields, which is not the same claim -- and both this step's name and the README said it
+        # was. It also reports which artifacts were checked against the hub and which were read
+        # off a cache directory name, and those are different guarantees.
+        run: uv run python -m nbc.pins --verify
 
       - name: Refuse a dirty tree
         # The suite must not write into the working tree. A test that leaves a file behind is a
