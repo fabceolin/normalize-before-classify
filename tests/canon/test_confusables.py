@@ -65,7 +65,7 @@ def test_the_stage_reads_the_table_off_the_context_and_not_off_disk() -> None:
     The failing input for "the stage loads its own table" is exactly this: if it did, `ф` would
     map through the vendored table's entry and `"ф"` would not survive.
     """
-    narrow = CanonContext(confusables={0x0430: "Z"})
+    narrow = CanonContext(confusables={0x0430: "Z"}, ceiling=0)
     result = run("аф", narrow)
     assert result.text == "Zф"
 
@@ -79,4 +79,4 @@ def test_tracing_off_maps_the_same_characters_and_records_nothing() -> None:
 
 def test_a_context_that_folds_ascii_cannot_be_built() -> None:
     with pytest.raises(ValueError, match="ASCII code point"):
-        CanonContext(confusables={0x61: "b"})
+        CanonContext(confusables={0x61: "b"}, ceiling=0)

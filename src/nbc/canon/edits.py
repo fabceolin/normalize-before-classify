@@ -14,8 +14,9 @@ than emitting a trace that quietly locates a change in the wrong place.
 Step 4 reports one thing the character stages never do: a span it **examined and left alone**. AD-18
 requires a refused decode candidate to be visible in the trace as an `Edit` whose `before` equals
 its `after`, and `build_edits` is built to drop exactly that segment. `build_reported_edits` is the
-second entry point for that case — the caller names the spans it is reporting, each becomes exactly
-one edit changed or not, and the unexamined text between them is copied through unreported.
+second entry point for that case — the caller names the spans it is reporting **and the stage name
+each decision belongs to**, each becomes exactly one edit changed or not, and the unexamined text
+between them is copied through unreported.
 """
 
 from __future__ import annotations
@@ -24,10 +25,20 @@ from collections.abc import Callable, Iterable
 
 from nbc.schema import Edit
 
-__all__ = ["Segment", "build_edits", "build_reported_edits", "map_code_points"]
+__all__ = ["Report", "Segment", "build_edits", "build_reported_edits", "map_code_points"]
 
 Segment = tuple[int, int, str]
 """`(start, end, replacement)`: the half-open span `text[start:end]` becomes `replacement`."""
+
+Report = tuple[int, int, str, str]
+"""`(start, end, replacement, stage)`: a reported span, and the stage name that decided it.
+
+The stage travels **per span** rather than per call because one pass over a document can carry two
+kinds of decision that must not be confused: a candidate the decode stage refused on its own merits
+and a candidate it would have decoded but for the recursion ceiling. AD-6 requires the second to be
+distinguishable in the trace from the first, and both can occur in the same document at the same
+depth, interleaved in document order.
+"""
 
 
 def map_code_points(text: str, replace: Callable[[str], str | None]) -> Iterable[Segment]:
@@ -134,10 +145,7 @@ def build_edits(
 
 def build_reported_edits(
     text: str,
-    spans: Iterable[Segment],
-    *,
-    stage: str,
-    trace: bool,
+    reports: Iterable[Report],
 ) -> tuple[str, tuple[Edit, ...]]:
     """Apply an ordered, non-overlapping set of **reported** spans and emit one Edit per span.
 
@@ -146,13 +154,19 @@ def build_reported_edits(
     character is not news. Step 4 has news to report about a span it decided **not** to change —
     AD-18 requires a refused decode candidate to appear in the trace as an `Edit` whose `before`
     equals its `after` — so the caller states which spans are reported and every one of them
-    becomes exactly one edit.
+    becomes exactly one edit, under the stage name that span's decision belongs to.
 
-    `spans` need not partition the text: the gaps between them are the parts the stage never
-    examined, and they are copied through untouched and unreported. What `spans` must be is
+    `reports` need not partition the text: the gaps between them are the parts the stage never
+    examined, and they are copied through untouched and unreported. What `reports` must be is
     ordered, non-overlapping and inside the text, which is what the runner will independently
     demand of the edits that come out; a stage that breaks it raises `ValueError` here, at the
     place that can name what it produced, rather than as a contract violation two frames later.
+
+    **There is no `trace` switch here**, unlike `build_edits`. Step 4's records are how the runner
+    learns which spans were accepted, and it has to recurse into exactly those spans in the timing
+    pass as well or the canonical text would differ between the two passes. So these edits are
+    always built, and whether they reach the document's trace is the runner's decision, not this
+    function's.
 
     No coalescing. Two reported spans are never adjacent in practice — a decode candidate is a
     *maximal* run over its alphabet, so any two are separated by at least one character that is
@@ -163,7 +177,7 @@ def build_reported_edits(
     edits: list[Edit] = []
     position = 0
 
-    for start, end, replacement in spans:
+    for start, end, replacement, stage in reports:
         if start < position:
             raise ValueError(
                 f"stage {stage!r} reported a span starting at {start} after a span that already "
@@ -179,10 +193,9 @@ def build_reported_edits(
 
         pieces.append(text[position:start])
         pieces.append(replacement)
-        if trace:
-            edits.append(
-                Edit(stage=stage, span=(start, end), before=text[start:end], after=replacement)
-            )
+        edits.append(
+            Edit(stage=stage, span=(start, end), before=text[start:end], after=replacement)
+        )
         position = end
 
     pieces.append(text[position:])

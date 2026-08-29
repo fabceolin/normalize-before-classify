@@ -175,20 +175,51 @@ class StageResult:
 
 @dataclass(frozen=True, slots=True)
 class CanonResult:
-    """What the pipeline returns for one document: its canonical text and the whole trace.
+    """What the pipeline returns for one document: its canonical text, its trace, and its depth.
 
-    Two fields, not four. `ceiling_hit` and `max_depth_reached` belong to the recursion contract,
-    which Story 2.4 writes; nothing in the layer computes them yet, and a field shipped as a
-    constant would be describing behaviour nobody implemented.
+    `max_depth_reached` is the greatest depth at which a document was canonicalized during this
+    run: `0` for a document with no accepted decode, and `d + 1` for a segment accepted at depth
+    `d`. Only **accepted** decodes raise it — a candidate refused on its own merits and a candidate
+    refused because the ceiling was reached both leave it where it was.
+
+    `ceiling_hit` is true if and only if at least one candidate would have been decoded and was
+    refused **solely** because the recursion ceiling had been reached. A candidate the decode
+    stage would have refused anyway is not a ceiling hit, and the difference is the whole content
+    of the flag: `ceiling_hit` answers "would a higher ceiling have recovered more of this
+    document", which is a published outcome rather than a warning.
+
+    The two are compared here rather than merely carried together: an edit stamped at depth `k`
+    is evidence that a document was canonicalized at depth `k`, so `max_depth_reached` cannot be
+    smaller than the deepest edit in the trace. The check is one-directional on purpose. With
+    tracing off the trace is empty and bounds nothing, and a sub-document that needed no change
+    produces no edit at all, so equality would be wrong in both directions.
     """
 
     text: str
     edits: tuple[Edit, ...] = ()
+    ceiling_hit: bool = False
+    max_depth_reached: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str):
             raise ValueError(f"text must be a str, got {self.text!r}")
         object.__setattr__(self, "edits", _as_edit_tuple(self.edits, "edits"))
+
+        if not isinstance(self.ceiling_hit, bool):
+            raise ValueError(f"ceiling_hit must be a bool, got {self.ceiling_hit!r}")
+
+        depth = self.max_depth_reached
+        if isinstance(depth, bool) or not isinstance(depth, int):
+            raise ValueError(f"max_depth_reached must be an int, got {depth!r}")
+        if depth < 0:
+            raise ValueError(f"max_depth_reached must not be negative, got {depth!r}")
+
+        deepest = max((edit.depth for edit in self.edits), default=0)
+        if depth < deepest:
+            raise ValueError(
+                f"max_depth_reached is {depth} but the trace holds an edit at depth {deepest}; "
+                f"an edit at a depth is evidence a document was canonicalized there"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,17 +233,24 @@ class CanonContext:
     forbidden outright — no module-level mutable state anywhere in `canon/`. The entrypoint builds
     this once, which is where a table should be loaded once.
 
-    `trace_enabled` is real, not decoration: with it off the stages skip building `Edit` records
-    entirely. The text they produce is identical either way, and a test asserts that over a
-    battery of inputs, because a trace flag that could change the canonical text would make the
-    timing pass measure a different layer than the measurement pass.
+    `ceiling` is the per-branch recursion ceiling: decoding is attempted only while
+    `depth < ceiling`, so `0` decodes nothing at all and every candidate that would have decoded
+    is reported as a ceiling hit. It has **no default here**, and that is the requirement rather
+    than an oversight — FR10 asks for an explicit parameter with a declared default and never an
+    implicit one, so the default lives in exactly one place, `nbc.canon.pipeline.DEFAULT_CEILING`,
+    applied by `default_context`. This module is a leaf and cannot import it, which is what makes
+    the single home enforceable instead of merely intended.
 
-    `ceiling` is **not** here. It is Story 2.4's, nothing in this story reads it, and a field no
-    code consumes is the shape that let a published obligation go undischarged through all of
-    Epic 1.
+    `trace_enabled` is real, not decoration: with it off the character stages skip building `Edit`
+    records entirely. It does **not** reach step 4, whose records are the recursion's input rather
+    than trace bookkeeping; the runner drops those from the trace instead. The text, the ceiling
+    hit and the depth are identical either way, and a test asserts all three over a battery of
+    inputs, because a trace flag that could change any of them would make the timing pass measure
+    a different layer than the measurement pass.
     """
 
     confusables: Mapping[int, str]
+    ceiling: int
     trace_enabled: bool = True
 
     def __post_init__(self) -> None:
@@ -235,6 +273,16 @@ class CanonContext:
             if not isinstance(value, str) or not value:
                 raise ValueError(f"confusables maps U+{key:04X} to {value!r}, not a non-empty str")
         object.__setattr__(self, "confusables", MappingProxyType(dict(table)))
+
+        ceiling = self.ceiling
+        if isinstance(ceiling, bool) or not isinstance(ceiling, int):
+            # A bool is an int in Python and `ceiling=True` would silently mean "one level".
+            raise ValueError(f"ceiling counts recursion levels and must be an int, got {ceiling!r}")
+        if ceiling < 0:
+            raise ValueError(
+                f"ceiling must not be negative, got {ceiling!r}; zero already means "
+                f"'decode nothing, report every candidate as a ceiling hit'"
+            )
 
         if not isinstance(self.trace_enabled, bool):
             raise ValueError(f"trace_enabled must be a bool, got {self.trace_enabled!r}")

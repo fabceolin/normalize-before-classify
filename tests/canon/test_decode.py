@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from nbc.canon import confusables_table
+from nbc.canon import confusables_table, pipeline
 from nbc.canon.pipeline import canonicalize, default_context
 from nbc.canon.stages import decode, invisible
 from nbc.canon.stages.decode import (
@@ -176,12 +176,18 @@ def restated_thresholds(path: Path) -> list[float]:
     A grep would match the number inside a docstring, which is prose *about* the threshold and not
     a second copy of it. This reads the module-level assignments and the numeric constants they
     actually bind.
+
+    The match is **type-strict**: an `int` never matches a `float` threshold and vice versa. A
+    threshold restated is the same quantity written twice, and `3` recursion levels is not `3.0`
+    bits per character. Without this, `pipeline.DEFAULT_CEILING = 3` would read as a second copy of
+    `BASE64.min_entropy_bits_per_char` purely because Python calls `3 == 3.0` true, and the scan
+    would be reporting a unit collision as a duplication.
     """
-    thresholds = {
+    thresholds = [
         value
         for test in ORDER
         for value in (test.min_encoded_chars, test.min_entropy_bits_per_char)
-    }
+    ]
     found: list[float] = []
     for node in ast.parse(path.read_text(encoding="utf-8"), filename=str(path)).body:
         if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
@@ -191,7 +197,10 @@ def restated_thresholds(path: Path) -> list[float]:
                 isinstance(sub, ast.Constant)
                 and isinstance(sub.value, (int, float))
                 and not isinstance(sub.value, bool)
-                and sub.value in thresholds
+                and any(
+                    type(sub.value) is type(threshold) and sub.value == threshold
+                    for threshold in thresholds
+                )
             ):
                 found.append(sub.value)
     return found
@@ -229,6 +238,28 @@ def test_the_threshold_scan_ignores_a_number_that_only_appears_in_prose(tmp_path
         encoding="utf-8",
     )
     assert restated_thresholds(probe) == []
+
+
+def test_the_threshold_scan_does_not_confuse_a_count_with_an_entropy_floor(
+    tmp_path: Path,
+) -> None:
+    """Both inputs, so the type-strict rule is a decision rather than an accident.
+
+    `BASE64.min_entropy_bits_per_char` is `3.0` bits per character and `DEFAULT_CEILING` is `3`
+    recursion levels. Python calls them equal; they are not the same quantity, and a scan that
+    reported the second as a restatement of the first would be reporting a unit collision. The
+    float written as a float still trips it.
+    """
+    assert BASE64.min_entropy_bits_per_char == 3.0
+    assert pipeline.DEFAULT_CEILING == 3
+
+    counted = tmp_path / "counted.py"
+    counted.write_text("LEVELS = 3\n", encoding="utf-8")
+    assert restated_thresholds(counted) == []
+
+    floored = tmp_path / "floored.py"
+    floored.write_text("FLOOR = 3.0\n", encoding="utf-8")
+    assert restated_thresholds(floored) == [3.0]
 
 
 # --- entropy, in the unit it declares ----------------------------------------------------------
@@ -511,7 +542,10 @@ def test_a_span_hex_refused_is_reported_once_as_the_wider_base64_candidate(
     """
     assert decide(SHA256_HEX, HEX) is None
     assert decide(SHA256_HEX, BASE64) is None
-    assert decode._decisions(SHA256_HEX) == [(0, len(SHA256_HEX), SHA256_HEX)]
+    # A decision carries the decoded text, or `None` where the candidate was refused. What the
+    # refusal becomes in the trace — an unchanged span under `NAME` — is the caller's business,
+    # because at the recursion ceiling the same refusal is reported under a different name.
+    assert decode._decisions(SHA256_HEX) == [(0, len(SHA256_HEX), None)]
 
 
 # --- the order, and what it bought ---------------------------------------------------------------
@@ -717,12 +751,18 @@ def test_the_runner_accepts_the_stages_edits(ctx: CanonContext) -> None:
     ]
 
 
-def test_the_stage_produces_the_same_text_with_the_trace_off() -> None:
+def test_the_stage_reports_the_same_decisions_whether_or_not_the_trace_survives() -> None:
+    """Step 4 does not consult `trace_enabled`, and this is the assertion that says so.
+
+    Its edits are how `canon/pipeline.py` learns which spans to canonicalize one level deeper, so
+    a flag that could suppress them would change the canonical text of the timing pass rather than
+    only its trace. The runner drops them from the document's trace instead; that half is checked
+    in `tests/canon/test_recursion.py`.
+    """
     quiet = default_context(trace_enabled=False)
     loud = default_context()
     for text in ["", "hello", f"see {B64_PAYLOAD}", SHA256_HEX, AMBIGUOUS, f"x {HEX_16} y"]:
-        assert stage(text, quiet).text == stage(text, loud).text
-        assert stage(text, quiet).edits == ()
+        assert stage(text, quiet) == stage(text, loud)
 
 
 def test_the_stage_is_deterministic(ctx: CanonContext) -> None:
@@ -741,19 +781,23 @@ def test_two_sibling_candidates_are_two_edits(ctx: CanonContext) -> None:
     assert len(result.edits) == 2
 
 
-def test_the_decoded_text_is_not_itself_canonicalized_yet(ctx: CanonContext) -> None:
-    """Pinned because it is wrong on purpose, and Story 2.4 is what makes it right.
+def test_the_decoded_text_is_canonicalized_one_level_deeper(ctx: CanonContext) -> None:
+    """The assertion Story 2.3 pinned inverted on purpose, in the commit that changed it.
 
-    Step 4 is last, so text it decodes has not been through steps 1 to 3: this decodes to a
-    ligature and a zero-width space and both survive. AD-4 closes it by canonicalizing the decoded
-    segment as an independent document at `depth + 1`. When that lands, this assertion changes,
-    visibly, in the commit that changes the behaviour.
+    Step 4 is last, so the text *this stage* produces has not been through steps 1 to 3: the raw
+    decode carries a ligature and a zero-width space, and the stage's own edit still records it
+    that way. AD-4 closes the gap outside the stage, by canonicalizing the decoded segment as an
+    independent document at `depth + 1`, so the document that leaves the layer carries neither.
     """
     hidden = "ﬁ​ne and dandy!!"
     encoded = base64.b64encode(hidden.encode()).decode()
     assert len(encoded) >= BASE64.min_encoded_chars
 
-    out = canonicalize(encoded, ctx).text
-    assert out == hidden
-    assert "ﬁ" in out
-    assert "​" in out
+    # The stage alone: unchanged from Story 2.3, because the recursion is the runner's.
+    assert stage(encoded, ctx).text == hidden
+
+    result = canonicalize(encoded, ctx)
+    assert result.text == "fine and dandy!!"
+    assert "ﬁ" not in result.text
+    assert "​" not in result.text
+    assert result.max_depth_reached == 1

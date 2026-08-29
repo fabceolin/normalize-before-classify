@@ -108,8 +108,9 @@ def test_a_broken_cover_is_refused_even_with_tracing_off() -> None:
 # --- reported spans: the edit a stage makes about a span it left alone --------------------------
 
 
-def report(text: str, spans, *, trace: bool = True) -> tuple[str, tuple[Edit, ...]]:
-    return build_reported_edits(text, spans, stage=STAGE, trace=trace)
+def report(text: str, spans) -> tuple[str, tuple[Edit, ...]]:
+    """Every span reported under the same stage name; the two-name case has its own tests below."""
+    return build_reported_edits(text, [(a, b, r, STAGE) for a, b, r in spans])
 
 
 def test_a_reported_span_that_did_not_change_is_still_an_edit() -> None:
@@ -171,7 +172,31 @@ def test_a_reported_span_past_the_end_is_refused() -> None:
         report("abcdefgh", [(4, 12, "X")])
 
 
-def test_reporting_costs_nothing_with_the_trace_off() -> None:
-    text, edits = report("see abcdef now", [(4, 10, "X")], trace=False)
-    assert text == "see X now"
-    assert edits == ()
+def test_a_reported_span_carries_the_stage_name_of_its_own_decision() -> None:
+    """Two kinds of decision, one ordered pass, two names.
+
+    A ceiling refusal and an AD-18 rejection are the same shape — `before == after` — and can be
+    interleaved in one document at one depth. Without a name per span they would be one entry kind
+    in the trace, which is exactly what AD-6 asks not to happen.
+    """
+    text, edits = build_reported_edits(
+        "a bbbb c dddd e",
+        [(2, 6, "bbbb", "decode"), (9, 13, "dddd", "decode-ceiling")],
+    )
+    assert text == "a bbbb c dddd e"
+    assert [(edit.stage, edit.span) for edit in edits] == [
+        ("decode", (2, 6)),
+        ("decode-ceiling", (9, 13)),
+    ]
+
+
+def test_reported_edits_are_built_whether_or_not_anyone_will_read_them() -> None:
+    """There is no trace switch here, and that is the point.
+
+    These edits are how the runner learns which spans were accepted and must be canonicalized one
+    level deeper. A switch that could suppress them would change the canonical text of the timing
+    pass, not just its trace. Whether they reach the document's trace is the runner's decision, and
+    `tests/canon/test_recursion.py` is where that is checked.
+    """
+    with pytest.raises(TypeError):
+        build_reported_edits("abc", [(0, 1, "X", STAGE)], trace=False)  # type: ignore[call-arg]

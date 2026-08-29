@@ -67,6 +67,46 @@ def test_the_pipeline_carries_exactly_four_steps() -> None:
     assert len(PIPELINE) == 4
 
 
+def test_exactly_one_step_declares_what_it_does_at_the_ceiling() -> None:
+    """The recursion is step 4's and the runner finds it structurally, not by name.
+
+    `step.name == "decode"` would be the textual stand-in for structural identity this project
+    keeps removing, so the runner reads `at_ceiling` off the constant instead. That makes it
+    checkable: exactly one step is recursive, and it is the one whose module owns the encoding.
+    """
+    recursive = [step for step in PIPELINE if step.at_ceiling is not None]
+    assert [step.name for step in recursive] == [decode.NAME]
+    assert recursive[0].at_ceiling is decode.run_at_ceiling
+    assert recursive[0].ceiling_name == decode.CEILING_NAME
+    assert recursive[0].emits == frozenset({decode.NAME, decode.CEILING_NAME})
+
+
+def test_a_step_that_is_not_recursive_emits_exactly_its_own_name() -> None:
+    for step in PIPELINE:
+        if step.at_ceiling is None:
+            assert step.emits == frozenset({step.name})
+
+
+def test_a_step_cannot_declare_half_of_a_recursion() -> None:
+    """Both inputs that make the constant contradict itself.
+
+    A step naming a ceiling refusal it has no entry point to produce would declare behaviour that
+    does not exist; a step with a second entry point and no second name would stamp a name the
+    runner refuses. Neither is expressible.
+    """
+    with pytest.raises(ValueError, match="with both or with neither"):
+        PipelineStage("x", nfkc.run, ceiling_name="x-ceiling")
+    with pytest.raises(ValueError, match="with both or with neither"):
+        PipelineStage("x", nfkc.run, at_ceiling=nfkc.run)
+
+
+def test_a_step_cannot_name_its_ceiling_refusal_after_itself() -> None:
+    # AD-6 asks for a *distinct* name, so that a ceiling refusal is distinguishable in the trace
+    # from an AD-18 rejection. The same name would satisfy the type and defeat the requirement.
+    with pytest.raises(ValueError, match="asks for a distinct one"):
+        PipelineStage("x", nfkc.run, ceiling_name="x", at_ceiling=nfkc.run)
+
+
 def test_the_order_cannot_be_changed_at_runtime() -> None:
     assert isinstance(PIPELINE, tuple)
     with pytest.raises(TypeError):
@@ -137,13 +177,20 @@ BATTERY = [
 
 
 @pytest.mark.parametrize("text", BATTERY)
-def test_tracing_off_produces_the_same_text_and_an_empty_trace(text: str) -> None:
-    """A trace flag that could change the canonical text would make the timing pass measure a
-    different layer from the measurement pass."""
-    loud = default_context()
-    quiet = default_context(trace_enabled=False)
-    assert canonicalize(text, quiet).text == canonicalize(text, loud).text
-    assert canonicalize(text, quiet).edits == ()
+def test_tracing_off_produces_the_same_results_and_an_empty_trace(text: str) -> None:
+    """All three reported values, not only the text.
+
+    A trace flag that could change the canonical text would make the timing pass measure a
+    different layer from the measurement pass — and so would one that changed `ceiling_hit` or
+    `max_depth_reached`, which are results the run publishes rather than trace bookkeeping. Step 4
+    builds its edits in both passes for exactly this reason; the trace is what is dropped.
+    """
+    loud = canonicalize(text, default_context())
+    quiet = canonicalize(text, default_context(trace_enabled=False))
+    assert quiet.text == loud.text
+    assert quiet.ceiling_hit == loud.ceiling_hit
+    assert quiet.max_depth_reached == loud.max_depth_reached
+    assert quiet.edits == ()
 
 
 @pytest.mark.parametrize("text", BATTERY)
@@ -279,6 +326,93 @@ def test_a_stage_that_traces_with_tracing_off_is_refused(
         canonicalize("abc", default_context(trace_enabled=False))
 
 
+def test_a_recursive_stage_may_report_with_tracing_off_and_its_edits_are_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exemption, and the reason it is not a hole.
+
+    Step 4's records are the recursion's input: the runner has to know which spans were accepted in
+    order to canonicalize them one level deeper, and it has to do that in the timing pass too or
+    the canonical text would differ between the passes. So a recursive step reports either way and
+    the runner drops the edits from the trace instead of the stage suppressing them.
+    """
+
+    def loud(text: str, context: CanonContext) -> StageResult:
+        # Accepts once and is the identity on what it produced, so the runner's recursion into the
+        # accepted span terminates the way a real decode's contraction makes it terminate.
+        if text != "abc":
+            return StageResult(text=text)
+        return StageResult(
+            text="Xbc", edits=(Edit(stage="loud", span=(0, 1), before="a", after="X"),)
+        )
+
+    monkeypatch.setattr(
+        pipeline,
+        "PIPELINE",
+        (PipelineStage("loud", loud, ceiling_name="loud-ceiling", at_ceiling=loud),),
+    )
+    result = canonicalize("abc", default_context(trace_enabled=False, ceiling=5))
+    assert result.text == "Xbc"
+    assert result.edits == ()
+
+    traced = canonicalize("abc", default_context(ceiling=5))
+    assert [edit.stage for edit in traced.edits] == ["loud"]
+
+
+def test_a_recursive_stage_is_still_verified_with_tracing_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reporting either way means being read back either way.
+
+    Without this the timing pass would splice text on the strength of edits nothing had checked,
+    and a misplaced span would corrupt the document in the pass whose output nobody inspects.
+    """
+
+    def liar(text: str, context: CanonContext) -> StageResult:
+        return StageResult(
+            text="Xbc", edits=(Edit(stage="liar", span=(0, 1), before="z", after="X"),)
+        )
+
+    monkeypatch.setattr(
+        pipeline,
+        "PIPELINE",
+        (PipelineStage("liar", liar, ceiling_name="liar-ceiling", at_ceiling=liar),),
+    )
+    with pytest.raises(StageContractViolated, match="where the text it was handed holds"):
+        canonicalize("abc", default_context(trace_enabled=False, ceiling=5))
+
+
+def test_a_recursive_stage_may_stamp_the_ceiling_name_it_declared(
+    monkeypatch: pytest.MonkeyPatch, ctx: CanonContext
+) -> None:
+    """The second name is admitted because the step declared it, and only then.
+
+    Both halves are here: the declared name passes, an undeclared sibling does not. A runner that
+    admitted any name would make `emits` decoration.
+    """
+
+    def refuse(text: str, context: CanonContext) -> StageResult:
+        return StageResult(
+            text=text, edits=(Edit(stage="s-ceiling", span=(0, 1), before="a", after="a"),)
+        )
+
+    def wrong(text: str, context: CanonContext) -> StageResult:
+        return StageResult(
+            text=text, edits=(Edit(stage="s-undeclared", span=(0, 1), before="a", after="a"),)
+        )
+
+    monkeypatch.setattr(
+        pipeline, "PIPELINE", (PipelineStage("s", refuse, ceiling_name="s-ceiling", at_ceiling=refuse),)
+    )
+    assert canonicalize("abc", ctx).text == "abc"
+
+    monkeypatch.setattr(
+        pipeline, "PIPELINE", (PipelineStage("s", wrong, ceiling_name="s-ceiling", at_ceiling=wrong),)
+    )
+    with pytest.raises(StageContractViolated, match="not one of the names it declares"):
+        canonicalize("abc", ctx)
+
+
 def test_a_faithful_stub_stage_passes_the_check(
     monkeypatch: pytest.MonkeyPatch, ctx: CanonContext
 ) -> None:
@@ -315,6 +449,21 @@ def test_the_default_context_carries_the_whole_vendored_table() -> None:
 def test_the_default_context_traces_unless_told_otherwise() -> None:
     assert default_context().trace_enabled is True
     assert default_context(trace_enabled=False).trace_enabled is False
+
+
+def test_the_default_context_carries_the_declared_ceiling_and_takes_an_override() -> None:
+    assert default_context().ceiling == pipeline.DEFAULT_CEILING
+    assert default_context(ceiling=0).ceiling == 0
+    assert default_context(ceiling=9).ceiling == 9
+
+
+def test_the_declared_ceiling_is_a_non_negative_count() -> None:
+    # Read against the constant rather than against a copy of the number: retuning the ceiling
+    # must not need this file edited, and AD-20 binds the corpus to it relationally for the same
+    # reason.
+    assert isinstance(pipeline.DEFAULT_CEILING, int)
+    assert not isinstance(pipeline.DEFAULT_CEILING, bool)
+    assert pipeline.DEFAULT_CEILING >= 0
 
 
 def test_the_context_cannot_be_built_from_a_data_directory_with_no_artifact(

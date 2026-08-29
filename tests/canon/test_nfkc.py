@@ -37,7 +37,7 @@ BATTERY = [
 
 @pytest.fixture(scope="module")
 def ctx() -> CanonContext:
-    return CanonContext(confusables={0x0430: "a"})
+    return CanonContext(confusables={0x0430: "a"}, ceiling=0)
 
 
 def test_a_document_already_in_nfkc_is_untouched(ctx: CanonContext) -> None:
@@ -132,8 +132,8 @@ def test_replaying_the_edits_reproduces_the_output(text: str, ctx: CanonContext)
 
 @pytest.mark.parametrize("text", BATTERY)
 def test_tracing_off_produces_the_same_text_and_no_edits(text: str) -> None:
-    quiet = CanonContext(confusables={0x0430: "a"}, trace_enabled=False)
-    loud = CanonContext(confusables={0x0430: "a"})
+    quiet = CanonContext(confusables={0x0430: "a"}, ceiling=0, trace_enabled=False)
+    loud = CanonContext(confusables={0x0430: "a"}, ceiling=0)
     assert run(text, quiet).text == run(text, loud).text
     assert run(text, quiet).edits == ()
 

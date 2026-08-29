@@ -32,7 +32,7 @@ RLO = "‮"
 
 @pytest.fixture(scope="module")
 def ctx() -> CanonContext:
-    return CanonContext(confusables={0x0430: "a"})
+    return CanonContext(confusables={0x0430: "a"}, ceiling=0)
 
 
 # --- behaviour ------------------------------------------------------------------------------
@@ -76,7 +76,7 @@ def test_every_declared_character_is_actually_removed(code_point: int, ctx: Cano
 
 
 def test_tracing_off_removes_the_same_characters_and_records_nothing() -> None:
-    quiet = CanonContext(confusables={0x0430: "a"}, trace_enabled=False)
+    quiet = CanonContext(confusables={0x0430: "a"}, ceiling=0, trace_enabled=False)
     result = run(f"a{ZWSP}{RLO}b", quiet)
     assert result.text == "ab"
     assert result.edits == ()

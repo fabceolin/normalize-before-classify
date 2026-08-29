@@ -194,12 +194,75 @@ def test_a_result_that_does_not_hold_together_is_refused(record, kwargs: dict) -
         record(**kwargs)
 
 
+# --- the recursion contract's two reported values ---------------------------------------------
+
+
+def test_a_canon_result_reports_no_recursion_by_default() -> None:
+    result = CanonResult(text="x")
+    assert result.ceiling_hit is False
+    assert result.max_depth_reached == 0
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "needle"),
+    [
+        ({"ceiling_hit": "yes"}, "must be a bool"),
+        ({"ceiling_hit": 1}, "must be a bool"),
+        ({"max_depth_reached": 1.0}, "must be an int"),
+        ({"max_depth_reached": True}, "must be an int"),
+        ({"max_depth_reached": -1}, "must not be negative"),
+    ],
+)
+def test_a_recursion_report_that_does_not_hold_together_is_refused(
+    kwargs: dict, needle: str
+) -> None:
+    with pytest.raises(ValueError, match=needle):
+        CanonResult(text="x", **kwargs)  # type: ignore[arg-type]
+
+
+def test_a_reported_depth_shallower_than_its_own_trace_is_refused() -> None:
+    """The gate, with the input that makes it fail.
+
+    An edit stamped at depth 2 is evidence that a document was canonicalized at depth 2. A result
+    claiming it never went past depth 1 is contradicting the trace it is carrying, which is the
+    shape this project keeps finding: a value recorded beside its evidence and never compared.
+    """
+    deep = Edit(stage="decode", span=(0, 1), before="a", after="b", depth=2)
+    with pytest.raises(ValueError, match="the trace holds an edit at depth 2"):
+        CanonResult(text="b", edits=(deep,), max_depth_reached=1)
+
+    # The negative control: the same trace with a depth that does account for it.
+    assert CanonResult(text="b", edits=(deep,), max_depth_reached=2).max_depth_reached == 2
+    assert CanonResult(text="b", edits=(deep,), max_depth_reached=5).max_depth_reached == 5
+
+
+def test_a_deeper_reported_depth_than_the_trace_shows_is_allowed() -> None:
+    """One-directional on purpose, and the two inputs that show why.
+
+    With tracing off there is no trace to bound anything; and a sub-document that needed no change
+    produces no edit at all although it was canonicalized. Requiring equality would refuse both.
+    """
+    assert CanonResult(text="x", edits=(), max_depth_reached=3).max_depth_reached == 3
+
+
 def test_a_context_freezes_its_table_and_defaults_to_tracing() -> None:
-    ctx = CanonContext(confusables={0x0430: "a"})
+    ctx = CanonContext(confusables={0x0430: "a"}, ceiling=3)
     assert ctx.trace_enabled is True
+    assert ctx.ceiling == 3
     assert ctx.confusables[0x0430] == "a"
     with pytest.raises(TypeError):
         ctx.confusables[0x0431] = "b"  # type: ignore[index]
+
+
+def test_a_context_has_no_default_ceiling_of_its_own() -> None:
+    """FR10 asks for a declared default and never an implicit one.
+
+    This module is a leaf and cannot import `nbc.canon.pipeline.DEFAULT_CEILING`, which is exactly
+    what makes "one home for the default" enforceable rather than merely intended: a context built
+    without a ceiling is a `TypeError` here, so no second place can quietly supply one.
+    """
+    with pytest.raises(TypeError):
+        CanonContext(confusables={})  # type: ignore[call-arg]
 
 
 @pytest.mark.parametrize(
@@ -214,8 +277,18 @@ def test_a_context_freezes_its_table_and_defaults_to_tracing() -> None:
         ({"confusables": {0x0430: ""}}, "non-empty str"),
         ({"confusables": {0x0430: 97}}, "non-empty str"),
         ({"confusables": {}, "trace_enabled": "yes"}, "must be a bool"),
+        ({"confusables": {}, "ceiling": 1.5}, "must be an int"),
+        ({"confusables": {}, "ceiling": True}, "must be an int"),
+        ({"confusables": {}, "ceiling": "3"}, "must be an int"),
+        ({"confusables": {}, "ceiling": -1}, "must not be negative"),
     ],
 )
 def test_a_context_that_does_not_hold_together_is_refused(kwargs: dict, needle: str) -> None:
+    kwargs = {"ceiling": 3, **kwargs}
     with pytest.raises(ValueError, match=needle):
         CanonContext(**kwargs)  # type: ignore[arg-type]
+
+
+def test_a_ceiling_of_zero_is_a_legitimate_setting() -> None:
+    # Zero is not "unset": it means decode nothing and report every candidate as a ceiling hit.
+    assert CanonContext(confusables={}, ceiling=0).ceiling == 0

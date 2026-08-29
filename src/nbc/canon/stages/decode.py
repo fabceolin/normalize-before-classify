@@ -47,12 +47,19 @@ level of `base64(base64(x))` — which AD-4 requires to decode one level per rec
 therefore holds by construction, proved by enumeration in `tests/canon/test_decode.py`, rather than
 shipping as an `if` no input can reach.
 
-**What this step leaves for Story 2.4.** It is the last step, so text it decodes has not been
-through steps 1 to 3: an accepted decode can insert un-normalized text carrying zero-width
-characters. AD-4 closes that by canonicalizing the decoded segment as an independent document at
-`depth + 1`, which is the recursion Story 2.4 owns. There is no ceiling here, no depth arithmetic,
-and no recursion — a constant standing in for behaviour nobody wrote is the failure this epic was
-warned about by name.
+**Two entry points, and still no depth arithmetic here.** AD-5 gives every stage the signature
+`Stage(text, ctx)` with no depth in it, and a stage genuinely does not know how deep it is being
+run. So this module declares *what to do at the ceiling* — `run_at_ceiling`, which decides exactly
+as `run` does and then replaces nothing, reporting a would-have-decoded candidate under
+`CEILING_NAME` — and `canon/pipeline.py` decides *when* that is the right entry point. The one
+comparison this story owns, `depth >= ceiling`, is in the runner; the ceiling itself is
+`CanonContext.ceiling`, defaulted once in `canon/pipeline.py::DEFAULT_CEILING`. No literal here,
+no constant here, and nothing here reads a depth.
+
+The text an accepted decode inserts has not been through steps 1 to 3, because this is the last
+step: it can carry a ligature or a zero-width character. AD-4 closes that outside this module, by
+canonicalizing the decoded segment as an independent document at `depth + 1` — the runner's job,
+because the runner is the only thing that knows what `depth` is.
 """
 
 from __future__ import annotations
@@ -63,11 +70,12 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Final
 
-from nbc.canon.edits import Segment, build_reported_edits
+from nbc.canon.edits import Report, build_reported_edits
 from nbc.schema import CanonContext, StageResult
 
 __all__ = [
     "BASE64",
+    "CEILING_NAME",
     "CONSTANTS",
     "HEX",
     "NAME",
@@ -77,10 +85,21 @@ __all__ = [
     "decide",
     "passes_candidate_test",
     "run",
+    "run_at_ceiling",
     "shannon_bits_per_char",
 ]
 
 NAME: Final[str] = "decode"
+
+CEILING_NAME: Final[str] = "decode-ceiling"
+"""The stage name a candidate carries when the recursion ceiling is the only thing that refused it.
+
+AD-6 asks for a name distinct from `NAME` so a reader of the trace can tell "the layer would have
+opened this and was not allowed to" from "the layer examined this and decided it was not an
+encoding". The two are the same shape — an `Edit` whose `before` equals its `after` — and without
+two names they would be the same entry. They can occur in one document at one depth, interleaved,
+which is why the name travels per reported span and not per stage call.
+"""
 
 
 # --- the declared block ------------------------------------------------------------------------
@@ -351,7 +370,18 @@ def _runs(
     return spans
 
 
-def _decisions(text: str) -> list[Segment]:
+Decision = tuple[int, int, str | None]
+"""`(start, end, decoded)`: one examined candidate. `decoded` is `None` when it was refused.
+
+The decision is separate from the report it becomes because the two entry points below differ only
+in what they *do* with it: below the ceiling an accepted decision replaces its span, at the ceiling
+it replaces nothing and is reported under `CEILING_NAME` instead. Deciding once and reporting twice
+is what makes `ceiling_hit` mean "solely because of the depth" — the candidate went through the
+whole of AD-18, structural decode and strict UTF-8 included, before the depth was consulted.
+"""
+
+
+def _decisions(text: str) -> list[Decision]:
     """The reported spans of `text`, in order: one per candidate, decoded or refused.
 
     The length constant appears here as well as inside the candidate test, and reads the same
@@ -364,7 +394,7 @@ def _decisions(text: str) -> list[Segment]:
     candidate is reported instead where the run is long enough to be one — one span, one report —
     and hex's refusals stand alone only where it is not.
     """
-    reported: list[Segment] = []
+    reported: list[Decision] = []
 
     for start, end in _runs(text, BASE64.alphabet):
         hex_spans = [
@@ -376,20 +406,48 @@ def _decisions(text: str) -> list[Segment]:
         accepted_hex = any(decoded is not None for _, _, decoded in hex_decisions)
 
         if not accepted_hex and end - start >= BASE64.min_encoded_chars:
-            decoded = decide(text[start:end], BASE64)
-            reported.append((start, end, text[start:end] if decoded is None else decoded))
+            reported.append((start, end, decide(text[start:end], BASE64)))
             continue
 
-        for a, b, decoded in hex_decisions:
-            reported.append((a, b, text[a:b] if decoded is None else decoded))
+        reported.extend(hex_decisions)
 
     return reported
 
 
 def run(text: str, ctx: CanonContext) -> StageResult:
-    """Replace every accepted candidate in place, and report every refused one as a no-op edit."""
-    new_text, edits = build_reported_edits(
-        text, _decisions(text), stage=NAME, trace=ctx.trace_enabled
-    )
+    """Replace every accepted candidate in place, and report every refused one as a no-op edit.
+
+    This is step 4 below the recursion ceiling. `ctx.trace_enabled` is deliberately not consulted:
+    these edits are how `canon/pipeline.py` learns which spans it must canonicalize as independent
+    documents at `depth + 1`, so switching them off would change the canonical text rather than
+    only the trace. The runner drops them from the document's trace when tracing is off.
+    """
+    reports: list[Report] = [
+        (start, end, text[start:end] if decoded is None else decoded, NAME)
+        for start, end, decoded in _decisions(text)
+    ]
+    new_text, edits = build_reported_edits(text, reports)
+    return StageResult(text=new_text, edits=edits)
+
+
+def run_at_ceiling(text: str, ctx: CanonContext) -> StageResult:
+    """Step 4 at the recursion ceiling: decide everything, replace nothing, report why.
+
+    Every candidate goes through exactly the decision `run` applies, because AD-6's `ceiling_hit`
+    is true only for a candidate refused **solely** because of the depth. A candidate this stage
+    would have refused anyway is reported under `NAME`, as an ordinary AD-18 rejection, and does
+    not make the run a ceiling hit; a candidate that would have decoded is reported under
+    `CEILING_NAME`. The text is returned unchanged either way.
+
+    The cost, stated rather than discovered: at the ceiling the bytes are decoded and thrown away,
+    because there is no way to know whether the depth was the *only* reason without doing so. That
+    is one extra level of decoding, not an unbounded one, and it is what the amplification bound
+    the ceiling exists for still holds against.
+    """
+    reports: list[Report] = [
+        (start, end, text[start:end], NAME if decoded is None else CEILING_NAME)
+        for start, end, decoded in _decisions(text)
+    ]
+    new_text, edits = build_reported_edits(text, reports)
     return StageResult(text=new_text, edits=edits)
 
