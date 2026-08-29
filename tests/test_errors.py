@@ -183,3 +183,25 @@ def test_the_registry_is_a_read_only_snapshot() -> None:
     codes = declared_exit_codes()
     with pytest.raises(TypeError):
         codes[99] = NbcError  # type: ignore[index]
+
+
+# --- the aborts the project has actually declared --------------------------------------------
+
+
+def test_the_source_scan_agrees_with_the_declared_aborts_at_runtime() -> None:
+    """Otherwise the collision test above could pass while reading the tree wrongly.
+
+    Aborts are declared in the module that raises them, not gathered in `errors.py`, so the
+    static scan is what makes a collision between two modules visible without importing both.
+    This ties the scan to at least one abort whose code can also be read at runtime.
+    """
+    from nbc.platform import UnsupportedPlatform
+
+    declared = {name: code for _, name, code in _error_declarations()}
+    assert declared["UnsupportedPlatform"] == UnsupportedPlatform.exit_code
+
+
+def test_the_project_declares_at_least_one_abort() -> None:
+    """Keeps the distinctness test from passing vacuously over an empty tree."""
+    codes = [code for _, _, code in _error_declarations() if code is not None]
+    assert codes, "no abort is declared anywhere in src/nbc/"

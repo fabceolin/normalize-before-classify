@@ -16,7 +16,7 @@ import pytest
 import nbc
 
 SEED_NAMESPACES = ("canon", "corpus", "baselines", "harness", "report")
-LEAF_MODULES = ("schema", "errors")
+LEAF_MODULES = ("schema", "errors", "platform")
 
 
 @pytest.mark.parametrize("namespace", SEED_NAMESPACES)
