@@ -27,9 +27,9 @@ on:
     branches: [main]
   pull_request:
 
-# Linux only, per decision D-A: the platform floor is glibc and manylinux wheel tags, both Linux
-# facts, and `platform.py` aborts on any other platform rather than approving a machine that has
-# no wheel.
+# Linux only, and `platform.py` enforces it: the floor's evidence is a glibc version and
+# manylinux wheel tags, both Linux facts, so every other platform aborts naming itself rather
+# than being approved by a check that cannot speak about it.
 env:
   UV_VERSION: "0.12.5"
 
@@ -55,11 +55,33 @@ jobs:
         run: uv run pytest
 
       - name: Prove the platform abort fires
-        # A floor above the runner's own, so the gate is exercised rather than assumed. Without
-        # this the abort is a code path nothing has ever taken.
+        # A floor above the runner's own, so the gate is exercised rather than assumed.
+        #
+        # The EXIT CODE is checked, not merely non-zero-ness. `if ...; then fail; fi` was green
+        # whether the abort fired or the command died of a typo, an import error or a missing
+        # module -- a gate that passes on its own failure. 3 is UnsupportedPlatform; 2 is a usage
+        # error, which is what a typo in this very step produces.
         run: |
-          if uv run python -m nbc.platform --require-glibc 99.0; then
-            echo "::error::the platform preflight approved a machine below an injected floor"
+          set +e
+          uv run python -m nbc.platform --require-glibc 99.0
+          status=$?
+          set -e
+          if [ "$status" -ne 3 ]; then
+            echo "::error::expected exit 3 (UnsupportedPlatform), got $status"
+            exit 1
+          fi
+
+      - name: Prove the gate hook cannot disable itself
+        # The flag above can only RAISE the floor. Lowering it would pass on every machine the
+        # real floor passes on, silently, while still publishing a reason string claiming the
+        # floor went up. Exit 2 is the usage error that refusal produces.
+        run: |
+          set +e
+          uv run python -m nbc.platform --require-glibc 2.0
+          status=$?
+          set -e
+          if [ "$status" -ne 2 ]; then
+            echo "::error::--require-glibc accepted a floor at or below the declared one"
             exit 1
           fi
 
@@ -69,8 +91,12 @@ jobs:
 
       - name: Refuse a dirty tree
         # The suite must not write into the working tree. A test that leaves a file behind is a
-        # test that could have left a *different* file behind.
-        run: git diff --exit-code
+        # test that could have left a *different* file behind -- and `git diff --exit-code` is
+        # blind to a file that was CREATED, which is the shape a stray write actually takes.
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain)" || {
+            echo "::error::the run left files behind:"; git status --porcelain; exit 1; }
 
   lockfile:
     name: lockfile is in sync
@@ -115,5 +141,9 @@ jobs:
       - name: Refuse a dirty tree
         # CI never writes the published artifacts. A smoke run that overwrote
         # results/results.json or README.md would ship a 20-item table that looks structurally
-        # identical to the headline one, with a small n as the only tell.
-        run: git diff --exit-code
+        # identical to the headline one, with a small n as the only tell. Untracked files count:
+        # `git diff` cannot see a file that did not exist before the run.
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain)" || {
+            echo "::error::the run left files behind:"; git status --porcelain; exit 1; }

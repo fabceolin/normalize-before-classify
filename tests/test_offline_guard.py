@@ -134,3 +134,23 @@ def test_loopback_is_permitted() -> None:
             client.close()
     finally:
         server.close()
+
+
+def test_uninstall_lifts_the_offline_environment_too(monkeypatch: Any) -> None:
+    """`smoke` is the one escape hatch, and it stopped being one for anything but sockets.
+
+    The guard sets HF_HUB_OFFLINE and its siblings process-wide. `uninstall()` restored the
+    socket API and left those set, so a smoke test -- the only tier that touches a real pinned
+    artifact, and the only one CI runs against the hub -- got its sockets back while the
+    huggingface libraries went on refusing to fetch. Introduced by the fix for the guard's own
+    holes, which is the shape this repository keeps finding.
+    """
+    offline_guard.uninstall()
+    try:
+        for var in offline_guard.HF_OFFLINE_VARS:
+            assert os.environ.get(var) != "1", f"{var} survived uninstall()"
+    finally:
+        offline_guard.install()
+
+    for var in offline_guard.HF_OFFLINE_VARS:
+        assert os.environ[var] == "1", "install() must set them back"

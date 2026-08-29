@@ -1682,7 +1682,7 @@ def resolve_from_cache(
     return Resolution(artifact.revision, CHECKED_AGAINST_CACHE)
 
 
-def resolve_over_http(artifact: RemoteArtifact) -> str | None:
+def resolve_over_http(artifact: RemoteArtifact) -> Resolution | None:
     """Ask the hub what the pinned revision resolves to. The first fetch, and the smoke job.
 
     Any failure to get an answer is reported as `None` rather than raised: "the pin could not be

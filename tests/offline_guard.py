@@ -42,6 +42,7 @@ _LOCAL_FAMILIES: Final[frozenset[int]] = frozenset(
 )
 
 _SAVED: dict[str, Any] = {}
+_SAVED_ENVIRONMENT: dict[str, str | None] = {}
 
 
 class NetworkAccessInUnitSuite(RuntimeError):
@@ -129,6 +130,11 @@ def install() -> None:
             setattr(socket, name, guarded_resolution(name))
 
     for var in HF_OFFLINE_VARS:
+        # Saved so `uninstall()` can put them back. Setting them process-wide and never lifting
+        # them made `smoke` -- the one documented escape hatch, and the only tier CI runs against
+        # real artifacts -- an escape hatch for in-process sockets and nothing else: the
+        # huggingface libraries would still refuse to fetch.
+        _SAVED_ENVIRONMENT[var] = os.environ.get(var)
         os.environ[var] = "1"
 
 
@@ -144,6 +150,12 @@ def uninstall() -> None:
     for name in ("gethostbyname", "gethostbyname_ex", "gethostbyaddr"):
         if _SAVED[name] is not None:
             setattr(socket, name, _SAVED[name])
+    for var, previous in _SAVED_ENVIRONMENT.items():
+        if previous is None:
+            os.environ.pop(var, None)
+        else:
+            os.environ[var] = previous
+    _SAVED_ENVIRONMENT.clear()
     _SAVED.clear()
 
 

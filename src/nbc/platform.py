@@ -392,9 +392,22 @@ def preflight(
                 f"{requirements.glibc.requirement}. {requirements.glibc.reason}"
             )
     else:
-        # Never a silent skip: the outcome is recorded, and it names the platform that was
-        # detected so a reader of `results.json` can see which machine took this branch.
+        # Decision D-A, and it is the branch this module used to get wrong in two directions at
+        # once. The floor's whole evidence base is a glibc version and manylinux wheel tags, both
+        # Linux facts -- so applying the Linux architecture NAMES on other platforms approved an
+        # Intel Mac (darwin/x86_64), for which no macOS wheel exists, while refusing an Apple
+        # Silicon Mac (darwin/arm64) and a Windows box (win32/AMD64), for which wheels do exist,
+        # with a message wrong twice over. `android/aarch64` passed outright.
+        #
+        # A published table always comes from the Linux path, so the honest answer is to say so
+        # and abort, naming the platform, rather than to approve a machine that cannot install
+        # the pinned runtime and let it discover that from a wheel resolver.
         platform_check = "not_applicable"
+        failures.append(
+            f"this platform is {observation.system!r}, and the reproduction floor is Linux only. "
+            f"{requirements.glibc.reason} The published table is produced on the Linux path, so "
+            f"a run here would be neither reproducing it nor comparable to it."
+        )
 
     observed_interpreter = (observation.implementation, *observation.python_version[:2])
     required_interpreter = (
@@ -436,6 +449,17 @@ def with_glibc_floor(
     The reason string says the floor was injected, so a `results.json` written under an
     injected floor cannot be mistaken for one written under the declared floor.
     """
+    if minimum <= requirements.glibc.minimum:
+        # Raising the floor proves the abort fires. Lowering it proves nothing and DISABLES the
+        # check, while the reason string below still says the floor went up -- so a CI typo of
+        # `2.0` for `99.0` turned the gate that proves the abort into a permanently green no-op,
+        # and published a `run` block that contradicted itself in one JSON object.
+        raise ValueError(
+            f"the injected glibc floor {minimum[0]}.{minimum[1]} is not above the declared "
+            f"{requirements.glibc.requirement}. This hook exists to prove the abort fires, and "
+            f"a floor at or below the declared one cannot: it would pass on every machine the "
+            f"real floor passes on, silently."
+        )
     return replace(
         requirements,
         glibc=replace(
@@ -475,7 +499,13 @@ def main(argv: list[str] | None = None) -> int:
         match = re.fullmatch(r"\s*(\d+)\.(\d+)\s*", args.require_glibc)
         if match is None:
             parser.error(f"--require-glibc expects X.Y, got {args.require_glibc!r}")
-        requirements = with_glibc_floor((int(match.group(1)), int(match.group(2))))
+        try:
+            requirements = with_glibc_floor((int(match.group(1)), int(match.group(2))))
+        except ValueError as refusal:
+            # A usage error, not a platform abort: the caller asked for something the hook
+            # cannot do. `parser.error` exits 2 and prints to stderr, which is what a CI step
+            # with a typo in it should see rather than a green run.
+            parser.error(str(refusal))
 
     try:
         report = preflight(requirements)

@@ -18,11 +18,14 @@ import tomllib
 from dataclasses import replace
 from pathlib import Path
 
+from typing import Any
+
 import pytest
 
 from nbc.errors import EXIT_OK, NbcError, exit_code_for
 import nbc.platform as platform_module
 from nbc.platform import (
+    main,
     GLIBC_CONFSTR_NAME,
     REQUIREMENTS,
     GlibcDetection,
@@ -228,16 +231,41 @@ def test_linux_with_no_detectable_glibc_aborts_naming_musl(confstr) -> None:
     ids=["attribute-error", "value-error", "oserror-musl", "returns-none"],
 )
 @pytest.mark.parametrize("system", ["darwin", "win32"])
-def test_a_platform_without_glibc_is_recorded_as_not_applicable_never_skipped(
-    confstr, system: str
-) -> None:
-    """`sys.platform` is the only thing that can tell musl from not-applicable."""
+def test_a_platform_without_glibc_aborts_naming_the_platform(confstr, system: str) -> None:
+    """Decision D-A: the reproduction floor is Linux only, and it says so rather than guessing.
+
+    This test asserted the opposite until the decision landed, and the opposite was wrong in two
+    directions at once. The floor's evidence is a glibc version and manylinux wheel tags, both
+    Linux facts, and applying the Linux architecture NAMES elsewhere approved `darwin/x86_64`,
+    for which no macOS wheel exists, while refusing `darwin/arm64` and `win32/AMD64`, for which
+    wheels do. `sys.platform` is still the only thing that can tell musl from not-applicable, and
+    the abort still carries which shape produced the observation.
+    """
     elsewhere = _with_glibc(detect_glibc(confstr), system=system)
-    report = preflight(REQUIREMENTS, elsewhere)
-    assert report.platform_check == "not_applicable"
-    assert report.system == system, "the outcome carries the platform that was detected"
-    assert report.glibc is None
-    assert report.glibc_detail, "not a silent skip: the shape that produced it is recorded"
+
+    with pytest.raises(UnsupportedPlatform) as abort:
+        preflight(REQUIREMENTS, elsewhere)
+
+    message = str(abort.value)
+    assert "Linux only" in message
+    assert repr(system) in message, "the abort names the platform that was detected"
+
+
+@pytest.mark.parametrize("machine", ["arm64", "AMD64", "x86_64"])
+def test_no_machine_name_rescues_a_non_linux_platform(machine: str) -> None:
+    """The architecture set is Linux wheel-tag names and does not decide this any more.
+
+    Before D-A, `darwin/x86_64` PASSED -- approved by a preflight for a platform whose only
+    wheel is arm64 -- while `darwin/arm64` and `win32/AMD64`, which have wheels, were refused
+    by a message that was wrong twice over (`arm64` is `aarch64`; `AMD64` is `x86_64`).
+    """
+    elsewhere = replace(
+        _with_glibc(detect_glibc(_raises(AttributeError("no confstr"))), system="darwin"),
+        machine=machine,
+    )
+
+    with pytest.raises(UnsupportedPlatform, match="Linux only"):
+        preflight(REQUIREMENTS, elsewhere)
 
 
 def test_the_wrong_interpreter_aborts_naming_observed_required_and_the_reason() -> None:
@@ -425,3 +453,53 @@ def test_the_declared_interpreter_is_the_one_the_project_is_pinned_to(repo_root:
 
     assert pyproject["project"]["requires-python"] == f"=={major}.{minor}.*"
     assert (repo_root / ".python-version").read_text(encoding="utf-8").strip() == f"{major}.{minor}"
+
+
+# --- Pass 9: what the remediation itself broke or failed to land --------------------------------
+
+
+@pytest.mark.parametrize("floor", ["2.0", "2.28", "1.5"])
+def test_the_gate_hook_refuses_to_lower_the_floor(floor: str) -> None:
+    """`--require-glibc` exists to PROVE the abort fires, and lowering it proves nothing.
+
+    Before this, `--require-glibc 2.0` exited 0 on a glibc 2.39 machine and published a `run`
+    block reading `"requirement": "glibc >= 2.0"` beside `"reason": "floor injected by the
+    caller, ABOVE the declared glibc >= 2.28"` -- self-contradictory in one JSON object. A CI
+    typo of `2.0` for `99.0` turned the gate that proves the abort into a permanent green.
+    """
+    major, minor = (int(part) for part in floor.split("."))
+
+    with pytest.raises(ValueError, match="not above the declared"):
+        with_glibc_floor((major, minor))
+
+
+def test_the_gate_hook_still_accepts_a_floor_above_the_declared_one() -> None:
+    """The other half: the legitimate use has to keep working, or CI loses its only gate."""
+    raised = with_glibc_floor((99, 0))
+
+    assert raised.glibc.minimum == (99, 0)
+    assert "injected" in raised.glibc.reason
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_exit"),
+    [
+        (["--require-glibc", "2.0"], 2),   # usage error: the hook cannot lower the floor
+        (["--require-glibc", "99.0"], 3),  # the platform abort, which is the gate firing
+        ([], 0),                           # this machine, which qualifies
+    ],
+)
+def test_the_entrypoint_distinguishes_a_usage_error_from_an_abort(
+    argv: list[str], expected_exit: int, capsys: Any
+) -> None:
+    """CI's gate step must be able to tell the abort firing from the command merely failing.
+
+    Its check was `if uv run python -m nbc.platform --require-glibc 99.0; then fail`, which is
+    green whether the abort fires or the command dies for any other reason -- a typo in the flag,
+    an import error, a missing module. Three distinct exit codes is what makes that step mean
+    something.
+    """
+    with pytest.raises(SystemExit) as exited:
+        raise SystemExit(main(argv))
+
+    assert exited.value.code == expected_exit

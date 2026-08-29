@@ -551,7 +551,14 @@ def test_the_batch_size_constant_is_not_a_free_parameter_either() -> None:
     determines batch composition, so if composition moved scores then a memory knob would be a
     measurement parameter and two runs over identical inputs could report different recalls.
     """
-    documents = [[[index + 1, index + 2]] for index in range(BATCH_SIZE * 2 + 1)]
+    # Windows of DELIBERATELY UNEQUAL width. The first version of this test built every document
+    # two tokens wide, so `_feed` never padded at any batch size and the assertion below held for
+    # any graph at all -- including one with `attention_mask` replaced by all-ones. A test written
+    # to prove a constant is not a free parameter, that could not observe the parameter.
+    documents = [
+        [[value + 1 for value in range(1 + (index % 7) * 60)]]
+        for index in range(BATCH_SIZE * 2 + 1)
+    ]
     texts = [f"doc {index}" for index in range(len(documents))]
 
     by_size = {
