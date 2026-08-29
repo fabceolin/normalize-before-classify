@@ -571,18 +571,84 @@ def _source_files() -> list[Path]:
     return sorted(Path(nbc.__file__).resolve().parent.rglob("*.py"))
 
 
+TOKENIZER_LOADERS: frozenset[str] = frozenset({"Tokenizer", "from_file", "from_pretrained"})
+"""The closed vocabulary of names that load a tokenizer, matched by identity, not by substring."""
+
+
+def _called_name(node: ast.Call) -> str | None:
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    return None
+
+
+def _tokenizer_uses(path: Path) -> Iterator[str]:
+    """Every place `path` loads a tokenizer, found in the parsed source rather than in its text.
+
+    This read the file as a string and asked whether `"Tokenizer("` appeared in it. That is a
+    textual pattern standing in for a structural fact, and it has both failure directions: it
+    called `WindowedTokenizer(` an offender, and it fired on the words in a comment. Matching the
+    *called name* against a closed set answers the question that was being asked — is a tokenizer
+    constructed or loaded here — and an aliased import is caught by the import rule below rather
+    than by hoping the alias contains the word.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "tokenizers" or alias.name.startswith("tokenizers."):
+                    yield f"import {alias.name}"
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == "tokenizers" or module.startswith("tokenizers."):
+                yield f"from {module} import ..."
+        elif isinstance(node, ast.Call):
+            name = _called_name(node)
+            if name in TOKENIZER_LOADERS:
+                yield f"{name}() at line {node.lineno}"
+
+
 def test_only_the_shared_module_constructs_a_tokenizer() -> None:
     """Every tokenizer in this project is neutralized on load, which needs one loader."""
     offenders: list[str] = []
     for path in _source_files():
         if path == Path(tokenization.__file__).resolve():
             continue
-        source = path.read_text(encoding="utf-8")
-        for needle in ("Tokenizer(", "from_file(", "from_pretrained(", "import tokenizers"):
-            if needle in source:
-                offenders.append(f"{path.name}: {needle}")
+        offenders.extend(f"{path.name}: {use}" for use in _tokenizer_uses(path))
 
     assert not offenders, "tokenizers are loaded in one place: " + "; ".join(offenders)
+
+
+def test_the_tokenizer_scan_sees_a_loader_and_ignores_the_word(tmp_path: Path) -> None:
+    """The gate's own failing input, and the false positive it used to produce.
+
+    Without this, replacing a substring scan with a parse would be an untested rewrite of the one
+    check that keeps a second tokenizer loader out of the project.
+    """
+    offending = tmp_path / "offending.py"
+    offending.write_text(
+        "import tokenizers\n"
+        "from tokenizers import Tokenizer\n"
+        "def load(path):\n"
+        "    return Tokenizer.from_file(path)\n",
+        encoding="utf-8",
+    )
+    found = list(_tokenizer_uses(offending))
+    assert any(use.startswith("import tokenizers") for use in found)
+    assert any(use.startswith("from tokenizers") for use in found)
+    assert any(use.startswith("from_file()") for use in found)
+
+    innocent = tmp_path / "innocent.py"
+    innocent.write_text(
+        '"""A docstring that says Tokenizer( and from_file( and import tokenizers."""\n'
+        "class WindowedTokenizer:\n"
+        "    pass\n"
+        "def build():\n"
+        "    return WindowedTokenizer()\n",
+        encoding="utf-8",
+    )
+    assert list(_tokenizer_uses(innocent)) == []
 
 
 def _integer_constants(path: Path) -> Iterator[tuple[int, int]]:

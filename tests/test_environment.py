@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from nbc.canon.confusables_table import discover_revision
+
 # Matched against PyPI-normalized names (lowercased, runs of `-_.` collapsed to `-`).
 FORBIDDEN_NAME_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"^torch", "torch and its companions: the project has no accelerator runtime"),
@@ -347,10 +349,15 @@ def test_the_running_interpreter_is_the_one_the_confusables_data_is_pinned_to() 
     admit 3.11 through 3.14 and AD-14 does not, because UCD moves with the minor version
     (3.11=14.0.0, 3.12=15.0.0, 3.13=15.1.0, 3.14=16.0.0). Publishing the wheel range would hand
     a stranger a preflight that approves their machine and a suite that then fails.
+
+    The vendored revision is read off `canon/data/`'s filename rather than written here as a
+    literal. Until Story 2.1 the artifact did not exist and this line said `"15.1.0"`, which is
+    evidence recorded beside a value and never compared to it: the literal would have gone on
+    passing after a re-vendoring moved the real table.
     """
     assert sys.implementation.name == "cpython"
     assert sys.version_info[:2] == (3, 13)
-    assert unicodedata.unidata_version == "15.1.0"
+    assert unicodedata.unidata_version == discover_revision()
 
 
 # --- Pass 7: the README states the command, and CI runs it --------------------------------------
