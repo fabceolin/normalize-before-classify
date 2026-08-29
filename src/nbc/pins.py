@@ -90,6 +90,10 @@ __all__ = [
     "Licence",
     "MINIMUM_BASELINES",
     "NOT_DECLARED",
+    "OQ2_KEPT",
+    "OQ2_OUTCOMES",
+    "OQ2_REPLACEMENT",
+    "Oq2Check",
     "PINS_FILENAME",
     "PINNED_PRECISION",
     "PinMismatch",
@@ -154,6 +158,24 @@ which is a run that windows every document under whatever the fallback happened 
 The *axis* is what ships from the first run, not the second value: `window_policy` is part of the
 cell key from the beginning, because a key retro-fitted into a published envelope is a schema
 break, while a key that was always there costs a constant.
+"""
+
+OQ2_KEPT: Final[str] = "kept"
+"""This baseline was already pinned when OQ2 measured it, and the measurement kept it."""
+
+OQ2_REPLACEMENT: Final[str] = "replacement"
+"""This baseline entered the set because OQ2 failed the one it replaced.
+
+The distinction is worth a word because SC5's floor is two and the run sits on it: a baseline
+too weak on clean text is **replaced, never removed**, so the file has to be able to say which
+of the two things happened without a reader reconstructing it from commit history.
+"""
+
+OQ2_OUTCOMES: Final[frozenset[str]] = frozenset({OQ2_KEPT, OQ2_REPLACEMENT})
+"""How a baseline came to be in the surviving set. There is no third way in, and no way out.
+
+`dropped` is deliberately absent: a dropped baseline is not in this file, and admitting the word
+would let the set shrink below SC5's floor while every declaration still read as valid.
 """
 
 NOT_DECLARED: Final[str] = "not-declared"
@@ -353,6 +375,51 @@ class WindowPin:
 
 
 @dataclass(frozen=True, slots=True)
+class Oq2Check:
+    """What OQ2 measured about this baseline, and the artifact it measured.
+
+    OQ2 asks whether a baseline is strong enough on *clean* text for its degradation under
+    encoding to mean anything. The answer is a measurement, not a reading, so the number is
+    recorded next to the pin it belongs to rather than left in a commit message or a spike's
+    scrollback.
+
+    `decided_revision` is the gate and `decided_on` is the metadata, for the third time in this
+    file and for the same reason: a recall measured against a revision this file no longer pins
+    is a check nobody re-ran, and a pin can move on the same day.
+
+    `sample_size` is the OQ2 draw and nothing else reads it. The corpus draw is a separate
+    declaration made by the story that builds the corpus.
+
+    **The order after a pin moves is: declare, then measure.** The block is required, so a pin
+    that moves makes this file unloadable until the declaration names the new revision -- which
+    is the same sequencing `window.confirmed_revision` already imposes, and it is deliberate: it
+    is what stops a recall measured against the old artifact from being inherited in silence.
+    Measure against a *copy* of this file carrying the new revision -- the spike `source` names
+    takes the pins root as an argument for exactly this -- and update the committed file with the
+    revision and the measurement together, so it is never left declaring a recall it does not
+    have. A `pending` outcome is not admitted, because an outcome nothing can act on is a hole in
+    a gate rather than a state of it.
+    """
+
+    outcome: str
+    decided_on: str
+    decided_revision: str
+    clean_recall: float
+    sample_size: int
+    source: str
+
+    def as_run_fields(self) -> dict[str, object]:
+        return {
+            "outcome": self.outcome,
+            "decided_on": self.decided_on,
+            "decided_revision": self.decided_revision,
+            "clean_recall": self.clean_recall,
+            "sample_size": self.sample_size,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Lineage:
     """What a baseline's card declares, read once by a human and recorded as data.
 
@@ -475,6 +542,7 @@ class Baseline:
     window: WindowPin
     licence: Licence
     lineage: Lineage
+    oq2: Oq2Check
 
     @property
     def artifact(self) -> RemoteArtifact:
@@ -502,6 +570,7 @@ class Baseline:
             "window": self.window.as_run_fields(),
             "licence": self.licence.as_run_fields(),
             "lineage": self.lineage.as_run_fields(),
+            "oq2": self.oq2.as_run_fields(),
         }
 
 
@@ -860,6 +929,8 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
         what="the baseline's card",
     )
 
+    oq2 = _read_oq2(reader, table, where, revision)
+
     return Baseline(
         key=key,
         repository=repository,
@@ -876,6 +947,72 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
         window=window,
         licence=_read_licence(reader, table, where),
         lineage=lineage,
+        oq2=oq2,
+    )
+
+
+def _read_oq2(
+    reader: _Reader, parent: Mapping[str, Any], where: str, revision: str
+) -> Oq2Check:
+    """The OQ2 record: what this baseline scored on clean attack text, and against which pin.
+
+    The block is required rather than optional. OQ2 gates the epic and the publication date, so
+    a baseline with no recorded answer is a baseline nobody asked -- and an optional block is
+    exactly how the lineage check went unre-run through a change of pin.
+    """
+    table = reader.table(parent, "oq2", where)
+    at = f"{where}.oq2"
+
+    outcome = reader.string(table, "outcome", at)
+    if outcome and outcome not in OQ2_OUTCOMES:
+        reader.note(
+            f"{at}.outcome is {outcome!r}, and the admitted values are "
+            f"{', '.join(sorted(OQ2_OUTCOMES))}. A baseline too weak on clean text is replaced, "
+            f"never removed: SC5's floor is {MINIMUM_BASELINES} baselines and the run sits "
+            f"exactly on it, so removal does not weaken that criterion, it fails it"
+        )
+
+    decided_on = reader.matching(
+        reader.string(table, "decided_on", at),
+        _DATE,
+        f"{at}.decided_on",
+        "an ISO date (YYYY-MM-DD)",
+    )
+    decided_revision = reader.matching(
+        reader.string(table, "decided_revision", at),
+        _SHA,
+        f"{at}.decided_revision",
+        "a 40-character lowercase hex commit sha",
+    )
+
+    clean_recall = reader.number(table, "clean_recall", at)
+    if "clean_recall" in table and not 0.0 <= clean_recall <= 1.0:
+        reader.note(f"{at}.clean_recall is a rate and must lie in [0, 1], got {clean_recall!r}")
+
+    sample_size = reader.integer(table, "sample_size", at)
+    if "sample_size" in table and sample_size <= 0:
+        reader.note(
+            f"{at}.sample_size must be positive, got {sample_size!r}; a rate over no items is "
+            f"not a rate"
+        )
+
+    _note_stale_check(
+        reader,
+        at,
+        recorded=decided_revision,
+        pinned=revision,
+        checked_on=decided_on,
+        what="the baseline's clean-recall measurement",
+        field="decided_revision",
+    )
+
+    return Oq2Check(
+        outcome=outcome,
+        decided_on=decided_on,
+        decided_revision=decided_revision,
+        clean_recall=clean_recall,
+        sample_size=sample_size,
+        source=reader.string(table, "source", at),
     )
 
 

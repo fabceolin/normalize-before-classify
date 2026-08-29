@@ -27,6 +27,8 @@ from nbc.pins import (
     LINEAGE_RELATIONSHIPS,
     MINIMUM_BASELINES,
     NOT_DECLARED,
+    OQ2_KEPT,
+    OQ2_OUTCOMES,
     PINNED_PRECISION,
     PINS_FILENAME,
     SCHEMA_VERSION,
@@ -99,6 +101,14 @@ def _baseline(
             "card_revision": revision,
             "attack_datasets": {"example/attacks": NOT_DECLARED},
             "training_sources": {SEED_ONE: NOT_DECLARED, SEED_TWO: NOT_DECLARED},
+        },
+        "oq2": {
+            "outcome": OQ2_KEPT,
+            "decided_on": "2026-08-29",
+            "decided_revision": revision,
+            "clean_recall": 0.9,
+            "sample_size": 100,
+            "source": "spikes/oq2_clean_recall.py",
         },
     }
     entry.update(overrides)
@@ -466,6 +476,84 @@ def test_a_window_policy_no_strategy_implements_is_refused(tmp_path: Path) -> No
 def test_the_admitted_window_policies_are_not_empty() -> None:
     """A vacuous vocabulary would refuse every baseline instead of the wrong ones."""
     assert SHARED_WINDOW_POLICY in WINDOW_POLICIES
+
+
+# --- OQ2: each baseline is worth a column, and the file says so ------------------------------
+
+
+def test_an_oq2_result_decided_against_another_revision_is_refused(tmp_path: Path) -> None:
+    """A recall measured against a revision this file no longer pins is a check nobody re-ran.
+
+    The third declaration in this file to learn it: the date is metadata, the revision is the
+    gate.
+    """
+    document = _document()
+    document["baseline"][0]["oq2"]["decided_revision"] = SHA_D
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid, match="decided_revision"):
+        load_pins(tmp_path)
+
+
+def test_an_oq2_outcome_outside_the_vocabulary_is_refused(tmp_path: Path) -> None:
+    """`dropped` is not a way out: SC5's floor is two and removal fails it outright."""
+    document = _document()
+    document["baseline"][0]["oq2"]["outcome"] = "dropped"
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid, match="admitted values"):
+        load_pins(tmp_path)
+
+
+@pytest.mark.parametrize("recall", [1.4, -0.1])
+def test_an_oq2_clean_recall_outside_zero_to_one_is_refused(
+    tmp_path: Path, recall: float
+) -> None:
+    document = _document()
+    document["baseline"][0]["oq2"]["clean_recall"] = recall
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid, match="must lie in"):
+        load_pins(tmp_path)
+
+
+def test_an_oq2_sample_size_of_zero_is_refused(tmp_path: Path) -> None:
+    """A rate over no items is not a rate."""
+    document = _document()
+    document["baseline"][0]["oq2"]["sample_size"] = 0
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid, match="sample_size"):
+        load_pins(tmp_path)
+
+
+def test_a_baseline_with_no_oq2_record_is_refused(tmp_path: Path) -> None:
+    """A baseline nobody asked is not the same as a baseline that answered."""
+    document = _document()
+    del document["baseline"][0]["oq2"]
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid, match="oq2 is missing"):
+        load_pins(tmp_path)
+
+
+def test_the_committed_baselines_each_carry_an_oq2_answer(committed_pins: Any) -> None:
+    """OQ2 gates the epic, so every surviving column has a measurement behind it."""
+    for baseline in committed_pins.baselines:
+        assert baseline.oq2.outcome in OQ2_OUTCOMES
+        assert baseline.oq2.decided_revision == baseline.revision
+        assert baseline.oq2.sample_size > 0
+        assert 0.0 <= baseline.oq2.clean_recall <= 1.0
+        assert baseline.oq2.source
+
+
+def test_the_run_fields_carry_the_oq2_answer(committed_pins: Any) -> None:
+    """A reader of `results.json` can see why each column was worth having."""
+    for baseline in committed_pins.as_run_fields()["pins"]["baselines"]:
+        # Presence, not truthiness: a measured recall of 0.0 is a finding, not a missing field.
+        assert isinstance(baseline["oq2"]["clean_recall"], float)
+        assert baseline["oq2"]["decided_on"]
+        assert baseline["oq2"]["source"]
 
 
 def test_a_baseline_silent_about_a_pinned_attack_dataset_is_refused(tmp_path: Path) -> None:

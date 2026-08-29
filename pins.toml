@@ -128,6 +128,25 @@ card_revision = "90c9989b1a342275dd0d1a95aad283c04e075671"
 "HuggingFaceH4/helpful_instructions" = "not-declared"
 "fka/awesome-chatgpt-prompts" = "not-declared"
 
+[baseline.oq2]
+# OQ2, the PRD's last open question: is this baseline strong enough on *clean* attack text for
+# its degradation under encoding to mean anything? Measured before the corpus exists, by the
+# spike named in `source`, over every attack positive the pinned dataset carries.
+# `decided_revision` is the gate and the date is the metadata, as everywhere else in this file:
+# a recall measured against a revision this file no longer pins is a check nobody re-ran, so a
+# pin that moves makes this block name the new revision and the spike run again.
+outcome = "kept"
+decided_on = "2026-08-29"
+decided_revision = "90c9989b1a342275dd0d1a95aad283c04e075671"
+# 2569 of 3073 unique attack positives at threshold 0.5, 95% Wilson [0.8225, 0.8487].
+clean_recall = 0.836
+sample_size = 3073
+source = "spikes/oq2_clean_recall.py"
+# This number is an UPPER BOUND. This baseline declares `seeded-from-declared-training-source`
+# against the pinned dataset below, and FR3.3's overlap filter -- which belongs to the corpus
+# build, not to this spike -- has not removed those rows yet: roughly 515 of the unique attacks
+# reach its training data at one hop. It is the lower of the two recalls even so.
+
 [[baseline]]
 key = "testsavantai-bert-small"
 repository = "testsavantai/prompt-injection-defender-small-v0-onnx"
@@ -195,6 +214,24 @@ card_revision = "5bfc06f0b54950e6653f253eb7df1e3c9811b5cb"
 "HuggingFaceH4/helpful_instructions" = "not-declared"
 "fka/awesome-chatgpt-prompts" = "not-declared"
 "jackhhao/jailbreak-classification" = "not-declared"
+
+[baseline.oq2]
+# OQ2, the PRD's last open question: is this baseline strong enough on *clean* attack text for
+# its degradation under encoding to mean anything? Measured before the corpus exists, by the
+# spike named in `source`, over every attack positive the pinned dataset carries.
+# `decided_revision` is the gate and the date is the metadata, as everywhere else in this file:
+# a recall measured against a revision this file no longer pins is a check nobody re-ran, so a
+# pin that moves makes this block name the new revision and the spike run again.
+outcome = "kept"
+decided_on = "2026-08-29"
+decided_revision = "5bfc06f0b54950e6653f253eb7df1e3c9811b5cb"
+# 2680 of 3073 unique attack positives at threshold 0.5, 95% Wilson [0.8598, 0.8835].
+clean_recall = 0.8721
+sample_size = 3073
+source = "spikes/oq2_clean_recall.py"
+# The PRD expected the obscure baseline to carry the OQ2 risk. It scored higher than the widely
+# used one, on rows it declares no relationship to. That is the finding, and it is why this pin
+# did not move.
 
 # --- attack datasets -------------------------------------------------------------------------
 #
