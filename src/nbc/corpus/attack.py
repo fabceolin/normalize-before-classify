@@ -1,11 +1,12 @@
 """The attack half of the corpus: drawn by a declared rule, labelled as it is rendered.
 
 This module is **pure and offline**. It imports the standard library, `nbc.errors`, `nbc.pins`,
-`nbc.schema` and story 3.1's `nbc.corpus.exclusion`; it never imports `datasets` and never opens
-a socket. Everything that reaches the hub is `corpus/build.py`, which hands the pool in as data.
-That split is what lets the whole decision procedure -- what is a contradiction, what is a
-positive, which rows survive, which are drawn, what the file looks like byte for byte -- be
-covered by a suite that runs with no network at all.
+`nbc.schema`, story 3.1's `nbc.corpus.exclusion` and story 3.3's `nbc.corpus.matrix` and
+`nbc.corpus.dressings`; it never imports `datasets` and never opens a socket. Everything that
+reaches the hub is `corpus/build.py`, which hands the pool in as data. That split is what lets the
+whole decision procedure -- what is a contradiction, what is a positive, which rows survive, which
+are drawn, how each one is dressed, what the file looks like byte for byte -- be covered by a
+suite that runs with no network at all.
 
 **Where the labels come from, and where they do not.** The pinned dataset's `attack_label` is a
 *selection* input: it says which of its rows this build considers attack payloads. The gold label
@@ -16,7 +17,8 @@ what FR4 says this repository does not do. `tests/corpus/test_build.py` walks th
 refuses any `CorpusItem(...)` whose `label=` is not one of the two schema constants.
 
 **The order of the pipeline is load-bearing.** Rows -> contradiction gate -> positives ->
-exclusion filter -> draw -> render. Two of those steps are where they are for a reason:
+exclusion filter -> draw -> render, once per declared chain. Two of those steps are where they are
+for a reason:
 
 - the contradiction gate runs over **every row**, not over the positives. Each of the two texts
   the pinned pool carries at both labels appears once as a positive and once as a benign row, so
@@ -33,9 +35,13 @@ iteration order or a process hash seed. `tests/corpus/test_attack.py` asserts th
 the same pool twice under different `PYTHONHASHSEED` values in a subprocess, from a shuffled row
 order, and comparing bytes.
 
-**One chain today.** Story 3.2 renders the `clean` chain only. `dressings.py`, the fold and the
-`CHAINS` registry are story 3.3; the id format and the ordering already carry the chain because
-both were declared by AD-3 and AD-1 before either story ran.
+**Every declared chain, once per drawn payload.** The chains come from
+`corpus/matrix.py::CHAINS`, keyed on the attack family, and the text from `dressings.dress`, which
+is AD-3's `reduce(apply, chain, payload)`. So one drawn payload becomes as many corpus rows as
+there are attack chains, each with its own item id, and the dressing axis of the headline table is
+that constant rather than a list any caller assembled. `matrix.validate()` runs before the first
+row is rendered, so a chain naming a dressing nothing implements aborts instead of producing a
+column that silently does not exist.
 """
 
 from __future__ import annotations
@@ -46,15 +52,19 @@ import random
 from dataclasses import dataclass
 from typing import Callable, Final, Iterable, Mapping, Sequence
 
+from nbc.corpus.dressings import dress
 from nbc.corpus.exclusion import ExclusionIndex, filter_rows
+from nbc.corpus.matrix import (
+    CHAINS,
+    CLEAN_CHAIN,
+    render_chain,
+    validate as validate_matrix,
+)
 from nbc.errors import NbcError
 from nbc.pins import DRAW_HEAD, DRAW_SEEDED_RANDOM, AttackDataset, AttackDraw
 from nbc.schema import ATTACK, FAMILY_ATTACK, CorpusItem
 
 __all__ = [
-    "CLEAN_CHAIN",
-    "CLEAN_CHAIN_NAME",
-    "CHAIN_SEPARATOR",
     "ID_SEPARATOR",
     "PAYLOAD_ID_HEX",
     "AttackDrawReport",
@@ -82,17 +92,11 @@ refuses a pool in which two distinct texts produce one id.
 """
 
 ID_SEPARATOR: Final[str] = "::"
-CHAIN_SEPARATOR: Final[str] = "+"
-CLEAN_CHAIN_NAME: Final[str] = "clean"
-"""AD-3's id rule: `<payload_id>::<chain>`, the chain joined by `+`, or the literal `clean`."""
+"""What separates the payload id from the chain in an item id.
 
-CLEAN_CHAIN: Final[tuple[str, ...]] = ()
-"""The empty chain, which AD-3 declares to be `clean`.
-
-The fold that gives that its force -- `reduce(apply, chain, payload)`, whose identity element the
-empty chain is -- is story 3.3's. Here the empty chain simply renders the payload unchanged, and
-the id rule already spells it `clean` so the two stories agree on the name before either can
-disagree about the mechanism.
+The chain half of AD-3's rule -- the names joined by `+`, or the literal `clean` -- is
+`matrix.render_chain`, because the benign builders and the held-out registry need the same
+spelling and may not reach into the attack module for it.
 """
 
 
@@ -176,8 +180,7 @@ def item_id(payload: str, chain: Sequence[str] = CLEAN_CHAIN) -> str:
     The full chain, never the last link: a reported dressing axis that named only the outermost
     dressing would make `base64+base64` and `base64` the same cell.
     """
-    rendered = CHAIN_SEPARATOR.join(chain) if chain else CLEAN_CHAIN_NAME
-    return f"{payload}{ID_SEPARATOR}{rendered}"
+    return f"{payload}{ID_SEPARATOR}{render_chain(chain)}"
 
 
 def contradictions(rows: Iterable[PoolRow]) -> tuple[str, ...]:
@@ -309,9 +312,15 @@ def render_attack_item(
 ) -> CorpusItem:
     """One corpus row: the rendered text and the gold label, produced by one constructor call.
 
-    The chain is `clean` for this story, so the rendered text is the payload. Story 3.3 replaces
-    the identity with `reduce(apply, chain, payload)`; the signature already takes the chain so
-    that change is a body, not a new call site.
+    The text is `dressings.dress(payload, chain)`, which is AD-3's `reduce(apply, chain, payload)`
+    -- so `("base64", "homoglyph")` produces `homoglyph(to_base64(payload))`, the later link
+    wrapping the earlier. The empty chain returns the payload itself, which is what makes `clean`
+    the identity element of the fold rather than a dressing that happens to change nothing.
+
+    The **payload id is the id of the payload**, never of the dressed text: the whole point of
+    AD-3's `<payload_id>::<chain>` is that one payload's ten rows share a stem, so the harness can
+    pair the same payload across the dressing axis. Hashing the rendered text instead would make
+    every cell an unrelated item and N2's paired comparison unrepresentable.
 
     `label=ATTACK` is a named schema constant on purpose, and a test enforces it: a label read
     from the source row would be somebody else's annotation wearing this builder's name.
@@ -322,7 +331,7 @@ def render_attack_item(
         family=FAMILY_ATTACK,
         benign_class=None,
         dressing=tuple(chain),
-        text=payload,
+        text=dress(payload, chain),
         label=ATTACK,
     )
 
@@ -331,14 +340,19 @@ def render_attack_item(
 class AttackDrawReport:
     """What the draw did, in numbers a reader can check against the pinned declaration.
 
-    Every count is in **attack positives** except `rows_by_split`, which is in rows and is named
-    so. Both are published because the pair is the error this project keeps making: the pool holds
-    three times as many rows as positives, and a size read in the wrong unit is off by that much.
+    Every count is in **attack positives** except `rows_by_split` and `items_written`, which are
+    in rows and are named so. Both units are published because the pair is the error this project
+    keeps making: the pool holds three times as many rows as positives, and a size read in the
+    wrong unit is off by that much. A third unit now sits under those two -- one drawn positive
+    becomes one row **per chain** -- so `chains` travels beside the counts and
+    `items_written == drawn_positives * len(chains)` is checkable by a reader of the report rather
+    than only by a reader of the code.
     """
 
     repository: str
     revision: str
     declared_splits: tuple[str, ...]
+    chains: tuple[str, ...]
     rows_by_split: Mapping[str, int]
     positives_by_split: Mapping[str, int]
     blank_positive_rows: int
@@ -355,6 +369,10 @@ class AttackDrawReport:
                 "repository": self.repository,
                 "revision": self.revision,
                 "declared_splits": list(self.declared_splits),
+                # The dressing axis of the headline table, published with the corpus that carries
+                # it: `results.json` reports per chain, and a chain in the results that is not in
+                # this list is a cell computed over rows this build did not write.
+                "chains": list(self.chains),
                 "rows_by_split": dict(sorted(self.rows_by_split.items())),
                 "positives_by_split": dict(sorted(self.positives_by_split.items())),
                 # Counted and published rather than dropped in silence. The 3071-versus-3073
@@ -389,6 +407,12 @@ def draw_attack_items(
     ordering is enforced here, once, rather than by asking each caller to check the cheap things
     first.
     """
+    # Before anything is rendered, and before the pool is even read for contradictions: a chain
+    # naming a dressing nothing implements is a defect in a constant, and finding it after a
+    # gigabyte of downloads would be finding it late for no reason.
+    validate_matrix()
+    chains = CHAINS[FAMILY_ATTACK]
+
     split_problems = verify_splits(dataset.splits, observed_splits)
     if split_problems:
         raise AttackDrawUnsatisfiable(*split_problems)
@@ -423,10 +447,16 @@ def draw_attack_items(
 
     drawn = select_payloads(survivors, dataset.draw)
 
-    items = tuple(
-        render_attack_item(payload, source=dataset.repository) for payload in drawn
+    # The cross product, and it is a product rather than a choice: AD-20 makes `CHAINS` the
+    # dressing axis of the table, so every drawn payload appears once per declared chain or the
+    # axis has a hole nothing reports.
+    rendered = tuple(
+        (render_attack_item(payload, source=dataset.repository, chain=chain), payload)
+        for payload in drawn
+        for chain in chains
     )
-    collisions = id_collisions((item.id, payload) for item, payload in zip(items, drawn))
+    items = tuple(item for item, _payload in rendered)
+    collisions = id_collisions((item.id, payload) for item, payload in rendered)
     if collisions:
         raise AttackDrawUnsatisfiable(*collisions)
 
@@ -434,6 +464,7 @@ def draw_attack_items(
         repository=dataset.repository,
         revision=dataset.revision,
         declared_splits=tuple(dataset.splits),
+        chains=tuple(render_chain(chain) for chain in chains),
         rows_by_split=_count_by_split(rows),
         positives_by_split=_count_by_split(positive_rows),
         blank_positive_rows=blank,

@@ -103,17 +103,138 @@ def test_the_allowed_leaves_are_still_leaves(path: Path) -> None:
     assert offending_imports(path, allowed_prefixes=()) == []
 
 
-def test_only_the_pipeline_imports_the_stage_modules() -> None:
-    """AD-4: no caller may invoke a stage out of band. An import is how a caller would get one.
+STAGE_PACKAGE = "nbc.canon.stages"
 
-    Scoped to `src/`; the tests import the stages directly on purpose, one test file per stage.
+STAGE_ENTRY_POINTS = frozenset({"run", "run_at_ceiling"})
+"""The two names by which a stage is *invoked*. `PipelineStage` binds exactly these two."""
+
+STAGE_IMPORTERS: dict[str, str] = {
+    "nbc/canon/pipeline.py": (
+        "assembles PIPELINE and is the only module that may call a stage, which is AD-4"
+    ),
+    "nbc/corpus/dressings.py": (
+        "reads invisible.ZERO_WIDTH and invisible.REMOVED as the character source for the "
+        "zero-width dressing, per story 3.4's requirement that the dressings and the layer share "
+        "one character source. It calls no entry point, which the test below enforces"
+    ),
+}
+"""Every module under `src/` that may import a stage module at all, each with its reason.
+
+An exact set, so a module acquiring the import shows up here rather than in a review.
+"""
+
+
+def stage_module_names(path: Path) -> set[str]:
+    """The local names in `path` that are bound to a stage module.
+
+    `from nbc.canon.stages import invisible` binds `invisible`; `import nbc.canon.stages.decode as
+    d` binds `d`. Resolving the binding is what lets the entry-point check below be about *stages*
+    rather than about every attribute in the tree called `run` -- `onnx_adapter.py` calls
+    `session.run`, and a scan that could not tell those apart would be textual.
     """
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+        if isinstance(node, ast.ImportFrom) and node.module == STAGE_PACKAGE:
+            names.update(alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith(STAGE_PACKAGE + "."):
+                    names.add(alias.asname or alias.name.split(".")[-1])
+    return names
+
+
+def stage_invocations(path: Path) -> list[str]:
+    """Every place `path` names a stage's entry point, as `line:name.attr`. Empty when there are none.
+
+    Two shapes, because a scan catching only the first would let the second through: an attribute
+    on a name bound to a stage module (`invisible.run`), and a direct import of the entry point
+    (`from nbc.canon.stages.invisible import run`).
+    """
+    bound = stage_module_names(path)
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in bound
+            and node.attr in STAGE_ENTRY_POINTS
+        ):
+            found.append(f"{node.lineno}:{node.value.id}.{node.attr}")
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.startswith(STAGE_PACKAGE + ".")
+        ):
+            found.extend(
+                f"{node.lineno}:{alias.name}"
+                for alias in node.names
+                if alias.name in STAGE_ENTRY_POINTS
+            )
+    return sorted(found)
+
+
+def test_the_stage_invocation_scan_fires_on_a_module_that_calls_one(tmp_path: Path) -> None:
+    """The scan's own failing input, in all three shapes, plus the near-miss it must not fire on.
+
+    The near-miss is the reason this is structural: `session.run(...)` is an attribute called
+    `run` on a name that is not a stage, and `onnx_adapter.py` really does contain one.
+    """
+    offender = tmp_path / "offender.py"
+    offender.write_text(
+        "from nbc.canon.stages import invisible\n"
+        "import nbc.canon.stages.decode as d\n"
+        "from nbc.canon.stages.decode import run_at_ceiling\n"
+        "def go(text, ctx, session):\n"
+        "    session.run([], {})\n"
+        "    invisible.run(text, ctx)\n"
+        "    d.run(text, ctx)\n",
+        encoding="utf-8",
+    )
+    assert stage_invocations(offender) == [
+        "3:run_at_ceiling",
+        "6:invisible.run",
+        "7:d.run",
+    ]
+
+    innocent = tmp_path / "innocent.py"
+    innocent.write_text(
+        "from nbc.canon.stages import invisible\n"
+        "def go(session):\n"
+        "    session.run([], {})\n"
+        "    return invisible.REMOVED\n",
+        encoding="utf-8",
+    )
+    assert stage_invocations(innocent) == []
+
+
+def test_only_the_declared_modules_import_a_stage() -> None:
+    """Scoped to `src/`; the tests import the stages directly on purpose, one file per stage."""
     importers = {
         path.relative_to(SRC).as_posix()
         for path in SRC.rglob("*.py")
-        if any(name.startswith("nbc.canon.stages") for name in imported_modules(path))
+        if any(name.startswith(STAGE_PACKAGE) for name in imported_modules(path))
     }
-    assert importers == {"nbc/canon/pipeline.py"}
+    assert importers == set(STAGE_IMPORTERS), sorted(
+        importers.symmetric_difference(STAGE_IMPORTERS)
+    )
+
+
+def test_only_the_pipeline_invokes_a_stage() -> None:
+    """AD-4, as the property the import rule was standing in for: no caller runs a stage out of band.
+
+    The import rule alone was the right check while `pipeline.py` was the only importer. Story
+    3.4 requires the zero-width dressing to draw its character from `invisible`'s own declared set
+    rather than from a second hand-list, so a second importer exists and the rule has to be about
+    invocation, which is what AD-4 actually forbids. Reading a stage's declared **data** does not
+    reorder anything; calling its entry point does.
+    """
+    callers = {
+        path.relative_to(SRC).as_posix(): stage_invocations(path)
+        for path in SRC.rglob("*.py")
+        if stage_invocations(path)
+    }
+    assert set(callers) == {"nbc/canon/pipeline.py"}, callers
 
 
 # --- the scanner, checked against modules that break each rule --------------------------------

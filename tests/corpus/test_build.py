@@ -27,8 +27,10 @@ import pytest
 import nbc
 from nbc.corpus import attack, build
 from nbc.corpus.exclusion import Observation, normalized_texts, plan, verify_observations
+from nbc.corpus.matrix import CHAINS, render_chain
 from nbc.errors import exit_code_for
 from nbc.pins import EXCLUSION_UNREACHABLE, HTTP_OK, load_pins
+from nbc.schema import FAMILY_ATTACK
 
 BUILDER = Path(build.__file__).resolve()
 DEPENDENCY = "datasets"
@@ -466,14 +468,21 @@ def test_the_build_writes_the_corpus_and_reports_what_it_drew(
         f"{build.DATA_DIRNAME}/{build.ATTACK_CORPUS_FILENAME}"
     ]
     assert written == len(path.read_bytes())
-    assert len(path.read_text(encoding="utf-8").splitlines()) == 4
 
     fields = draw_report.as_run_fields()["attack_draw"]
     assert fields["rows_by_split"] == {"test": 3, "train": 6}
     assert fields["positives_by_split"] == {"train": 6}
     assert fields["unique_positives"] == 6
     assert fields["drawn_positives"] == 4
-    assert fields["items_written"] == 4
+    # Three units, and the report carries all three so a reader can multiply them out: rows of
+    # the pool, positives drawn from it, and one corpus row per drawn positive per declared
+    # chain. `chains` is the dressing axis of the headline table, published beside the corpus.
+    assert fields["chains"] == [render_chain(chain) for chain in CHAINS[FAMILY_ATTACK]]
+    assert fields["items_written"] == 4 * len(CHAINS[FAMILY_ATTACK])
+    # And the report is self-consistent read on its own terms, which is how a reader of
+    # `results.json` will read it -- without the constant in front of them.
+    assert fields["items_written"] == fields["drawn_positives"] * len(fields["chains"])
+    assert len(path.read_text(encoding="utf-8").splitlines()) == fields["items_written"]
     # The exclusion accounting travels with the draw: FR3.3's counts are published beside the
     # corpus they shaped, not in a separate run.
     assert exclusion_report.as_run_fields()["exclusion"]["rows_in"] == 6
