@@ -148,7 +148,7 @@ def test_a_row_is_walked_for_every_string_it_holds() -> None:
 # rule cannot be "nothing but the builder writes", so its subject is named here instead of being
 # an unexplained exemption.
 WRITERS: dict[str, str] = {
-    "build.py": "data/*.jsonl, per AD-1",
+    "build.py": "data/*.jsonl, data/manifest.json and data/ATTRIBUTION.md, per AD-1 and AD-34",
     "vendor_confusables.py": "the vendored confusables table under canon/data/",
 }
 
@@ -438,6 +438,25 @@ def offline_build(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> Path:
     return repo_root
 
 
+def _resolved_licence(dataset):
+    """The pinned pool's licence question answered, so a fixture can exercise the builder.
+
+    The committed pool declares no licence and its rows are redistributed, so AD-34's gate aborts
+    every real build. That abort is the story's own outcome and it is asserted where it belongs, in
+    `tests/corpus/test_attribution.py`, against the committed file. Here it would only prevent every
+    other property of the builder from being tested at all, so the fixture answers the question the
+    way a resolution would -- and it is a `replace()` of the committed record, so the day the pin
+    declares a real licence this fixture keeps testing the builder rather than silently diverging.
+    """
+    return dataclasses.replace(
+        dataset.licence,
+        identifier="MIT",
+        source="fixture: the licence question answered, so the builder can be tested",
+        attribution=f"{dataset.repository}, MIT, revision {dataset.revision}",
+        unresolved="",
+    )
+
+
 def _pins_with_a_small_draw(root: Path) -> object:
     """The committed pins, with the draw shrunk to what the fake pool can satisfy.
 
@@ -450,6 +469,7 @@ def _pins_with_a_small_draw(root: Path) -> object:
     small = dataclasses.replace(
         dataset,
         draw=dataclasses.replace(dataset.draw, sample_size_positives=4),
+        licence=_resolved_licence(dataset),
     )
     return dataclasses.replace(pins, attack_datasets=(small,))
 
@@ -463,11 +483,15 @@ def test_the_build_writes_the_corpus_and_reports_what_it_drew(
     )
 
     assert path == tmp_path / build.DATA_DIRNAME / build.ATTACK_CORPUS_FILENAME
-    # The corpus and nothing else. CI refuses a dirty tree, and a builder that dropped a cache, a
-    # temporary file or a manifest beside the corpus would fail there with no diagnosis; here it
-    # fails naming the file. `data/manifest.json` is story 3.6's and is deliberately not here.
+    # The corpus, its generated credits, and nothing else. CI refuses a dirty tree, and a builder
+    # that dropped a cache or a temporary file beside the corpus would fail there with no
+    # diagnosis; here it fails naming the file. `data/manifest.json` is story 3.6's and is
+    # deliberately not here -- this half carries no manifest, which is what keeps it unreadable
+    # through the guarded door. `ATTRIBUTION.md` IS here, because AD-34's rule is about rows on
+    # disk and these rows are on disk.
     assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()) == [
-        f"{build.DATA_DIRNAME}/{build.ATTACK_CORPUS_FILENAME}"
+        f"{build.DATA_DIRNAME}/{build.ATTRIBUTION_FILENAME}",
+        f"{build.DATA_DIRNAME}/{build.ATTACK_CORPUS_FILENAME}",
     ]
     assert written == len(path.read_bytes())
 
@@ -731,7 +755,9 @@ def _small_corpus_pins(root: Path) -> object:
         pins,
         attack_datasets=(
             dataclasses.replace(
-                dataset, draw=dataclasses.replace(dataset.draw, sample_size_positives=4)
+                dataset,
+                draw=dataclasses.replace(dataset.draw, sample_size_positives=4),
+                licence=_resolved_licence(dataset),
             ),
         ),
         benign_frame=dataclasses.replace(
@@ -742,8 +768,14 @@ def _small_corpus_pins(root: Path) -> object:
     )
 
 
-def _synthetic_code(payload_text: str = "") -> dict[str, tuple]:
+def _synthetic_code(pins, payload_text: str = "") -> dict[str, tuple]:
     """Twenty eligible-looking B-code files over two repositories, ten each: the frame's cap exactly.
+
+    The two repositories are the **first two the frame pins**, and each file names itself through
+    `BenignCodeRepository.file_source`, so every synthetic row carries a source AD-34's attribution
+    can account for. An invented repository id would abort the build here -- correctly, because a
+    committed row whose source is not a pinned source is a row published with no licence -- and the
+    fixture would then be testing the licence gate instead of the builder.
 
     `payload_text` is prepended to the first file only. Empty by default, so the happy path and the
     abort path differ in exactly the one thing under test.
@@ -751,17 +783,17 @@ def _synthetic_code(payload_text: str = "") -> dict[str, tuple]:
     from nbc.corpus.benign import CodeFile
 
     files: dict[str, tuple] = {}
-    for repository in range(2):
-        key = f"synthetic-{repository}"
+    for index, repository in enumerate(pins.benign_frame.b_code.repositories[:2]):
         entries = []
         for number in range(10):
-            marker = f"{key}-{number}"
-            head = f"// {payload_text}\n" if (repository, number) == (0, 0) and payload_text else ""
+            marker = f"{repository.key}-{number}"
+            head = f"// {payload_text}\n" if (index, number) == (0, 0) and payload_text else ""
+            path = f"src/{marker}.js"
             entries.append(
                 CodeFile(
-                    repository_key=key,
-                    source=f"github.com/example/{key}@{'e' * 40}:src/{marker}.js",
-                    path=f"src/{marker}.js",
+                    repository_key=repository.key,
+                    source=repository.file_source(path),
+                    path=path,
                     text=(
                         f"{head}// {marker}\n"
                         "const TOKEN = 'aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Q=';\n"
@@ -769,14 +801,14 @@ def _synthetic_code(payload_text: str = "") -> dict[str, tuple]:
                     ),
                 )
             )
-        files[key] = tuple(entries)
+        files[repository.key] = tuple(entries)
     return files
 
 
 @pytest.fixture()
 def offline_full_build(offline_build: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """`offline_build` plus the third remote read, so `build_corpus` runs end to end offline."""
-    monkeypatch.setattr(build, "read_benign_code", lambda pins: _synthetic_code())
+    monkeypatch.setattr(build, "read_benign_code", _synthetic_code)
     return offline_build
 
 
@@ -808,6 +840,78 @@ def test_the_full_build_writes_both_halves_and_reports_the_cross_check(
     assert recorded["shingle_width"] == crosscheck.SHINGLE_WIDTH
 
 
+def test_the_attack_half_refuses_to_overwrite_credits_that_are_already_there(
+    offline_build: Path, tmp_path: Path
+) -> None:
+    """The rebuild rule covers the credits too, or a rebuild could leave stale ones behind.
+
+    The failing input is a credits file with no corpus beside it, which is the state a half-deleted
+    rebuild leaves: the corpus write would succeed and the credits would silently keep describing
+    the previous draw.
+    """
+    directory = tmp_path / build.DATA_DIRNAME
+    directory.mkdir(parents=True)
+    (directory / build.ATTRIBUTION_FILENAME).write_text("stale\n", encoding="utf-8")
+
+    with pytest.raises(build.CorpusWriteRefused):
+        build.build_attack_corpus(_pins_with_a_small_draw(offline_build), root=str(tmp_path))
+
+    assert (directory / build.ATTRIBUTION_FILENAME).read_text(encoding="utf-8") == "stale\n"
+    assert not (directory / build.ATTACK_CORPUS_FILENAME).exists()
+
+
+def test_the_full_build_generates_the_attribution_file_and_verify_accepts_it(
+    offline_full_build: Path, tmp_path: Path
+) -> None:
+    """AD-34 end to end: the credits are written beside the corpus and they describe it.
+
+    The row counts are asserted against the rows on disk rather than against the draw, which is the
+    whole reason they are tallied from `CorpusItem.source`: a credits file that agreed with the
+    declaration and disagreed with the corpus would be the drift this file exists to prevent.
+    """
+    from nbc.corpus.attribution import ATTRIBUTION_FILENAME, counts_by_key
+
+    pins = _small_corpus_pins(offline_full_build)
+    _manifest, fields = build.build_corpus(pins, root=str(tmp_path))
+
+    path = tmp_path / build.DATA_DIRNAME / ATTRIBUTION_FILENAME
+    assert fields["written"]["attribution"] == ATTRIBUTION_FILENAME
+    credits = path.read_text(encoding="utf-8")
+
+    rows = [
+        json.loads(line)
+        for name in (build.ATTACK_CORPUS_FILENAME, build.BENIGN_CORPUS_FILENAME)
+        for line in (tmp_path / build.DATA_DIRNAME / name).read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    from nbc.schema import CorpusItem
+
+    items = tuple(
+        CorpusItem(
+            id=row["id"],
+            source=row["source"],
+            family=row["family"],
+            benign_class=row["benign_class"],
+            dressing=tuple(row["dressing"]),
+            text=row["text"],
+            label=row["label"],
+        )
+        for row in rows
+    )
+    counts, problems = counts_by_key(items, pins)
+    assert problems == ()
+    assert sum(counts.values()) == len(items)
+    for repository in pins.benign_frame.b_code.repositories[:2]:
+        assert f"| {counts[repository.key]} |" in credits
+        assert repository.licence.attribution in credits
+
+    # And what `verify-corpus` would regenerate from those rows is byte-identical to what was
+    # written. The CLI path itself is exercised in `tests/corpus/test_attribution.py`, over the
+    # committed declaration -- this fixture shrinks two sizes, so its build_id is deliberately not
+    # the committed one and the guarded read would refuse it for that reason instead.
+    assert build.attribution_text(pins, items, _manifest.build_id) == credits
+
+
 def test_a_synthetic_b_code_file_carrying_a_pool_payload_stops_the_full_build(
     offline_build: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -817,11 +921,17 @@ def test_a_synthetic_b_code_file_carrying_a_pool_payload_stops_the_full_build(
     cannot decide whether the gate fires.
     """
     carried = " ".join(f"payload {index}" for index in range(6))
-    monkeypatch.setattr(build, "read_benign_code", lambda pins: _synthetic_code(carried))
+    monkeypatch.setattr(
+        build, "read_benign_code", lambda pins: _synthetic_code(pins, carried)
+    )
 
+    corpus_pins = _small_corpus_pins(offline_build)
     with pytest.raises(crosscheck.BenignItemMislabelled) as raised:
-        build.build_corpus(_small_corpus_pins(offline_build), root=str(tmp_path))
+        build.build_corpus(corpus_pins, root=str(tmp_path))
 
     assert exit_code_for(raised.value) == 24
-    assert any("synthetic-0" in problem for problem in raised.value.problems)
+    # The poisoned file is the first one of the first repository the frame pins, and the abort
+    # names it by the source that file carries.
+    offender = corpus_pins.benign_frame.b_code.repositories[0]
+    assert any(offender.repository in problem for problem in raised.value.problems)
     assert list(tmp_path.rglob("*.jsonl")) == []

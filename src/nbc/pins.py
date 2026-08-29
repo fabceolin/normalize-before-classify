@@ -1123,6 +1123,15 @@ class ExclusionSource:
     `http_status` is the declared status, and it is not decoration: the build probes `probe_url`
     and compares what it observes against this number, so `Harelix/...`'s 401 is a checked fact
     rather than a sentence in a comment.
+
+    The licence is declared here for the same reason it is declared on a baseline whose weights
+    this repository never ships: AD-34's rule is that **every** pinned source carries one, so a
+    source arrives with its licence read rather than with the question deferred. `redistributed`
+    is `false` for every entry -- an exclusion source's rows are intersected against the corpus
+    and the matches are *removed*, so no byte of one can reach `data/`. What that makes the field
+    is a checkable claim rather than a formality: `corpus/attribution.py` refuses a row whose
+    source is not one of the pinned redistributing identities, so an exclusion source that ever
+    did contribute a row would abort the build rather than appear uncredited.
     """
 
     key: str
@@ -1132,6 +1141,7 @@ class ExclusionSource:
     http_status: int
     checked_on: str
     evidence: str
+    licence: Licence
 
     @property
     def resolvable(self) -> bool:
@@ -1170,6 +1180,7 @@ class ExclusionSource:
             "http_status": self.http_status,
             "checked_on": self.checked_on,
             "evidence": self.evidence,
+            "licence": self.licence.as_run_fields(),
         }
 
 
@@ -2236,6 +2247,7 @@ def _read_exclusion_source(
             reader.string(table, "checked_on", where), f"{where}.checked_on"
         ),
         evidence=reader.string(table, "evidence", where),
+        licence=_read_licence(reader, table, where),
     )
 
 

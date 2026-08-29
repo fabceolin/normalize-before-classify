@@ -53,7 +53,8 @@ through GitHub's REST API costs one request against an unauthenticated budget of
 the frame pins more repositories than that; `codeload` carries no such budget. Nothing here reads a
 token from the environment, so the build has the same access a stranger has.
 
-**This module is the only writer of `data/*.jsonl`** (AD-1). An AST scan over `src/` and `spikes/`
+**This module is the only writer under `data/`** (AD-1) -- the two corpus halves, the manifest and
+the generated `ATTRIBUTION.md`. An AST scan over `src/` and `spikes/`
 in `tests/corpus/test_build.py` holds that: it collects every write primitive in the tree and
 refuses any file outside a declared allow-list, and the scan's own predicate is tested against a
 synthetic offender so it cannot pass by failing to look.
@@ -66,6 +67,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Iterable, Iterator, Sequence
 
+from nbc.corpus.attribution import (
+    ATTRIBUTION_FILENAME,
+    RedistributionRefused,
+    attribution_problems,
+    counts_by_key,
+    licence_problems,
+    render as render_attribution,
+)
 from nbc.corpus.attack import (
     AttackDrawReport,
     AttackDrawUnsatisfiable,
@@ -124,6 +133,7 @@ from nbc.pins import (
 
 __all__ = [
     "ARCHIVE_MEMBER_LIMIT",
+    "ATTRIBUTION_FILENAME",
     "ARCHIVE_TIMEOUT_SECONDS",
     "ATTACK_CORPUS_FILENAME",
     "BENIGN_CORPUS_FILENAME",
@@ -131,6 +141,7 @@ __all__ = [
     "DATA_DIRNAME",
     "HTTP_TIMEOUT_SECONDS",
     "RepositoryUnreadable",
+    "attribution_text",
     "build_attack_corpus",
     "build_corpus",
     "corpus_directory",
@@ -373,6 +384,31 @@ def read_attack_pool(
     return tuple(rows), tuple(observed)
 
 
+def refuse_unlicensed_redistribution(pins: Pins) -> None:
+    """AD-34's gate: abort before anything is fetched if a redistributed source has no licence.
+
+    A pure read of `pins.toml`, so it costs nothing and can therefore sit ahead of every other
+    step in both writing paths. The abort names the source, its revision and what is wrong with
+    its declaration; `corpus/attribution.py` owns the vocabulary and the reasons.
+    """
+    problems = licence_problems(pins)
+    if problems:
+        raise RedistributionRefused(*problems)
+
+
+def attribution_text(pins: Pins, items: Iterable[CorpusItem], build_id_value: str) -> str:
+    """The generated `ATTRIBUTION.md` for these rows, or an abort if a row credits nothing.
+
+    Counted from the rows themselves rather than from the draw report, so the file describes the
+    corpus on disk. One function for both the build and `verify-corpus`, which is what makes the
+    regeneration check a check: two renderers could drift from each other and neither would fail.
+    """
+    counts, problems = counts_by_key(items, pins)
+    if problems:
+        raise RedistributionRefused(*problems)
+    return render_attribution(pins, counts, build_id=build_id_value)
+
+
 def build_attack_corpus(
     pins: Pins, *, root: str | None = None, rebuild: bool = False
 ) -> tuple[AttackDrawReport, ExclusionReport, Path, int]:
@@ -382,7 +418,13 @@ def build_attack_corpus(
     verification, so a corpus is never filtered against a set the pins do not describe. Both
     reports come back so the caller publishes the accounting for what it removed as well as for
     what it kept.
+
+    **The licence gate runs first**, before the pool is read. This path writes `data/attack.jsonl`,
+    which is redistribution exactly as `build-corpus` is, and a build that may not publish what it
+    is about to publish must not first download the pool to find that out.
     """
+    refuse_unlicensed_redistribution(pins)
+
     if len(pins.attack_datasets) != 1:
         # `load_pins` requires at least one. More than one is a real possibility FR1 leaves open,
         # and it needs a declared rule for merging two label vocabularies and two draws. Nothing
@@ -422,8 +464,21 @@ def build_attack_corpus(
         outcomes=outcomes_of(planned, observations, matches),  # type: ignore[arg-type]
     )
 
-    path = corpus_directory(root) / ATTACK_CORPUS_FILENAME
+    directory = corpus_directory(root)
+    path = directory / ATTACK_CORPUS_FILENAME
+    # The credits are rendered before the rows are written and land beside them, so there is no
+    # state in which a file of redistributed rows sits on disk without generated credits for it.
+    # This half carries no manifest by design (see the module docstring), which is what makes it
+    # unreadable through the guarded door; that is a separate property from being uncredited.
+    credits = attribution_text(pins, items, build_id(pins))
+    credits_path = directory / ATTRIBUTION_FILENAME
+    if credits_path.exists() and not rebuild:
+        raise CorpusWriteRefused(
+            f"{credits_path} already exists and this is not a rebuild"
+        )
     written = write_corpus(path, items, rebuild=rebuild)
+    directory.mkdir(parents=True, exist_ok=True)
+    credits_path.write_text(credits, encoding="utf-8", newline="\n")
     return draw_report, exclusion_report, path, written
 
 
@@ -616,7 +671,12 @@ def build_corpus(
     writing one half against a declaration and the other against a later one is exactly what
     `build_id` exists to make impossible, and building them in one call is what makes the id
     describe both.
+
+    Step 0 is the licence gate (AD-34), ahead of even the confirmatory cell: both are pure reads of
+    `pins.toml`, and this one decides whether the rows may be published at all.
     """
+    refuse_unlicensed_redistribution(pins)
+
     if len(pins.attack_datasets) != 1:
         raise AttackDrawUnsatisfiable(
             f"{len(pins.attack_datasets)} attack datasets are pinned and this build implements "
@@ -680,7 +740,11 @@ def build_corpus(
         (ATTACK_CORPUS_FILENAME, serialize(attack_items), len(attack_items)),
         (BENIGN_CORPUS_FILENAME, serialize(benign_items), len(benign_items)),
     )
-    for name in (*(entry[0] for entry in payloads), MANIFEST_FILENAME):
+    for name in (
+        *(entry[0] for entry in payloads),
+        MANIFEST_FILENAME,
+        ATTRIBUTION_FILENAME,
+    ):
         target = directory / name
         if target.exists() and not rebuild:
             raise CorpusWriteRefused(
@@ -690,10 +754,15 @@ def build_corpus(
                 f"corpora"
             )
 
+    identity = build_id(pins)
+    # Rendered before anything is written, because a row nothing credits is an abort and an abort
+    # after two files are on disk leaves a half-corpus behind.
+    attribution = attribution_text(pins, (*attack_items, *benign_items), identity)
+
     manifest = Manifest(
         schema_version=MANIFEST_SCHEMA_VERSION,
         frame_id=pins.benign_frame.frame_id,
-        build_id=build_id(pins),
+        build_id=identity,
         files=files_for(
             [(name, text.encode("utf-8"), rows) for name, text, rows in payloads]
         ),
@@ -710,6 +779,11 @@ def build_corpus(
     (directory / MANIFEST_FILENAME).write_text(
         render_manifest(manifest), encoding="utf-8", newline="\n"
     )
+    # Beside the corpus and outside the manifest: `manifest.read_corpus` refuses a recorded file
+    # that is not a corpus half, and what guards this one is regeneration in `verify-corpus`.
+    (directory / ATTRIBUTION_FILENAME).write_text(
+        attribution, encoding="utf-8", newline="\n"
+    )
 
     return manifest, {
         **attack_report.as_run_fields(),
@@ -719,6 +793,7 @@ def build_corpus(
             "directory": str(directory),
             "files": [entry.as_json_object() for entry in manifest.files],
             "manifest": MANIFEST_FILENAME,
+            "attribution": ATTRIBUTION_FILENAME,
         },
     }
 
@@ -796,7 +871,8 @@ def main(argv: list[str] | None = None) -> int:
         "build-corpus",
         help=(
             f"draw both halves and write data/{ATTACK_CORPUS_FILENAME}, "
-            f"data/{BENIGN_CORPUS_FILENAME} and data/{MANIFEST_FILENAME}; refuses to overwrite"
+            f"data/{BENIGN_CORPUS_FILENAME}, data/{MANIFEST_FILENAME} and "
+            f"data/{ATTRIBUTION_FILENAME}; refuses to overwrite"
         ),
     )
     subcommands.add_parser(
@@ -806,9 +882,11 @@ def main(argv: list[str] | None = None) -> int:
     subcommands.add_parser(
         "verify-corpus",
         help=(
-            "read the committed corpus through the one guarded door: refuses when the recorded "
-            "frame_id or build_id is not the one this declaration computes, or when a corpus "
-            "file's bytes no longer hash to what the manifest records. Touches no network"
+            f"read the committed corpus through the one guarded door: refuses when the recorded "
+            f"frame_id or build_id is not the one this declaration computes, when a corpus "
+            f"file's bytes no longer hash to what the manifest records, or when "
+            f"{ATTRIBUTION_FILENAME} is missing or is not the file this declaration generates. "
+            f"Touches no network"
         ),
     )
     args = parser.parse_args(argv)
@@ -826,12 +904,31 @@ def main(argv: list[str] | None = None) -> int:
             ).as_run_fields()
         elif args.subcommand == "verify-corpus":
             manifest, items = read_corpus(pins, args.root)
+            # The credits are generated, so verifying them is regenerating them. A hash would
+            # catch an edit; regeneration also catches a file that was never right.
+            expected = attribution_text(pins, items, manifest.build_id)
+            path = corpus_directory(args.root) / ATTRIBUTION_FILENAME
+            committed: str | None = None
+            if path.is_file():
+                try:
+                    committed = path.read_text(encoding="utf-8")
+                except (OSError, ValueError) as error:
+                    # `ValueError` covers `UnicodeDecodeError`, which is what a corrupted or
+                    # re-encoded credits file raises and which is not an `OSError`.
+                    raise RedistributionRefused(
+                        f"{ATTRIBUTION_FILENAME} is at {path} and cannot be read as UTF-8 text: "
+                        f"{error}. It is generated; rebuild the corpus rather than repairing it"
+                    ) from None
+            drift = attribution_problems(committed, expected)
+            if drift:
+                raise RedistributionRefused(*drift)
             report = {
                 "verified_corpus": {
                     "frame_id": manifest.frame_id,
                     "build_id": manifest.build_id,
                     "files": [entry.as_json_object() for entry in manifest.files],
                     "items_read": len(items),
+                    "attribution": ATTRIBUTION_FILENAME,
                 }
             }
         elif args.subcommand in ("build-corpus", "rebuild-corpus"):

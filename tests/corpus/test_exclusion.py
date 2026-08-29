@@ -42,6 +42,7 @@ from nbc.pins import (
     BenignFrame,
     ConfirmatoryCell,
     ExclusionSource,
+    Licence,
     Pins,
     load_pins,
 )
@@ -67,6 +68,14 @@ def _source(
         http_status=http_status,
         checked_on="2026-08-29",
         evidence="fixture",
+        # An exclusion source redistributes nothing (its matches are removed, never published), so
+        # the licence gate never looks at it. Declared here because the record requires one.
+        licence=Licence(
+            identifier="apache-2.0",
+            source="fixture",
+            attribution=f"{repository}, apache-2.0, fixture",
+            redistributed=False,
+        ),
     )
 
 

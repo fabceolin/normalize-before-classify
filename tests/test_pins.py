@@ -244,6 +244,15 @@ def _exclusion_source(repository: str, **overrides: Any) -> dict[str, Any]:
         "http_status": HTTP_OK,
         "checked_on": "2026-08-29",
         "evidence": "fixture",
+        # Every pinned source declares a licence (AD-34), an exclusion source included. Nothing of
+        # one is redistributed -- its matches are removed from the corpus, never published -- so
+        # the licence gate reads this and moves on. A fixture that omitted it would not load.
+        "licence": {
+            "identifier": "apache-2.0",
+            "source": "fixture",
+            "attribution": f"{repository}, apache-2.0, fixture",
+            "redistributed": False,
+        },
     }
     entry.update(overrides)
     return entry

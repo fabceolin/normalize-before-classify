@@ -216,23 +216,32 @@ jobs:
         # the one place they run.
         run: uv run pytest -m smoke
 
-      - name: Prove the gold-label abort fires on the real pool
-        # FR4's second case, end to end, against the pinned dataset itself. The pool carries two
-        # texts at both labels, so the corpus build STOPS -- and that is what this step asserts.
-        # Exit 16 is LabelContradiction; 2 is a usage error, which is what a typo in this very
-        # step produces, and 0 would mean the corpus was built.
+      - name: Prove the licence abort fires on the real pool
+        # FR5.2 / AD-34, end to end, against the pinned dataset itself. The pool declares NO
+        # licence at its pinned revision and its rows would be redistributed into data/*.jsonl in
+        # an MIT repository, so the build stops before it fetches anything -- and that is what
+        # this step asserts. Exit 25 is RedistributionRefused; 2 is a usage error, which is what a
+        # typo in this very step produces, and 0 would mean a corpus was published under a licence
+        # nobody established.
         #
-        # WHEN THE CONTRADICTIONS ARE RESOLVED, THIS STEP CHANGES WITH THEM. Resolving them is a
-        # human decision about two rows in a pinned dataset, and this step is what keeps that
-        # decision from being made silently: whoever makes it has to come here and say what the
-        # build is expected to do instead.
+        # WHAT THIS STEP NO LONGER PROVES, stated rather than quietly dropped. It used to assert
+        # exit 16, LabelContradiction: the pool carries two texts at both labels and FR4's second
+        # abort fired on them. The licence gate is deliberately ahead of the pool read -- a build
+        # that may not publish must not first download what it may not publish -- so that abort is
+        # now behind this one and cannot be reached live until the licence question is resolved.
+        # It is still covered offline, over a fake pool, in tests/corpus/test_build.py.
+        #
+        # WHEN THE LICENCE QUESTION IS RESOLVED, THIS STEP CHANGES WITH IT, and the expected code
+        # goes back to 16 until the gold-label contradiction is resolved too. Both are human
+        # decisions, and this step is what keeps either from being made silently: whoever makes one
+        # has to come here and say what the build is expected to do instead.
         run: |
           set +e
           uv run python -m nbc.corpus.build build-attack
           status=$?
           set -e
-          if [ "$status" -ne 16 ]; then
-            echo "::error::expected exit 16 (LabelContradiction), got $status"
+          if [ "$status" -ne 25 ]; then
+            echo "::error::expected exit 25 (RedistributionRefused), got $status"
             exit 1
           fi
 

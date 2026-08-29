@@ -99,6 +99,32 @@ def test_the_dressing_registries_move_the_build_id(
     assert build_id(pins) != before
 
 
+def test_a_licence_does_not_move_the_build_id_and_a_revision_still_does(pins) -> None:
+    """AD-34 added a `[licence]` block to every exclusion source; the corpus identity is unmoved.
+
+    Both halves in one test, because the first alone would pass on a `build_id` that had stopped
+    covering the exclusion declaration at all. The declaration digest is over identity and
+    reachability -- what decides which rows survive -- and a licence decides nothing about that.
+    """
+    before = build_id(pins)
+    source = pins.exclusion_sources[0]
+
+    relicensed = replace(
+        pins,
+        exclusion_sources=(
+            replace(source, licence=replace(source.licence, identifier="mit")),
+        )
+        + pins.exclusion_sources[1:],
+    )
+    assert build_id(relicensed) == before
+
+    repinned = replace(
+        pins,
+        exclusion_sources=(replace(source, revision="a" * 40),) + pins.exclusion_sources[1:],
+    )
+    assert build_id(repinned) != before
+
+
 def test_the_build_id_payload_version_is_part_of_it(pins, monkeypatch) -> None:
     before = build_id(pins)
     monkeypatch.setattr(manifest_module, "BUILD_ID_VERSION", manifest_module.BUILD_ID_VERSION + 1)

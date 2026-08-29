@@ -409,6 +409,20 @@ http_status = 200
 checked_on = "2026-08-29"
 evidence = "hub API answered 200 with this sha, unauthenticated"
 
+[exclusion_source.licence]
+identifier = "cc-by-4.0"
+source = """\
+card YAML `license:` at the pinned revision (checked 2026-08-29)\
+"""
+attribution = """\
+natolambert/xstest-v2-copy, cc-by-4.0, revision b71afe2a6d10e5a6254ea8bcb006c48b095a15d5\
+"""
+# An exclusion source's rows are intersected against the corpus and every match is
+# REMOVED, so no byte of one reaches data/. Declared anyway, because AD-34's rule is that
+# every pinned source carries a licence, and a source whose licence nobody read is a
+# source nobody could redistribute from later without repeating this reading.
+redistributed = false
+
 [[exclusion_source]]
 key = "vmware-open-instruct"
 repository = "VMware/open-instruct"
@@ -420,6 +434,20 @@ checked_on = "2026-08-29"
 # it and the pinned attack dataset's card names it among the four it was built from.
 evidence = "hub API answered 200 with this sha, unauthenticated"
 
+[exclusion_source.licence]
+identifier = "cc-by-3.0"
+source = """\
+card YAML `license:` at the pinned revision (checked 2026-08-29)\
+"""
+attribution = """\
+VMware/open-instruct, cc-by-3.0, revision 9e53e85f37988e3bfbebbee4dc9ad4942cfd37fa\
+"""
+# An exclusion source's rows are intersected against the corpus and every match is
+# REMOVED, so no byte of one reaches data/. Declared anyway, because AD-34's rule is that
+# every pinned source carries a licence, and a source whose licence nobody read is a
+# source nobody could redistribute from later without repeating this reading.
+redistributed = false
+
 [[exclusion_source]]
 key = "alespalla-chatbot-instruction-prompts"
 repository = "alespalla/chatbot_instruction_prompts"
@@ -428,6 +456,20 @@ availability = "available"
 http_status = 200
 checked_on = "2026-08-29"
 evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[exclusion_source.licence]
+identifier = "apache-2.0"
+source = """\
+card YAML `license:` at the pinned revision, and a LICENSE file in the repository (checked 2026-08-29)\
+"""
+attribution = """\
+alespalla/chatbot_instruction_prompts, apache-2.0, revision 6ea5ce09647e5451860801a46db6a46b28e259bf\
+"""
+# An exclusion source's rows are intersected against the corpus and every match is
+# REMOVED, so no byte of one reaches data/. Declared anyway, because AD-34's rule is that
+# every pinned source carries a licence, and a source whose licence nobody read is a
+# source nobody could redistribute from later without repeating this reading.
+redistributed = false
 
 [[exclusion_source]]
 key = "huggingfaceh4-grok-conversation-harmless"
@@ -440,6 +482,20 @@ checked_on = "2026-08-29"
 # in a top-level string column. That is why the build walks a row for every string it holds
 # rather than reading a declared column name per source.
 evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[exclusion_source.licence]
+identifier = "apache-2.0"
+source = """\
+card YAML `license:` at the pinned revision (checked 2026-08-29)\
+"""
+attribution = """\
+HuggingFaceH4/grok-conversation-harmless, apache-2.0, revision 01185ad52860775c65cbd6d0c9254ac8e9089fe0\
+"""
+# An exclusion source's rows are intersected against the corpus and every match is
+# REMOVED, so no byte of one reaches data/. Declared anyway, because AD-34's rule is that
+# every pinned source carries a licence, and a source whose licence nobody read is a
+# source nobody could redistribute from later without repeating this reading.
+redistributed = false
 
 [[exclusion_source]]
 key = "harelix-prompt-injection-mixed-techniques-2024"
@@ -457,6 +513,20 @@ http_status = 401
 checked_on = "2026-08-29"
 evidence = "hub API answered 401 (gated or private) with no sha, unauthenticated"
 
+[exclusion_source.licence]
+identifier = "not-declared"
+source = """\
+the hub answers 401 for this repository and no card is readable at all, so there is nothing to read a licence from (checked 2026-08-29)\
+"""
+attribution = """\
+Harelix/Prompt-Injection-Mixed-Techniques-2024, licence not declared, no revision (the hub answers 401)\
+"""
+# An exclusion source's rows are intersected against the corpus and every match is
+# REMOVED, so no byte of one reaches data/. Declared anyway, because AD-34's rule is that
+# every pinned source carries a licence, and a source whose licence nobody read is a
+# source nobody could redistribute from later without repeating this reading.
+redistributed = false
+
 [[exclusion_source]]
 key = "opensafetylab-salad-data"
 repository = "OpenSafetyLab/Salad-Data"
@@ -465,6 +535,20 @@ availability = "available"
 http_status = 200
 checked_on = "2026-08-29"
 evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[exclusion_source.licence]
+identifier = "apache-2.0"
+source = """\
+card YAML `license:` at the pinned revision (checked 2026-08-29)\
+"""
+attribution = """\
+OpenSafetyLab/Salad-Data, apache-2.0, revision d21a325e276a99bd69b1fbb8aa51a9f249486b72\
+"""
+# An exclusion source's rows are intersected against the corpus and every match is
+# REMOVED, so no byte of one reaches data/. Declared anyway, because AD-34's rule is that
+# every pinned source carries a licence, and a source whose licence nobody read is a
+# source nobody could redistribute from later without repeating this reading.
+redistributed = false
 
 [[exclusion_source]]
 key = "jackhhao-jailbreak-classification"
@@ -476,6 +560,20 @@ checked_on = "2026-08-29"
 # The second of the two REQUIRED seeds.
 evidence = "hub API answered 200 with this sha, unauthenticated"
 
+[exclusion_source.licence]
+identifier = "apache-2.0"
+source = """\
+card YAML `license:` at the pinned revision (checked 2026-08-29)\
+"""
+attribution = """\
+jackhhao/jailbreak-classification, apache-2.0, revision 2f2ceeb39658696fd3f462403562b6eea5306287\
+"""
+# An exclusion source's rows are intersected against the corpus and every match is
+# REMOVED, so no byte of one reaches data/. Declared anyway, because AD-34's rule is that
+# every pinned source carries a licence, and a source whose licence nobody read is a
+# source nobody could redistribute from later without repeating this reading.
+redistributed = false
+
 [[exclusion_source]]
 key = "rubend18-chatgpt-jailbreak-prompts"
 repository = "rubend18/ChatGPT-Jailbreak-Prompts"
@@ -484,6 +582,20 @@ availability = "available"
 http_status = 200
 checked_on = "2026-08-29"
 evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[exclusion_source.licence]
+identifier = "not-declared"
+source = """\
+no license key, no license tag and no LICENSE file at the pinned revision (checked 2026-08-29)\
+"""
+attribution = """\
+rubend18/ChatGPT-Jailbreak-Prompts, licence not declared, revision b93e4982f8f8ad2d82c6d35e3c00d161844ad70a\
+"""
+# An exclusion source's rows are intersected against the corpus and every match is
+# REMOVED, so no byte of one reaches data/. Declared anyway, because AD-34's rule is that
+# every pinned source carries a licence, and a source whose licence nobody read is a
+# source nobody could redistribute from later without repeating this reading.
+redistributed = false
 
 [[exclusion_source]]
 key = "deepset-prompt-injections"
@@ -494,6 +606,20 @@ http_status = 200
 checked_on = "2026-08-29"
 evidence = "hub API answered 200 with this sha, unauthenticated"
 
+[exclusion_source.licence]
+identifier = "apache-2.0"
+source = """\
+card YAML `license:` at the pinned revision (checked 2026-08-29)\
+"""
+attribution = """\
+deepset/prompt-injections, apache-2.0, revision 4f61ecb038e9c3fb77e21034b22511b523772cdd\
+"""
+# An exclusion source's rows are intersected against the corpus and every match is
+# REMOVED, so no byte of one reaches data/. Declared anyway, because AD-34's rule is that
+# every pinned source carries a licence, and a source whose licence nobody read is a
+# source nobody could redistribute from later without repeating this reading.
+redistributed = false
+
 [[exclusion_source]]
 key = "jasperls-prompt-injections"
 repository = "JasperLS/prompt-injections"
@@ -502,6 +628,20 @@ availability = "available"
 http_status = 200
 checked_on = "2026-08-29"
 evidence = "hub API answered 200 with this sha, unauthenticated"
+
+[exclusion_source.licence]
+identifier = "not-declared"
+source = """\
+no license key, no license tag and no LICENSE file at the pinned revision (checked 2026-08-29)\
+"""
+attribution = """\
+JasperLS/prompt-injections, licence not declared, revision 9f62f4a9788f030e52fe85a816b338f507c48187\
+"""
+# An exclusion source's rows are intersected against the corpus and every match is
+# REMOVED, so no byte of one reaches data/. Declared anyway, because AD-34's rule is that
+# every pinned source carries a licence, and a source whose licence nobody read is a
+# source nobody could redistribute from later without repeating this reading.
+redistributed = false
 
 [[exclusion_source]]
 key = "huggingfaceh4-helpful-instructions"
@@ -523,6 +663,20 @@ evidence = """\
 hub API answered 200 with this sha, unauthenticated; datasets==5.0.1 refuses the repository with \
 `RuntimeError: Dataset scripts are no longer supported, but found helpful_instructions.py`\
 """
+
+[exclusion_source.licence]
+identifier = "apache-2.0"
+source = """\
+card YAML `license:` at the pinned revision (checked 2026-08-29)\
+"""
+attribution = """\
+HuggingFaceH4/helpful_instructions, apache-2.0, revision ae2e0b22166b6369dd67e516f751b05cbf314e9b\
+"""
+# An exclusion source's rows are intersected against the corpus and every match is
+# REMOVED, so no byte of one reaches data/. Declared anyway, because AD-34's rule is that
+# every pinned source carries a licence, and a source whose licence nobody read is a
+# source nobody could redistribute from later without repeating this reading.
+redistributed = false
 
 [[exclusion_source]]
 key = "fka-awesome-chatgpt-prompts"
@@ -692,6 +846,20 @@ file_extensions = [
 # More repositories are pinned than the floor requires. A repository that yields no eligible file
 # contributes nothing, and the floor is checked against the REALIZED count, so the headroom is what
 # keeps a single unreachable repository from being the difference between a corpus and an abort.
+
+[exclusion_source.licence]
+identifier = "cc0-1.0"
+source = """\
+card YAML `license:` at the pinned revision (checked 2026-08-29)\
+"""
+attribution = """\
+fka/awesome-chatgpt-prompts, cc0-1.0, revision e6da2332534f7b940358dc167fce4cbcdabae486\
+"""
+# An exclusion source's rows are intersected against the corpus and every match is
+# REMOVED, so no byte of one reaches data/. Declared anyway, because AD-34's rule is that
+# every pinned source carries a licence, and a source whose licence nobody read is a
+# source nobody could redistribute from later without repeating this reading.
+redistributed = false
 
 [[benign_frame.b_code.repository]]
 key = "psf-requests"
