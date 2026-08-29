@@ -6,10 +6,13 @@
 #
 # **A revision is not a pin on its own.** `protectai` ships two different `tokenizer.json` at
 # the revision pinned below -- 8,656,744 bytes at the repository root and 8,648,886 bytes beside
-# the ONNX graph -- and they declare different truncation. A pin that named only the revision
-# would leave the choice between them to whichever loader convention the code happened to
-# follow, which is an unnamed source of variance inside the reproducibility this file promises.
-# Every artifact is therefore pinned by *path*.
+# the ONNX graph -- and they declare different truncation: the root file carries
+# `"truncation": {"max_length": 512}` and the one beside the graph carries `null` (both read at
+# the pinned sha on 2026-08-28, re-read 2026-08-29). A pin that named only the revision would
+# leave the choice between them to whichever loader convention the code happened to follow --
+# and the root file truncates every long document at 512 before the window policy can fire,
+# which is the confound `baselines/tokenization.py` exists to remove. Every artifact is
+# therefore pinned by *path*.
 #
 # **Every value below was read from the live artifact at its pinned sha, not copied from a
 # document.** `meta.verified_on` says when. Re-verify with `python -m nbc.pins --verify`.
@@ -65,7 +68,14 @@ window_policy = "shared"
 # `model_max_length` is a ~1e30 sentinel in both pinned repositories.
 length = 512
 source = "onnx/config.json::max_position_embeddings"
+# `config.json` is authoritative for *capacity*, not for *intent*: where a publisher's card
+# declares an operative window smaller than the graph's positional capacity, the declared window
+# is the one pinned. Distinguishing the two is a human reading, so it is confirmed once per change
+# of pin -- and the revision is the gate rather than the date, because a pin can move on the same
+# day and a date alone would let this keep looking fresh while describing a different artifact.
+# This baseline's card declares no operative window, so the capacity is the window.
 confirmed_on = "2026-08-28"
+confirmed_revision = "90c9989b1a342275dd0d1a95aad283c04e075671"
 
 [baseline.licence]
 identifier = "apache-2.0"
@@ -144,7 +154,9 @@ window_policy = "shared"
 [baseline.window]
 length = 512
 source = "config.json::max_position_embeddings"
+# Same reading, same absence of a card-declared operative window, confirmed at this pin.
 confirmed_on = "2026-08-28"
+confirmed_revision = "5bfc06f0b54950e6653f253eb7df1e3c9811b5cb"
 
 [baseline.licence]
 # Read as found. There is no `license` key in the card's YAML, no `license:` tag on the model,

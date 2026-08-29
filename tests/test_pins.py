@@ -31,8 +31,10 @@ from nbc.pins import (
     PINS_FILENAME,
     SCHEMA_VERSION,
     SEEDED_FROM_TRAINING_SOURCE,
+    SHARED_WINDOW_POLICY,
     TRAINED_ON,
     TRAINING_SOURCE_RELATIONSHIPS,
+    WINDOW_POLICIES,
     BaselineIneligible,
     BaselineSetInvalid,
     PinMismatch,
@@ -79,11 +81,12 @@ def _baseline(
         "config_path": "onnx/config.json",
         "architecture_family": architecture_family,
         "tokenizer_family": tokenizer_family,
-        "window_policy": "shared",
+        "window_policy": SHARED_WINDOW_POLICY,
         "window": {
             "length": 512,
             "source": "onnx/config.json::max_position_embeddings",
             "confirmed_on": "2026-08-28",
+            "confirmed_revision": revision,
         },
         "licence": {
             "identifier": "apache-2.0",
@@ -250,6 +253,8 @@ def test_every_committed_baseline_carries_every_field_a_pin_has_to_carry(
         assert baseline.window.length > 0
         assert baseline.config_path in baseline.window.source
         assert baseline.window.confirmed_on
+        assert baseline.window.confirmed_revision == baseline.revision
+        assert baseline.window_policy in WINDOW_POLICIES
         assert baseline.licence.identifier
         assert baseline.licence.attribution
         assert baseline.architecture_family
@@ -423,6 +428,44 @@ def test_a_window_read_from_the_tokenizer_config_is_refused(tmp_path: Path) -> N
 
     with pytest.raises(PinsFileInvalid, match="sentinel"):
         load_pins(tmp_path)
+
+
+def test_a_window_confirmed_against_another_revision_is_refused(tmp_path: Path) -> None:
+    """`config.json` is authoritative for capacity and a card can declare a smaller operative
+    window; telling them apart is a human reading, so it is confirmed once per change of pin.
+    A date alone would keep looking fresh while describing an artifact this file no longer pins.
+    """
+    document = _document()
+    document["baseline"][0]["window"]["confirmed_revision"] = SHA_D
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid, match="confirmed_revision"):
+        load_pins(tmp_path)
+
+
+def test_a_window_read_from_a_config_this_baseline_does_not_pin_is_refused(tmp_path: Path) -> None:
+    """One pinned repository ships two files of one name at one revision. The pin names the path."""
+    document = _document()
+    document["baseline"][0]["window"]["source"] = "config.json::max_position_embeddings"
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid, match="does not pin"):
+        load_pins(tmp_path)
+
+
+def test_a_window_policy_no_strategy_implements_is_refused(tmp_path: Path) -> None:
+    """A policy is a length, a stride and an aggregation together. A name is not a policy."""
+    document = _document()
+    document["baseline"][0]["window_policy"] = "publisher"
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid, match="admitted values"):
+        load_pins(tmp_path)
+
+
+def test_the_admitted_window_policies_are_not_empty() -> None:
+    """A vacuous vocabulary would refuse every baseline instead of the wrong ones."""
+    assert SHARED_WINDOW_POLICY in WINDOW_POLICIES
 
 
 def test_a_baseline_silent_about_a_pinned_attack_dataset_is_refused(tmp_path: Path) -> None:

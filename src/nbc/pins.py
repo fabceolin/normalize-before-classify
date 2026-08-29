@@ -101,8 +101,10 @@ __all__ = [
     "Resolver",
     "SCHEMA_VERSION",
     "SEEDED_FROM_TRAINING_SOURCE",
+    "SHARED_WINDOW_POLICY",
     "TRAINED_ON",
     "TRAINING_SOURCE_RELATIONSHIPS",
+    "WINDOW_POLICIES",
     "hf_cache_root",
     "load_pins",
     "main",
@@ -129,6 +131,29 @@ PINNED_PRECISION: Final[str] = "fp32"
 
 fp16 and mixed-precision exports move scores in the last decimals, and a hard decision threshold
 turns that into a class flip on exactly the borderline encoded items this experiment measures.
+"""
+
+SHARED_WINDOW_POLICY: Final[str] = "shared"
+"""AD-19's length policy: fixed non-overlapping windows, scored independently, reduced by maximum.
+
+The name is spelled here rather than in `baselines/tokenization.py` because `pins.toml`'s
+vocabulary is this module's business and `pins.py` may import nothing else in the project. The
+strategy behind the name lives in `tokenization.py`, which reads it from here, so the string has
+one home and the two halves are checked against each other as that module imports.
+"""
+
+WINDOW_POLICIES: Final[frozenset[str]] = frozenset({SHARED_WINDOW_POLICY})
+"""Every `window_policy` a baseline may declare, which today is exactly one.
+
+AD-29's `publisher` value is deliberately **absent** rather than admitted-and-unused. A pin may
+only declare a policy something can actually run, and a `publisher` policy is meaningless without
+the parameters its baseline's model card would have to transcribe -- fields this schema does not
+yet carry. Admitting the name now would let a pin select a policy with no strategy behind it,
+which is a run that windows every document under whatever the fallback happened to be.
+
+The *axis* is what ships from the first run, not the second value: `window_policy` is part of the
+cell key from the beginning, because a key retro-fitted into a published envelope is a schema
+break, while a key that was always there costs a constant.
 """
 
 NOT_DECLARED: Final[str] = "not-declared"
@@ -178,6 +203,14 @@ _REDUCED_PRECISION: Final[re.Pattern[str]] = re.compile(
 _SHA: Final[re.Pattern[str]] = re.compile(r"\A[0-9a-f]{40}\Z")
 _DATE: Final[re.Pattern[str]] = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
 _REPOSITORY: Final[re.Pattern[str]] = re.compile(r"\A[\w.-]+/[\w.-]+\Z")
+
+_FIELD_REFERENCE: Final[str] = "::"
+"""How a pin names a field inside a file it also pins: `<pinned path>::<field>`.
+
+The separator is the whole convention, and it is what lets a rule check that the file a window
+was read from is the file this baseline actually fetches, without a second module spelling out
+a filename that belongs in `pins.toml`.
+"""
 
 _HTTP_TIMEOUT_SECONDS: Final[float] = 30.0
 
@@ -293,19 +326,30 @@ class Licence:
 
 @dataclass(frozen=True, slots=True)
 class WindowPin:
-    """A window length together with the file that declared it.
+    """A window length together with the file that declared it, and the revision that was read.
 
     The source travels with the value because "the model's maximum sequence length" resolves
     from three files that routinely disagree, and a length with no stated origin is a number the
     next reader re-derives from whichever file they open first.
+
+    `confirmed_revision` is the gate and `confirmed_on` is the metadata, for the reason the
+    lineage block already learned: a publisher's card can declare an operative window smaller
+    than the graph's positional capacity, that reading is a human's, and a date alone would let
+    it keep looking fresh while describing an artifact this file no longer pins.
     """
 
     length: int
     source: str
     confirmed_on: str
+    confirmed_revision: str
 
     def as_run_fields(self) -> dict[str, object]:
-        return {"length": self.length, "source": self.source, "confirmed_on": self.confirmed_on}
+        return {
+            "length": self.length,
+            "source": self.source,
+            "confirmed_on": self.confirmed_on,
+            "confirmed_revision": self.confirmed_revision,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -730,6 +774,18 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
     if "graph_bytes" in table and graph_bytes <= 0:
         reader.note(f"{where}.graph_bytes must be positive, got {graph_bytes!r}")
 
+    config_path = reader.string(table, "config_path", where)
+
+    window_policy = reader.string(table, "window_policy", where)
+    if window_policy and window_policy not in WINDOW_POLICIES:
+        admitted = ", ".join(sorted(WINDOW_POLICIES))
+        reader.note(
+            f"{where}.window_policy is {window_policy!r}, and the admitted values are "
+            f"{admitted}. A policy is a declared strategy -- a window length, a stride and an "
+            f"aggregation together -- and a name with no strategy behind it selects whatever "
+            f"the fallback happened to be, for every document this baseline ever scores"
+        )
+
     window_table = reader.table(table, "window", where)
     window = WindowPin(
         length=reader.integer(window_table, "length", f"{where}.window"),
@@ -740,6 +796,12 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
             f"{where}.window.confirmed_on",
             "an ISO date (YYYY-MM-DD)",
         ),
+        confirmed_revision=reader.matching(
+            reader.string(window_table, "confirmed_revision", f"{where}.window"),
+            _SHA,
+            f"{where}.window.confirmed_revision",
+            "a 40-character lowercase hex commit sha",
+        ),
     )
     if window.length <= 0 and "length" in window_table:
         reader.note(f"{where}.window.length must be positive, got {window.length!r}")
@@ -748,6 +810,25 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
             f"{where}.window.source reads tokenizer_config.json, whose model_max_length is a "
             f"~1e30 sentinel in the pinned repositories; the window comes from the model config"
         )
+    if _FIELD_REFERENCE in window.source and config_path:
+        named_file = window.source.split(_FIELD_REFERENCE, 1)[0]
+        if named_file != config_path:
+            reader.note(
+                f"{where}.window.source reads a field of {named_file!r} and this baseline pins "
+                f"{config_path!r}: a window read from a file this baseline does not pin is a "
+                f"window read from a file nobody fetches. One pinned repository ships two "
+                f"different files of the same name at one revision, which is why the pin names "
+                f"the path and not just the repository"
+            )
+    _note_stale_check(
+        reader,
+        f"{where}.window",
+        recorded=window.confirmed_revision,
+        pinned=revision,
+        checked_on=window.confirmed_on,
+        what="the model's declared window",
+        field="confirmed_revision",
+    )
 
     lineage_table = reader.table(table, "lineage", where)
     lineage = Lineage(
@@ -788,10 +869,10 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
         precision=precision,
         graph_bytes=graph_bytes,
         tokenizer_path=reader.string(table, "tokenizer_path", where),
-        config_path=reader.string(table, "config_path", where),
+        config_path=config_path,
         architecture_family=reader.string(table, "architecture_family", where),
         tokenizer_family=reader.string(table, "tokenizer_family", where),
-        window_policy=reader.string(table, "window_policy", where),
+        window_policy=window_policy,
         window=window,
         licence=_read_licence(reader, table, where),
         lineage=lineage,
@@ -881,18 +962,23 @@ def _note_stale_check(
     pinned: str,
     checked_on: str,
     what: str,
+    field: str = "card_revision",
 ) -> None:
     """A check performed against a revision this file no longer pins is a check nobody re-ran.
 
     The date is metadata and the revision is the gate: a pin can move on the same day, and a
     date alone would let the declaration keep looking fresh while describing a different card.
+
+    `field` names the key that recorded the revision, because two different declarations are
+    checked this way -- what a card said, and what a human confirmed a window to be -- and an
+    error message that names the wrong key sends its reader to the wrong line.
     """
     if not recorded or not pinned or recorded == pinned:
         return
     reader.note(
-        f"{where}.card_revision is {recorded} and the pinned revision is {pinned}: the check "
+        f"{where}.{field} is {recorded} and the pinned revision is {pinned}: the check "
         f"recorded here was performed on {checked_on or 'an unrecorded date'} against a "
-        f"revision of {what} that this file no longer pins. Re-read the card at the pinned "
+        f"revision of {what} that this file no longer pins. Re-read {what} at the pinned "
         f"revision and record what it says, rather than carrying an answer to a question about "
         f"a different artifact"
     )

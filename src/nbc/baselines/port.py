@@ -33,6 +33,7 @@ from nbc.schema import Score
 
 __all__ = [
     "POSITIVE_CLASS_NAMES",
+    "REDUCTION_NAME",
     "Baseline",
     "PositiveClassUnresolved",
     "TokenWindow",
@@ -94,6 +95,15 @@ if _unfolded:  # pragma: no cover - the constant is checked as it is defined
         f"POSITIVE_CLASS_NAMES members must be stored casefolded, got {_unfolded}; the fold "
         f"belongs on the observed label, applied in one place"
     )
+
+
+REDUCTION_NAME: Final[str] = "max"
+"""The name of what `reduce_windows` does, so the recorded run field cannot drift from the code.
+
+A window policy is a length, a stride and an aggregation together (AD-29), and the aggregation is
+the part a `results.json` reader has to take on trust. Naming it here, next to the function that
+performs it, is what keeps the recorded name and the performed reduction the same thing.
+"""
 
 
 TokenWindow = tuple[int, ...]
