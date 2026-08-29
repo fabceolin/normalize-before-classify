@@ -1,79 +1,55 @@
 """Makes the offline claim a mechanism rather than a promise.
 
-"The unit suite runs with no network and no model download" is a claim a reader has to be
-able to trust without unplugging their machine. So the suite unplugs itself: every test that
-is not marked `smoke` runs with outbound sockets and DNS refused, and a test that reaches for
-the network fails loudly here instead of passing on the maintainer's laptop and failing on a
-CI runner with no egress.
+The guard installs ONCE, at `pytest_configure`, before collection imports a single test module
+-- because a function-scoped autouse fixture, which is what this was, leaves collection-time
+imports and every module- or session-scoped fixture running unguarded. It is lifted per test for
+`smoke`, which is excluded from the default run by `addopts` in `pyproject.toml`.
 
-`smoke` is the escape hatch, and it is excluded from the default run by `addopts` in
-`pyproject.toml`. Nothing in this project's unit suite is expected to use it.
+It also reaches child processes. See `offline_guard` for why that is not optional here.
 """
 
 from __future__ import annotations
 
-import socket
+import os
+import sys
 from pathlib import Path
-from typing import Any, Iterator
 
 import pytest
 
-from offline_guard import NetworkAccessInUnitSuite
+import offline_guard
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-
-_LOCAL_FAMILIES = frozenset(
-    getattr(socket, name) for name in ("AF_UNIX",) if hasattr(socket, name)
-)
-
-_HF_OFFLINE_VARS = (
-    "HF_HUB_OFFLINE",
-    "HF_DATASETS_OFFLINE",
-    "TRANSFORMERS_OFFLINE",
-)
+_CHILD_GUARD = Path(__file__).resolve().parent / "_childguard"
 
 
-@pytest.fixture(autouse=True)
-def _no_network(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Refuse outbound sockets and DNS for the duration of every non-`smoke` test."""
-    if request.node.get_closest_marker("smoke") is not None:
-        yield
-        return
+def pytest_configure(config: pytest.Config) -> None:
+    """Install before collection, and arrange for children to install it too."""
+    offline_guard.install()
 
-    for var in _HF_OFFLINE_VARS:
-        monkeypatch.setenv(var, "1")
+    # `sitecustomize` is imported automatically at interpreter start, so a child that inherits
+    # this PYTHONPATH re-installs the guard on itself. The tests directory comes along because
+    # that is where `offline_guard` lives.
+    tests_dir = str(Path(__file__).resolve().parent)
+    existing = os.environ.get("PYTHONPATH", "")
+    parts = [str(_CHILD_GUARD), tests_dir] + ([existing] if existing else [])
+    os.environ["PYTHONPATH"] = os.pathsep.join(parts)
+    os.environ["NBC_OFFLINE_GUARD"] = "1"
 
-    def _refuse(what: str, target: object) -> NetworkAccessInUnitSuite:
-        return NetworkAccessInUnitSuite(
-            f"{what} to {target!r} was blocked: the unit suite runs with no network and no "
-            f"model download. Mark the test `@pytest.mark.smoke` if it genuinely needs one."
-        )
 
-    real_connect = socket.socket.connect
-    real_connect_ex = socket.socket.connect_ex
+def pytest_unconfigure(config: pytest.Config) -> None:
+    offline_guard.uninstall()
 
-    def guarded_connect(self: socket.socket, address: Any) -> None:
-        if self.family in _LOCAL_FAMILIES:
-            return real_connect(self, address)
-        raise _refuse("socket.connect", address)
 
-    def guarded_connect_ex(self: socket.socket, address: Any) -> int:
-        if self.family in _LOCAL_FAMILIES:
-            return real_connect_ex(self, address)
-        raise _refuse("socket.connect_ex", address)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """`smoke` is the one escape hatch, and it is lifted for that test only."""
+    if item.get_closest_marker("smoke") is not None:
+        offline_guard.uninstall()
+    else:
+        offline_guard.install()
 
-    def guarded_create_connection(address: Any, *args: Any, **kwargs: Any) -> socket.socket:
-        raise _refuse("socket.create_connection", address)
 
-    def guarded_getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> list[Any]:
-        raise _refuse("socket.getaddrinfo", host)
-
-    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
-    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
-    monkeypatch.setattr(socket, "create_connection", guarded_create_connection)
-    monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
-
-    yield
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> None:
+    offline_guard.install()
 
 
 @pytest.fixture(scope="session")
