@@ -1,0 +1,58 @@
+[project]
+name = "normalize-before-classify"
+version = "0.1.0"
+description = "How much of a prompt-injection classifier's recall does canonicalizing the input first recover, and what does it cost?"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = "==3.13.*"
+
+# CPython 3.13 exactly, and the range is deliberately not the one the wheels admit.
+# onnxruntime's manylinux_2_28 wheels would accept 3.11 through 3.14; the vendored Unicode
+# confusables table would not, because its revision must equal `unicodedata.unidata_version`
+# and that moves with the interpreter minor (3.13 gives UCD 15.1.0). Widening this range
+# means re-vendoring the table and re-running, not editing a line here.
+
+# The measurement runtime, and all of it. There is no `torch` and no `transformers`:
+# every pinned baseline ships an in-repository ONNX graph, so the project has no
+# accelerator runtime to accidentally acquire. A test asserts that stays true.
+dependencies = [
+    "onnxruntime==1.29.0",
+    "tokenizers==0.23.1",
+]
+
+[project.optional-dependencies]
+# Build-time only. `datasets` is imported inside the corpus builder and nowhere else,
+# so the measurement path keeps its offline guarantee. Installed with
+# `uv sync --frozen --extra build` when, and only when, the corpus is being rebuilt.
+build = [
+    "datasets==5.0.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+]
+
+[build-system]
+# Pinned exactly rather than to a range: a floating build requirement is an unpinned
+# input to an artifact whose whole claim is that its inputs are pinned.
+requires = ["hatchling==1.32.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nbc"]
+
+[tool.uv]
+# The resolver is an input to the pin, not a detail of whoever ran it: a different uv
+# writes a different lockfile format and can resolve differently. uv refuses to operate in
+# this project under any other version, so the pin is enforced rather than documented.
+required-version = "==0.12.5"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `-m "not smoke"` is what makes the default run the offline unit suite. The
+# model-touching smoke target is a separately marked job, invoked only by CI.
+addopts = "-ra --strict-markers --strict-config -m 'not smoke'"
+markers = [
+    "smoke: touches pinned models or the network; excluded from the default offline unit run",
+]

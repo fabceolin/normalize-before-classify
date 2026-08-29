@@ -1,0 +1,283 @@
+"""The resolved environment is CPU-only and pinned, and that is checked rather than promised.
+
+The CPU-only premise is the reason a stranger can reproduce this table on a laptop. Asserting
+it in prose is worthless: an inference session built without an explicit provider list picks
+up an accelerator when one exists, and the resulting numbers are neither CPU numbers nor
+reproducible. The cheapest place to bind the premise is the dependency resolution — with no
+accelerator runtime resolved, there is none to accidentally acquire.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+import tomllib
+from importlib.metadata import distributions
+from pathlib import Path
+
+import pytest
+
+# Matched against PyPI-normalized names (lowercased, runs of `-_.` collapsed to `-`).
+FORBIDDEN_NAME_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"^torch", "torch and its companions: the project has no accelerator runtime"),
+    (r"^transformers", "transformers: every baseline ships an in-repository ONNX graph"),
+    (r"^nvidia-", "an NVIDIA runtime component"),
+    (r"(^|-)cuda(-|$)", "a CUDA component"),
+    (r"(^|-)cudnn(-|$)", "a cuDNN component"),
+    (r"(^|-)nccl(-|$)", "an NCCL component"),
+    (r"^tensorrt(-|$)", "a TensorRT component"),
+    (r"^onnxruntime-gpu(-|$)", "the GPU build of onnxruntime"),
+)
+
+EXPECTED_PINS: dict[str, str] = {
+    "onnxruntime": "1.29.0",
+    "tokenizers": "0.23.1",
+}
+EXPECTED_BUILD_PINS: dict[str, str] = {"datasets": "5.0.1"}
+EXPECTED_DEV_PINS: dict[str, str] = {"pytest": "9.1.1"}
+EXPECTED_UV_VERSION = "0.12.5"
+
+
+def _normalize(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _forbidden(name: str) -> str | None:
+    normalized = _normalize(name)
+    for pattern, why in FORBIDDEN_NAME_PATTERNS:
+        if re.search(pattern, normalized):
+            return why
+    return None
+
+
+def _read_toml(path: Path) -> dict:
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def pyproject(repo_root: Path) -> dict:
+    return _read_toml(repo_root / "pyproject.toml")
+
+
+@pytest.fixture(scope="module")
+def lockfile(repo_root: Path) -> dict:
+    path = repo_root / "uv.lock"
+    assert path.is_file(), "uv.lock must be committed: it is part of the pin"
+    return _read_toml(path)
+
+
+def test_no_accelerator_distribution_is_installed() -> None:
+    offenders = [
+        f"{dist.metadata['Name']} ({why})"
+        for dist in distributions()
+        if dist.metadata["Name"] and (why := _forbidden(dist.metadata["Name"]))
+    ]
+    assert not offenders, "the resolved environment must be CPU-only: " + "; ".join(offenders)
+
+
+def test_no_accelerator_package_appears_anywhere_in_the_lockfile(lockfile: dict) -> None:
+    """Covers the build-time group too, which the installed set does not.
+
+    `datasets` is only installed when the corpus is rebuilt, so a torch dependency arriving
+    through it would never show up in the installed distributions of a measurement run — and
+    would still be a GPU path in a repository that advertises none.
+    """
+    offenders = [
+        f"{package.get('name')} ({why})"
+        for package in lockfile.get("package", [])
+        if (why := _forbidden(str(package.get("name", ""))))
+    ]
+    assert not offenders, "uv.lock must resolve no accelerator runtime: " + "; ".join(offenders)
+
+
+def test_every_declared_dependency_is_pinned_to_an_exact_version(pyproject: dict) -> None:
+    """No floating constraint anywhere, including the build backend.
+
+    A range would let two clones a month apart install different code behind the same
+    committed numbers.
+    """
+    project = pyproject["project"]
+    declared: list[str] = list(project.get("dependencies", []))
+    for extra in project.get("optional-dependencies", {}).values():
+        declared.extend(extra)
+    for group in pyproject.get("dependency-groups", {}).values():
+        declared.extend(group)
+    declared.extend(pyproject["build-system"]["requires"])
+
+    unpinned = [spec for spec in declared if not re.search(r"==\s*[^,\s]+$", spec.strip())]
+    assert not unpinned, "every dependency must be pinned with `==`: " + "; ".join(unpinned)
+
+
+@pytest.mark.parametrize(
+    ("section", "expected"),
+    [
+        ("runtime", EXPECTED_PINS),
+        ("build", EXPECTED_BUILD_PINS),
+        ("dev", EXPECTED_DEV_PINS),
+    ],
+)
+def test_the_declared_stack_is_the_pinned_stack(
+    pyproject: dict, section: str, expected: dict[str, str]
+) -> None:
+    if section == "runtime":
+        specs = pyproject["project"]["dependencies"]
+    elif section == "build":
+        specs = pyproject["project"]["optional-dependencies"]["build"]
+    else:
+        specs = pyproject["dependency-groups"]["dev"]
+
+    resolved = dict(spec.split("==", 1) for spec in specs)
+    assert resolved == expected
+
+
+def test_datasets_is_build_time_only(pyproject: dict) -> None:
+    """The measurement path must have no external data dependency at all."""
+    runtime = [spec.split("==", 1)[0] for spec in pyproject["project"]["dependencies"]]
+    assert "datasets" not in runtime
+    build = pyproject["project"]["optional-dependencies"]["build"]
+    assert any(spec.startswith("datasets==") for spec in build)
+
+
+def test_the_interpreter_is_pinned_to_cpython_3_13(pyproject: dict, repo_root: Path) -> None:
+    """CPython 3.13 exactly — and not because of the wheel tags.
+
+    The onnxruntime wheels would admit 3.11 through 3.14. The vendored Unicode confusables
+    table would not: its revision must equal the interpreter's own UCD revision, and that
+    moves with the minor version. Publishing the wheels' range would approve a machine whose
+    unit suite then fails.
+    """
+    assert pyproject["project"]["requires-python"] == "==3.13.*"
+    assert (repo_root / ".python-version").read_text(encoding="utf-8").strip() == "3.13"
+    assert sys.version_info[:2] == (3, 13), f"running on {sys.version_info[:2]}, expected 3.13"
+
+
+def test_the_lockfile_agrees_with_the_declared_interpreter(lockfile: dict) -> None:
+    assert lockfile["requires-python"] == "==3.13.*"
+
+
+def test_the_resolver_itself_is_pinned(pyproject: dict) -> None:
+    """uv is an input to the pin, not a detail of whoever happened to run it.
+
+    A different uv writes a different lockfile format and can resolve differently, so the
+    project refuses to be locked or synced by one. Verified against uv 0.6.9, which exits
+    with `Required uv version ==0.12.5 does not match the running version 0.6.9`.
+    """
+    assert pyproject["tool"]["uv"]["required-version"] == f"=={EXPECTED_UV_VERSION}"
+
+
+def test_the_default_pytest_run_is_the_offline_unit_suite(pyproject: dict) -> None:
+    """`-m 'not smoke'` is what makes "the unit suite runs offline" true by default."""
+    options = pyproject["tool"]["pytest"]["ini_options"]
+    assert "not smoke" in options["addopts"]
+    assert any(marker.startswith("smoke:") for marker in options["markers"])
+
+
+# --- lockfile agreement ---------------------------------------------------------------------
+#
+# `uv sync --frozen` installs the lockfile without reading `pyproject.toml`, so a dependency
+# added to `pyproject.toml` and never re-locked installs *silently* under that flag — verified
+# against uv 0.12.5, which exits 0. The flag that refuses is `uv sync --locked`.
+#
+# Since the documented reproduction command is the frozen one, the agreement is asserted here
+# instead, offline, from the two committed files: `uv.lock` records the root package's declared
+# requirements, so drift is detectable without re-resolving anything.
+
+
+def _extra_from_marker(marker: str | None) -> str | None:
+    if not marker:
+        return None
+    match = re.fullmatch(r"extra\s*==\s*['\"]([^'\"]+)['\"]", marker.strip())
+    return match.group(1) if match else marker
+
+
+def _declared_in_pyproject(pyproject: dict) -> set[tuple[str, str, str | None]]:
+    declared: set[tuple[str, str, str | None]] = set()
+    project = pyproject["project"]
+    for spec in project.get("dependencies", []):
+        name, version = spec.split("==", 1)
+        declared.add((_normalize(name), f"=={version}", None))
+    for extra, specs in project.get("optional-dependencies", {}).items():
+        for spec in specs:
+            name, version = spec.split("==", 1)
+            declared.add((_normalize(name), f"=={version}", extra))
+    return declared
+
+
+def _recorded_in_lockfile(lockfile: dict, project_name: str) -> set[tuple[str, str, str | None]]:
+    roots = [
+        package
+        for package in lockfile["package"]
+        if _normalize(str(package.get("name", ""))) == _normalize(project_name)
+    ]
+    assert len(roots) == 1, f"expected exactly one root package entry, found {len(roots)}"
+    metadata = roots[0].get("metadata", {})
+    return {
+        (
+            _normalize(str(requirement["name"])),
+            str(requirement.get("specifier", "")),
+            _extra_from_marker(requirement.get("marker")),
+        )
+        for requirement in metadata.get("requires-dist", [])
+    }
+
+
+def test_the_lockfile_records_the_same_dependencies_as_pyproject(
+    pyproject: dict, lockfile: dict
+) -> None:
+    project_name = pyproject["project"]["name"]
+    declared = _declared_in_pyproject(pyproject)
+    recorded = _recorded_in_lockfile(lockfile, project_name)
+
+    assert declared == recorded, (
+        "uv.lock is out of sync with pyproject.toml — run `uv lock` and commit the result. "
+        f"Declared but not locked: {sorted(declared - recorded)}. "
+        f"Locked but not declared: {sorted(recorded - declared)}."
+    )
+
+
+def test_the_lockfile_records_the_same_dependency_groups_as_pyproject(
+    pyproject: dict, lockfile: dict
+) -> None:
+    project_name = pyproject["project"]["name"]
+    declared = {
+        group: {tuple(spec.split("==", 1)) for spec in specs}
+        for group, specs in pyproject.get("dependency-groups", {}).items()
+    }
+
+    roots = [
+        package
+        for package in lockfile["package"]
+        if _normalize(str(package.get("name", ""))) == _normalize(project_name)
+    ]
+    recorded_raw = roots[0].get("metadata", {}).get("requires-dev", {})
+    recorded = {
+        group: {
+            (str(req["name"]), str(req.get("specifier", "")).removeprefix("=="))
+            for req in reqs
+        }
+        for group, reqs in recorded_raw.items()
+    }
+
+    assert declared == recorded, (
+        "uv.lock's dependency groups disagree with pyproject.toml — run `uv lock`. "
+        f"Declared: {declared}. Locked: {recorded}."
+    )
+
+
+def test_every_locked_package_comes_from_the_pinned_index(lockfile: dict) -> None:
+    """No package may enter the resolution from a path, a git ref, or a second index.
+
+    A git source would make the reproduction depend on a branch that can move under the
+    committed numbers; a second index would make the same name resolve to different code.
+    """
+    offenders = []
+    for package in lockfile["package"]:
+        source = package.get("source", {})
+        if "registry" in source:
+            if source["registry"] != "https://pypi.org/simple":
+                offenders.append(f"{package.get('name')} from {source['registry']}")
+        elif "editable" in source or "virtual" in source:
+            continue  # the project itself
+        else:
+            offenders.append(f"{package.get('name')} from {source}")
+    assert not offenders, "; ".join(offenders)
