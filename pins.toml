@@ -286,3 +286,15 @@ xTRam1/safe-guard-prompt-injection, licence not declared, \
 revision a3a877d608f37b7d20d9945671902df895ecdb46\
 """
 redistributed = true
+# NOT an acceptance of the risk, and not a licence chosen on the publisher's behalf. This field
+# exists so the pin file can load while the question is open, and so the question travels into
+# `results.json` where a reader sees it rather than discovering it themselves.
+unresolved = """\
+2026-08-29: OPEN. The publisher declares no licence at the pinned revision, and these rows are \
+redistributed into data/*.jsonl in an MIT repository. FR5.2 and AD-34 make this a build abort in \
+story 3.8, which cannot pass until this is resolved, and the attack pool is a single dataset with \
+no fallback. Resolving it is a human decision with three doors: ask the publisher to declare a \
+licence, find a licensed pool that clears the same AD-26 lineage bar, or state a redistribution \
+position in the README and accept the exposure. Recorded here so the decision is taken before the \
+corpus is built rather than after it ships.\
+"""

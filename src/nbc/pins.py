@@ -74,9 +74,10 @@ from __future__ import annotations
 import os
 import re
 import sys
+import datetime
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, ClassVar, Final, Mapping, Sequence
 
 from nbc.errors import NbcError
@@ -223,8 +224,15 @@ _REDUCED_PRECISION: Final[re.Pattern[str]] = re.compile(
     r"fp16|float16|bf16|bfloat16|mixed|int8|uint8|quant|_q4|_q8", re.IGNORECASE
 )
 _SHA: Final[re.Pattern[str]] = re.compile(r"\A[0-9a-f]{40}\Z")
-_DATE: Final[re.Pattern[str]] = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
-_REPOSITORY: Final[re.Pattern[str]] = re.compile(r"\A[\w.-]+/[\w.-]+\Z")
+_REPOSITORY: Final[re.Pattern[str]] = re.compile(
+    r"\A[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z", re.ASCII
+)
+r"""A `namespace/name` id, ASCII only, each segment starting with an alphanumeric.
+
+`re.ASCII` and the explicit class are the whole point: `\w` is Unicode-aware, so the previous
+pattern admitted Cyrillic homoglyphs, and a repository id reaches an API URL. Requiring an
+alphanumeric first character also refuses the `..` and `.` segments that traverse that URL.
+"""
 
 _FIELD_REFERENCE: Final[str] = "::"
 """How a pin names a field inside a file it also pins: `<pinned path>::<field>`.
@@ -332,18 +340,34 @@ class Licence:
     source: str
     attribution: str
     redistributed: bool
+    unresolved: str = ""
 
     @property
     def declared(self) -> bool:
         return self.identifier != NOT_DECLARED
 
+    @property
+    def blocks_redistribution(self) -> bool:
+        """Material this repository ships whose licence nobody has established.
+
+        FR5.2 makes this a build abort in the corpus story. It is surfaced here, at load, because
+        the pin file is where the fact is recorded and a fact recorded beside a value that nothing
+        compares it to is the defect this epic is full of.
+        """
+        return self.redistributed and not self.declared
+
     def as_run_fields(self) -> dict[str, object]:
-        return {
+        fields: dict[str, object] = {
             "identifier": self.identifier,
             "source": self.source,
             "attribution": self.attribution,
             "redistributed": self.redistributed,
         }
+        if self.unresolved:
+            # Published rather than kept local: a reader of results.json is entitled to see that
+            # this repository redistributes material under a licence nobody established.
+            fields["unresolved"] = self.unresolved
+        return fields
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,7 +472,11 @@ class Lineage:
 
     def trains_on(self, repository: str) -> bool:
         """Whether the card declares this source among the baseline's training data."""
-        return self.training_sources.get(repository) == TRAINED_ON
+        wanted = _canonical(repository)
+        return any(
+            _canonical(declared) == wanted and relationship == TRAINED_ON
+            for declared, relationship in self.training_sources.items()
+        )
 
     def as_run_fields(self) -> dict[str, object]:
         return {
@@ -457,6 +485,23 @@ class Lineage:
             "attack_datasets": dict(self.attack_datasets),
             "training_sources": dict(self.training_sources),
         }
+
+
+
+def _canonical(value: str) -> str:
+    """The form two declarations are compared in, never the form either is published in.
+
+    Identity in this file is decided by string equality in two places that matter: SC5's
+    architecture/tokenizer family pair, and the repository ids the one-hop lineage reach joins
+    on. Both were comparing spellings. `DeBERTa-v2` and `deberta_v2` are one family declared
+    two ways, and the pair check reads them as two families -- passing SC5 while the run has one
+    architecture measured twice. Hugging Face resolves repository ids case-insensitively, so
+    `VMware/open-instruct` and `vmware/open-instruct` are one source, and the reach that joins
+    them missed it.
+
+    The raw spelling is what `as_run_fields` publishes; this is only ever the comparison key.
+    """
+    return re.sub(r"[\s_-]+", "-", value.strip().casefold())
 
 
 @dataclass(frozen=True, slots=True)
@@ -551,7 +596,7 @@ class Baseline:
     @property
     def family_pair(self) -> tuple[str, str]:
         """The pair SC5 rests on. Two baselines sharing it cannot corroborate each other."""
-        return (self.architecture_family, self.tokenizer_family)
+        return (_canonical(self.architecture_family), _canonical(self.tokenizer_family))
 
     def as_run_fields(self) -> dict[str, object]:
         return {
@@ -787,16 +832,95 @@ class _Reader:
             self.note(f"{where} must be {expected}, got {value!r}")
         return value
 
+    def distinct_strings(
+        self, table: Mapping[str, Any], key: str, where: str
+    ) -> tuple[str, ...]:
+        """A string list with no repeats.
+
+        `splits = ["train", "train"]` reads the pool twice, and the doubled count reaches a
+        published recall as its denominator. Order is kept because the read order is declared.
+        """
+        values = self.strings(table, key, where)
+        seen: list[str] = []
+        for value in values:
+            if value in seen:
+                self.note(f"{where}.{key} repeats {value!r}; a split read twice doubles the pool")
+            else:
+                seen.append(value)
+        return tuple(seen)
+
+    def label_value(self, table: Mapping[str, Any], key: str, where: str) -> int:
+        """A binary label value.
+
+        The pinned datasets are binary, and every rate in this project is computed by comparing a
+        row's label against this number. A value outside {0, 1} matches no row, which silently
+        yields a recall over an empty pool rather than an abort.
+        """
+        value = self.integer(table, key, where)
+        if value not in (0, 1):
+            self.note(f"{where}.{key} must be 0 or 1, got {value!r}")
+        return value
+
+    def calendar_date(self, value: str, where: str) -> str:
+        """An ISO date that exists on a calendar.
+
+        `_DATE` checked the shape and nothing else, so `2026-13-45` satisfied every field that
+        records *when a human checked something* -- the one class of field whose whole purpose is
+        to be compared against a real date later.
+        """
+        if not value:
+            return value
+        try:
+            datetime.date.fromisoformat(value)
+        except ValueError:
+            self.note(
+                f"{where} must be an ISO calendar date (YYYY-MM-DD) that exists, got {value!r}"
+            )
+        return value
+
+    def contained_path(self, value: str, where: str) -> str:
+        """A path that stays inside the snapshot the pin verified.
+
+        `Path("/snapshot") / "/etc/passwd"` is `/etc/passwd`: an absolute right operand silently
+        discards the left one. So an absolute `graph_path` escapes the directory whose revision
+        was checked, and every downstream join inherits it. Refused here, once, because two
+        modules join these paths and a check in either leaves the other open.
+        """
+        if not value:
+            return value
+        pure = PurePosixPath(value)
+        if pure.is_absolute() or value.startswith("\\") or ":" in value.split("/")[0]:
+            self.note(f"{where} must be relative to the pinned snapshot, got {value!r}")
+        elif ".." in pure.parts:
+            self.note(f"{where} must not traverse upwards, got {value!r}")
+        elif "." in pure.parts or value != str(pure):
+            self.note(
+                f"{where} must be a normalized relative path, got {value!r} "
+                f"(normalizes to {str(pure)!r})"
+            )
+        return value
+
 
 def _read_licence(reader: _Reader, parent: Mapping[str, Any], where: str) -> Licence:
     table = reader.table(parent, "licence", where)
     at = f"{where}.licence"
     identifier = reader.string(table, "identifier", at)
+    redistributed = reader.boolean(table, "redistributed", at)
+    unresolved = str(table.get("unresolved", "")).strip()
+    if redistributed and identifier == NOT_DECLARED and not unresolved:
+        reader.note(
+            f"{at} redistributes material under an undeclared licence. Either declare the "
+            f"identifier, or record the open question in an `unresolved` field stating the date "
+            f"and what has to happen: contact the publisher, find a licensed source, or state a "
+            f"redistribution position. FR5.2 makes this a build abort in the corpus story; it is "
+            f"refused here so the decision is taken before the corpus is built, not after."
+        )
     return Licence(
         identifier=identifier,
         source=reader.string(table, "source", at),
         attribution=reader.string(table, "attribution", at),
-        redistributed=reader.boolean(table, "redistributed", at),
+        redistributed=redistributed,
+        unresolved=unresolved,
     )
 
 
@@ -823,7 +947,7 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
     if "threshold" in table and not 0.0 <= threshold <= 1.0:
         reader.note(f"{where}.threshold must lie in [0, 1], got {threshold!r}")
 
-    graph_path = reader.string(table, "graph_path", where)
+    graph_path = reader.contained_path(reader.string(table, "graph_path", where), f"{where}.graph_path")
     precision = reader.string(table, "precision", where)
     if precision and precision != PINNED_PRECISION:
         reader.note(
@@ -843,7 +967,7 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
     if "graph_bytes" in table and graph_bytes <= 0:
         reader.note(f"{where}.graph_bytes must be positive, got {graph_bytes!r}")
 
-    config_path = reader.string(table, "config_path", where)
+    config_path = reader.contained_path(reader.string(table, "config_path", where), f"{where}.config_path")
 
     window_policy = reader.string(table, "window_policy", where)
     if window_policy and window_policy not in WINDOW_POLICIES:
@@ -859,11 +983,9 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
     window = WindowPin(
         length=reader.integer(window_table, "length", f"{where}.window"),
         source=reader.string(window_table, "source", f"{where}.window"),
-        confirmed_on=reader.matching(
+        confirmed_on=reader.calendar_date(
             reader.string(window_table, "confirmed_on", f"{where}.window"),
-            _DATE,
             f"{where}.window.confirmed_on",
-            "an ISO date (YYYY-MM-DD)",
         ),
         confirmed_revision=reader.matching(
             reader.string(window_table, "confirmed_revision", f"{where}.window"),
@@ -901,11 +1023,9 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
 
     lineage_table = reader.table(table, "lineage", where)
     lineage = Lineage(
-        checked_on=reader.matching(
+        checked_on=reader.calendar_date(
             reader.string(lineage_table, "checked_on", f"{where}.lineage"),
-            _DATE,
             f"{where}.lineage.checked_on",
-            "an ISO date (YYYY-MM-DD)",
         ),
         card_revision=reader.matching(
             reader.string(lineage_table, "card_revision", f"{where}.lineage"),
@@ -939,7 +1059,9 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
         graph_path=graph_path,
         precision=precision,
         graph_bytes=graph_bytes,
-        tokenizer_path=reader.string(table, "tokenizer_path", where),
+        tokenizer_path=reader.contained_path(
+            reader.string(table, "tokenizer_path", where), f"{where}.tokenizer_path"
+        ),
         config_path=config_path,
         architecture_family=reader.string(table, "architecture_family", where),
         tokenizer_family=reader.string(table, "tokenizer_family", where),
@@ -972,11 +1094,9 @@ def _read_oq2(
             f"exactly on it, so removal does not weaken that criterion, it fails it"
         )
 
-    decided_on = reader.matching(
+    decided_on = reader.calendar_date(
         reader.string(table, "decided_on", at),
-        _DATE,
         f"{at}.decided_on",
-        "an ISO date (YYYY-MM-DD)",
     )
     decided_revision = reader.matching(
         reader.string(table, "decided_revision", at),
@@ -1050,11 +1170,9 @@ def _read_attack_dataset(
             seed, _REPOSITORY, f"{where}.provenance.seeds", "a `namespace/name` repository id"
         )
     provenance = Provenance(
-        checked_on=reader.matching(
+        checked_on=reader.calendar_date(
             reader.string(provenance_table, "checked_on", f"{where}.provenance"),
-            _DATE,
             f"{where}.provenance.checked_on",
-            "an ISO date (YYYY-MM-DD)",
         ),
         card_revision=reader.matching(
             reader.string(provenance_table, "card_revision", f"{where}.provenance"),
@@ -1084,8 +1202,8 @@ def _read_attack_dataset(
         key=key,
         repository=repository,
         revision=revision,
-        splits=reader.strings(table, "splits", where),
-        attack_label=reader.integer(table, "attack_label", where),
+        splits=reader.distinct_strings(table, "splits", where),
+        attack_label=reader.label_value(table, "attack_label", where),
         licence=_read_licence(reader, table, where),
         provenance=provenance,
     )
@@ -1224,7 +1342,7 @@ def load_pins(root: Path | str | None = None) -> Pins:
         raise PinsFileInvalid(f"{path} could not be read: {error}") from None
 
     try:
-        document = tomllib.loads(raw.decode("utf-8"))
+        document = tomllib.loads(raw.decode("utf-8-sig"))
     except UnicodeDecodeError as error:
         raise PinsFileInvalid(f"{path} is not valid UTF-8: {error}") from None
     except tomllib.TOMLDecodeError as error:
@@ -1240,11 +1358,9 @@ def load_pins(root: Path | str | None = None) -> Pins:
             f"meta.schema_version is {schema_version}, and this module reads "
             f"{SCHEMA_VERSION}; a pin file from another shape is not one it may guess at"
         )
-    verified_on = reader.matching(
+    verified_on = reader.calendar_date(
         reader.string(meta, "verified_on", "meta"),
-        _DATE,
         "meta.verified_on",
-        "an ISO date (YYYY-MM-DD)",
     )
     verified_against = reader.string(meta, "verified_against", "meta")
 

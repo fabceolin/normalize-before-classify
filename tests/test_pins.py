@@ -127,6 +127,10 @@ def _dataset(**overrides: Any) -> dict[str, Any]:
             "source": "nothing on the card",
             "attribution": "example/attacks",
             "redistributed": True,
+            # Redistributed under an undeclared licence, so the file must record the open
+            # question or refuse to load. The default fixture records it; the test below
+            # removes it and asserts the refusal.
+            "unresolved": "2026-08-29: fixture, question deliberately left open",
         },
         "provenance": {
             "checked_on": "2026-08-28",
@@ -1310,3 +1314,149 @@ def test_every_committed_pin_still_resolves_on_the_hub() -> None:
     pins = load_pins()
     resolved = verify_revisions(pins, resolve_over_http)
     assert len(resolved) == len(pins.remote_artifacts())
+
+
+# --- Pass 1: what the pin file now refuses ------------------------------------------------------
+#
+# Every check below ships with the mutation that turns it red. A gate whose failing input nobody
+# can name is not a gate, and this epic's review found that shape in production code as often as
+# in tests. Each of these was verified to LOAD CLEAN before the corresponding fix.
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/etc/passwd", "../../etc/passwd", "onnx/../../escape", "./onnx/model.onnx"],
+)
+def test_a_pinned_path_that_escapes_the_snapshot_is_refused(tmp_path: Path, path: str) -> None:
+    """`Path("/snapshot") / "/etc/passwd"` is `/etc/passwd`: the left operand is discarded.
+
+    Two modules join these paths, so the check lives where the pin is read rather than at either
+    join. `graph_path = "/etc/passwd"` loaded clean before this.
+    """
+    write_pins(tmp_path, _document(baselines=[_baseline(graph_path=path), _baseline(
+        key="second", repository="example/second-model", revision=SHA_B,
+        architecture_family="bert", tokenizer_family="wordpiece")]))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "graph_path" in str(caught.value)
+
+
+def test_an_impossible_calendar_date_is_refused(tmp_path: Path) -> None:
+    """`2026-13-45` satisfied the old shape check on every field recording when a human looked."""
+    write_pins(tmp_path, _document(baselines=[
+        _baseline(lineage={"checked_on": "2026-13-45", "card_revision": SHA_A,
+                           "attack_datasets": {}, "training_sources": {}}),
+        _baseline(key="second", repository="example/second-model", revision=SHA_B,
+                  architecture_family="bert", tokenizer_family="wordpiece"),
+    ]))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "2026-13-45" in str(caught.value)
+
+
+def test_a_repository_id_with_a_cyrillic_homoglyph_is_refused(tmp_path: Path) -> None:
+    """`\\w` is Unicode-aware, so the old pattern admitted an id that reaches an API URL."""
+    write_pins(tmp_path, _document(datasets=[_dataset(repository="еxample/attacks")]))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "repository" in str(caught.value)
+
+
+def test_a_repeated_split_is_refused(tmp_path: Path) -> None:
+    """A split read twice doubles the pool, and the pool is a published denominator."""
+    write_pins(tmp_path, _document(datasets=[_dataset(splits=["train", "train"])]))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "repeats" in str(caught.value)
+
+
+@pytest.mark.parametrize("label", [2, -1, 99])
+def test_a_non_binary_attack_label_is_refused(tmp_path: Path, label: int) -> None:
+    """A label matching no row yields a recall over an empty pool rather than an abort."""
+    write_pins(tmp_path, _document(datasets=[_dataset(attack_label=label)]))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "must be 0 or 1" in str(caught.value)
+
+
+def test_redistributed_material_with_no_licence_and_no_open_question_is_refused(
+    tmp_path: Path,
+) -> None:
+    """FR5.2 is a build abort in the corpus story; refusing here takes the decision first."""
+    licence = {
+        "identifier": NOT_DECLARED,
+        "source": "nothing on the card",
+        "attribution": "example/attacks",
+        "redistributed": True,
+    }
+    write_pins(tmp_path, _document(datasets=[_dataset(licence=licence)]))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "undeclared licence" in str(caught.value)
+
+
+def test_recording_the_open_question_lets_the_file_load_and_reaches_the_run_fields(
+    tmp_path: Path,
+) -> None:
+    """The escape hatch is a record, not a waiver: it has to survive into `results.json`."""
+    licence = {
+        "identifier": NOT_DECLARED,
+        "source": "nothing on the card",
+        "attribution": "example/attacks",
+        "redistributed": True,
+        "unresolved": "2026-08-29: OPEN, publisher declares nothing",
+    }
+    write_pins(tmp_path, _document(datasets=[_dataset(licence=licence)]))
+
+    pins = load_pins(tmp_path)
+    dataset = pins.attack_datasets[0]
+
+    assert dataset.licence.blocks_redistribution is True
+    assert "OPEN" in dataset.as_run_fields()["licence"]["unresolved"]
+
+
+def test_the_family_pair_check_sees_through_casing_and_separators(tmp_path: Path) -> None:
+    """`DeBERTa-v2` and `deberta_v2` are one architecture declared twice, and SC5 must say so."""
+    write_pins(tmp_path, _document(baselines=[
+        _baseline(architecture_family="deberta-v2", tokenizer_family="sentencepiece-unigram"),
+        _baseline(key="second", repository="example/second-model", revision=SHA_B,
+                  architecture_family="DeBERTa_v2", tokenizer_family="SentencePiece Unigram"),
+    ]))
+
+    with pytest.raises(BaselineSetInvalid) as caught:
+        load_pins(tmp_path)
+    assert "families" in str(caught.value)
+
+
+def test_the_one_hop_reach_joins_repository_ids_case_insensitively(tmp_path: Path) -> None:
+    """Hugging Face resolves ids case-insensitively; a card spelling difference hid the reach."""
+    baseline = _baseline(lineage={
+        "checked_on": "2026-08-28",
+        "card_revision": SHA_A,
+        "attack_datasets": {},
+        "training_sources": {SEED_ONE.upper(): TRAINED_ON},
+    })
+    write_pins(tmp_path, _document(baselines=[
+        baseline,
+        _baseline(key="second", repository="example/second-model", revision=SHA_B,
+                  architecture_family="bert", tokenizer_family="wordpiece"),
+    ]))
+
+    with pytest.raises((PinsFileInvalid, BaselineSetInvalid)) as caught:
+        load_pins(tmp_path)
+    assert SEED_ONE.lower() in str(caught.value).lower()
+
+
+def test_a_utf8_bom_does_not_read_as_broken_toml(tmp_path: Path) -> None:
+    """A file saved by a Windows editor reported as 'not valid TOML at line 1 column 1'."""
+    write_pins(tmp_path, _document())
+    path = tmp_path / "pins.toml"
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
+
+    assert load_pins(tmp_path).schema_version == SCHEMA_VERSION
