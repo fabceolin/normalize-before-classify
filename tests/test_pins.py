@@ -41,7 +41,10 @@ from nbc.pins import (
     BaselineSetInvalid,
     PinMismatch,
     PinsFileInvalid,
+    CHECKED_AGAINST_CACHE,
+    CHECKED_AGAINST_HUB,
     RemoteArtifact,
+    Resolution,
     load_pins,
     resolve_from_cache,
     verify_revisions,
@@ -225,9 +228,9 @@ def committed_document(repo_root: Path) -> dict[str, Any]:
     return tomllib.loads((repo_root / PINS_FILENAME).read_text(encoding="utf-8"))
 
 
-def echoing_resolver(artifact: RemoteArtifact) -> str | None:
-    """A world in which every pin still resolves to itself."""
-    return artifact.revision
+def echoing_resolver(artifact: RemoteArtifact) -> Resolution | None:
+    """A world in which every pin still resolves to itself, and was asked."""
+    return Resolution(artifact.revision, CHECKED_AGAINST_HUB)
 
 
 # --- the fixture writer itself -----------------------------------------------------------
@@ -1034,10 +1037,12 @@ def test_verification_passes_when_every_pin_resolves_to_itself(tmp_path: Path) -
     pins = load_pins(tmp_path)
 
     resolved = verify_revisions(pins, echoing_resolver)
+    # The sha AND what it was checked against. A run verified entirely from cache compared
+    # nothing to the world, and results.json has to be able to say so.
     assert resolved == {
-        "example/first-model": SHA_A,
-        "example/second-model": SHA_B,
-        "example/attacks": SHA_D,
+        "example/first-model": f"{SHA_A}@{CHECKED_AGAINST_HUB}",
+        "example/second-model": f"{SHA_B}@{CHECKED_AGAINST_HUB}",
+        "example/attacks": f"{SHA_D}@{CHECKED_AGAINST_HUB}",
     }
 
 
@@ -1046,8 +1051,9 @@ def test_a_moved_revision_aborts_naming_the_artifact_and_both_shas(tmp_path: Pat
     pins = load_pins(tmp_path)
     moved = "c" * 40
 
-    def resolver(artifact: RemoteArtifact) -> str | None:
-        return moved if artifact.repository == "example/first-model" else artifact.revision
+    def resolver(artifact: RemoteArtifact) -> Resolution | None:
+        sha = moved if artifact.repository == "example/first-model" else artifact.revision
+        return Resolution(sha, CHECKED_AGAINST_HUB)
 
     with pytest.raises(PinMismatch) as abort:
         verify_revisions(pins, resolver)
@@ -1063,8 +1069,9 @@ def test_a_moved_dataset_revision_aborts_too(tmp_path: Path) -> None:
     pins = load_pins(tmp_path)
     moved = "e" * 40
 
-    def resolver(artifact: RemoteArtifact) -> str | None:
-        return moved if artifact.kind == "dataset" else artifact.revision
+    def resolver(artifact: RemoteArtifact) -> Resolution | None:
+        sha = moved if artifact.kind == "dataset" else artifact.revision
+        return Resolution(sha, CHECKED_AGAINST_HUB)
 
     with pytest.raises(PinMismatch, match="example/attacks"):
         verify_revisions(pins, resolver)
@@ -1081,12 +1088,15 @@ def test_an_unresolvable_pin_aborts_rather_than_passing_quietly(tmp_path: Path) 
 
 
 def test_a_cached_snapshot_resolves_with_no_network(tmp_path: Path) -> None:
-    """The snapshot directory is named by the sha, so its existence is the resolution."""
+    """A cache hit resolves, and says it was checked against the cache and not the world."""
     artifact = RemoteArtifact("model", "example/first-model", SHA_A)
     snapshot = tmp_path / artifact.cache_directory / "snapshots" / SHA_A
     snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
 
-    assert resolve_from_cache(artifact, cache_root=tmp_path) == SHA_A
+    resolution = resolve_from_cache(artifact, cache_root=tmp_path)
+
+    assert resolution == Resolution(SHA_A, CHECKED_AGAINST_CACHE)
 
 
 def test_an_uncached_artifact_resolves_to_nothing_from_the_cache(tmp_path: Path) -> None:
@@ -1577,3 +1587,85 @@ def test_the_committed_recalls_are_recomputable_from_their_own_integers(
             dataset.revision for dataset in committed_pins.attack_datasets
         }
         assert oq2.measured_at_threshold == baseline.threshold
+
+
+# --- Pass 3: the pin is compared to the artifact, and the comparison can fail -------------------
+#
+# The #1 blocking finding: `resolve_from_cache` returned the pin, and the pin was what it was
+# compared against, so on every machine that had fetched once `resolved != artifact.revision` was
+# `x != x`. The module's docstring called that comparison the guarantee that the published
+# numbers came from the pinned artifacts.
+
+
+def test_a_cache_resolution_says_it_was_not_checked_against_the_world(tmp_path: Path) -> None:
+    """The directory's existence is the pin spelled back off a directory name."""
+    artifact = RemoteArtifact("model", "example/first-model", SHA_A)
+    snapshot = tmp_path / artifact.cache_directory / "snapshots" / SHA_A
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+
+    resolution = resolve_from_cache(artifact, cache_root=tmp_path)
+
+    assert resolution is not None
+    assert resolution.checked_against == CHECKED_AGAINST_CACHE
+    assert resolution.checked_against != CHECKED_AGAINST_HUB
+
+
+def test_an_empty_snapshot_directory_does_not_resolve(tmp_path: Path) -> None:
+    """An interrupted fetch leaves one behind, and it satisfied verification before this."""
+    artifact = RemoteArtifact("model", "example/first-model", SHA_A)
+    (tmp_path / artifact.cache_directory / "snapshots" / SHA_A).mkdir(parents=True)
+
+    assert resolve_from_cache(artifact, cache_root=tmp_path) is None
+
+
+def test_the_run_fields_record_which_artifacts_were_asked_about(tmp_path: Path) -> None:
+    """A run verified entirely from cache compared nothing to the world, and must say so."""
+    write_pins(tmp_path, _document())
+    pins = load_pins(tmp_path)
+
+    def cache_only(artifact: RemoteArtifact) -> Resolution | None:
+        return Resolution(artifact.revision, CHECKED_AGAINST_CACHE)
+
+    resolved = verify_revisions(pins, cache_only)
+
+    assert all(value.endswith(f"@{CHECKED_AGAINST_CACHE}") for value in resolved.values())
+
+
+def test_a_graph_whose_size_moved_aborts(tmp_path: Path, monkeypatch: Any) -> None:
+    """`graph_bytes` was the declared evidence for `precision` and was read by nothing.
+
+    An fp16 export is a fraction of its fp32 original, so the size is what catches a swapped
+    graph that kept its filename -- the one substitution a revision check cannot see, because
+    the revision still resolves.
+    """
+    write_pins(tmp_path, _document())
+    pins = load_pins(tmp_path)
+    baseline = pins.baselines[0]
+
+    cache = tmp_path / "hub"
+    graph = cache / baseline.artifact.cache_directory / "snapshots" / SHA_A / baseline.graph_path
+    graph.parent.mkdir(parents=True)
+    graph.write_bytes(b"x" * (baseline.graph_bytes + 1))
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+
+    with pytest.raises(PinMismatch) as caught:
+        verify_revisions(pins, echoing_resolver)
+    assert "bytes and the file on this machine is" in str(caught.value)
+
+
+def test_a_graph_whose_size_matches_verifies(tmp_path: Path, monkeypatch: Any) -> None:
+    """The other half: the check has to pass on a file that is what the pin says it is."""
+    write_pins(tmp_path, _document())
+    pins = load_pins(tmp_path)
+    baseline = pins.baselines[0]
+
+    cache = tmp_path / "hub"
+    graph = cache / baseline.artifact.cache_directory / "snapshots" / SHA_A / baseline.graph_path
+    graph.parent.mkdir(parents=True)
+    graph.write_bytes(b"x" * baseline.graph_bytes)
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+
+    assert verify_revisions(pins, echoing_resolver)

@@ -103,7 +103,10 @@ __all__ = [
     "BaselineSetInvalid",
     "Provenance",
     "RemoteArtifact",
+    "Resolution",
     "Resolver",
+    "CHECKED_AGAINST_CACHE",
+    "CHECKED_AGAINST_HUB",
     "SCHEMA_VERSION",
     "SEEDED_FROM_TRAINING_SOURCE",
     "SHARED_WINDOW_POLICY",
@@ -1609,7 +1612,35 @@ def _repository_root() -> Path:
 
 # --- asking the world -------------------------------------------------------------------------
 
-Resolver = Callable[[RemoteArtifact], str | None]
+CHECKED_AGAINST_HUB: Final[str] = "hub"
+"""The resolution asked the publisher what the pin points at, and got an answer."""
+
+CHECKED_AGAINST_CACHE: Final[str] = "cache"
+"""The resolution found a snapshot directory named after the pin on this machine.
+
+**This is not a check against the world and the file must not read as though it were.** The hub
+names a snapshot directory by the commit it was fetched at, so the directory's existence is the
+pin's own sha spelled back -- comparing it to the pin compares a value to itself. It is still
+worth recording: it is what keeps a reproduction offline after the first fetch, and it is the
+honest name for what happened.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class Resolution:
+    """What a pinned revision resolved to, and what it was resolved against.
+
+    The second field is the whole point. `verify_revisions` used to compare a returned sha to the
+    pin, and on every machine that had fetched once the returned sha *was* the pin, read off a
+    directory name. The comparison could not fail, while the module's docstring promised it was
+    the guarantee that the numbers came from the pinned artifacts.
+    """
+
+    sha: str
+    checked_against: str
+
+
+Resolver = Callable[[RemoteArtifact], Resolution | None]
 """Given an artifact, the commit its revision resolves to, or `None` if it resolves to
 nothing."""
 
@@ -1633,14 +1664,22 @@ def hf_cache_root() -> Path:
 
 def resolve_from_cache(
     artifact: RemoteArtifact, cache_root: Path | None = None
-) -> str | None:
-    """The pinned sha if this machine already holds that snapshot, else `None`.
+) -> Resolution | None:
+    """A cache resolution if this machine holds a non-empty snapshot, else `None`.
 
-    The hub names a snapshot directory by the commit it was fetched at, so the directory's
-    existence *is* the resolution. This is what keeps a reproduction run offline after its first
-    fetch.
+    The directory's existence is not evidence about the world: the hub names it after the commit
+    it was fetched at, so it is the pin spelled back. The `Resolution` says so, and
+    `verify_revisions` records it per artifact rather than letting a cache hit read as a check.
+
+    An **empty** directory is refused. An interrupted fetch leaves one behind, and treating that
+    as a resolution means the run declares an artifact verified that it does not hold.
     """
-    return artifact.revision if artifact.snapshot_dir(cache_root).is_dir() else None
+    snapshot = artifact.snapshot_dir(cache_root)
+    if not snapshot.is_dir():
+        return None
+    if not any(snapshot.iterdir()):
+        return None
+    return Resolution(artifact.revision, CHECKED_AGAINST_CACHE)
 
 
 def resolve_over_http(artifact: RemoteArtifact) -> str | None:
@@ -1650,6 +1689,7 @@ def resolve_over_http(artifact: RemoteArtifact) -> str | None:
     resolved" is one of the two outcomes `verify_revisions` aborts on, and turning a network
     error into an unclassified crash would lose the exit code that tells CI which one happened.
     """
+    import http.client
     import json
     import urllib.error
     import urllib.request
@@ -1660,14 +1700,22 @@ def resolve_over_http(artifact: RemoteArtifact) -> str | None:
     try:
         with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        ValueError,
+        OSError,
+        http.client.HTTPException,
+    ):
+        # HTTPException is not an OSError and not a URLError. A truncated response left it to
+        # escape as exit 1, which is precisely the unclassified crash this handler prevents.
         return None
 
     resolved = payload.get("sha") if isinstance(payload, dict) else None
-    return resolved if isinstance(resolved, str) else None
+    return Resolution(resolved, CHECKED_AGAINST_HUB) if isinstance(resolved, str) else None
 
 
-def resolve_from_cache_then_hub(artifact: RemoteArtifact) -> str | None:
+def resolve_from_cache_then_hub(artifact: RemoteArtifact) -> Resolution | None:
     """Cache first, hub only for an artifact this machine has never fetched."""
     cached = resolve_from_cache(artifact)
     if cached is not None:
@@ -1688,8 +1736,8 @@ def verify_revisions(
     resolved_by_artifact: dict[str, str] = {}
 
     for artifact in pins.remote_artifacts():
-        resolved = resolve(artifact)
-        if resolved is None:
+        resolution = resolve(artifact)
+        if resolution is None:
             problems.append(
                 f"{artifact} could not be resolved: it is not in this machine's Hugging "
                 f"Face cache, and the hub returned no commit for it. Either the revision is "
@@ -1697,18 +1745,54 @@ def verify_revisions(
                 f"this abort cannot tell them apart"
             )
             continue
-        if resolved != artifact.revision:
+        if resolution.sha != artifact.revision:
             problems.append(
                 f"{artifact.kind} {artifact.repository} is pinned at {artifact.revision} and "
-                f"now resolves to {resolved}"
+                f"now resolves to {resolution.sha}"
             )
             continue
-        resolved_by_artifact[artifact.repository] = resolved
+        # The value AND what it was checked against. A cache resolution is the pin read off a
+        # directory name, so a run verified entirely from cache has compared nothing to the
+        # world, and results.json says which artifacts those were rather than implying all of
+        # them were asked about.
+        resolved_by_artifact[artifact.repository] = (
+            f"{resolution.sha}@{resolution.checked_against}"
+        )
+
+    problems.extend(_size_problems(pins))
 
     if problems:
         raise PinMismatch(*problems)
 
     return resolved_by_artifact
+
+
+def _size_problems(pins: Pins) -> list[str]:
+    """`graph_bytes` compared to the graph, wherever this machine holds it.
+
+    The field was declared as the evidence for `precision` -- an fp16 export is a fraction of its
+    fp32 original, so the size is what would catch a swapped graph that kept its filename -- and
+    nothing read it. It was recorded, copied into the run fields, checked for being positive, and
+    never once compared to a file. That is this epic's most common defect in its purest form.
+
+    Silent when the artifact is not on this machine: an absent file is `verify_revisions`'
+    business, and reporting it twice under two diagnoses is what makes an abort unreadable.
+    """
+    problems: list[str] = []
+    for baseline in pins.baselines:
+        graph = baseline.artifact.snapshot_dir() / baseline.graph_path
+        try:
+            actual = graph.stat().st_size
+        except OSError:
+            continue
+        if actual != baseline.graph_bytes:
+            problems.append(
+                f"{baseline.key} pins {baseline.graph_path} at {baseline.graph_bytes} bytes and "
+                f"the file on this machine is {actual}. The size is the evidence for the pinned "
+                f"{baseline.precision} precision, and a graph that changed while keeping its "
+                f"name moves every score in the last decimals"
+            )
+    return problems
 
 
 # --- the command line -------------------------------------------------------------------------
