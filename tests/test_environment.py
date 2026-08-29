@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import sys
 import tomllib
+import unicodedata
 from importlib.metadata import distributions
 from pathlib import Path
 
@@ -281,3 +282,72 @@ def test_every_locked_package_comes_from_the_pinned_index(lockfile: dict) -> Non
         else:
             offenders.append(f"{package.get('name')} from {source}")
     assert not offenders, "; ".join(offenders)
+
+
+# --- Pass 5: the versions the lockfile actually installs ----------------------------------------
+#
+# The section above compares `pyproject.toml` against `uv.lock`'s `requires-dist`, which uv
+# GENERATES FROM `pyproject.toml` -- so it compares a file to a copy of itself and is blind to
+# the resolution. `uv sync --frozen` never reads `pyproject.toml`; the only thing deciding what
+# gets installed is the `version` field of each `[[package]]` block, and nothing read it.
+#
+# Proved before this test existed: changing `onnxruntime`'s `version` from 1.29.0 to 1.28.0 in
+# uv.lock, touching nothing else, left the whole suite green.
+
+
+def _resolved_versions(lockfile: dict) -> dict[str, str]:
+    """What `uv sync --frozen` would install, by name."""
+    return {
+        _normalize(str(package["name"])): str(package["version"])
+        for package in lockfile.get("package", [])
+        if "version" in package
+    }
+
+
+@pytest.mark.parametrize(
+    ("group", "expected"),
+    [
+        ("runtime", EXPECTED_PINS),
+        ("build", EXPECTED_BUILD_PINS),
+        ("dev", EXPECTED_DEV_PINS),
+    ],
+)
+def test_the_lockfile_resolves_the_declared_versions(
+    lockfile: dict, group: str, expected: dict[str, str]
+) -> None:
+    """The resolved version, not the requirement string uv wrote down from our own file."""
+    resolved = _resolved_versions(lockfile)
+
+    for name, version in expected.items():
+        key = _normalize(name)
+        assert key in resolved, f"{group} pin {name} is not resolved by uv.lock at all"
+        assert resolved[key] == version, (
+            f"uv.lock resolves {name} to {resolved[key]} and the declared {group} pin is "
+            f"{version}. `uv sync --frozen` installs the lockfile without reading "
+            f"pyproject.toml, so this field is what the published numbers were produced under."
+        )
+
+
+def test_the_lockfile_resolves_no_accelerator_build_of_onnxruntime(lockfile: dict) -> None:
+    """The CPU-only premise, checked against the resolution rather than the requirement.
+
+    A GPU build satisfies `onnxruntime==1.29.0` under a different distribution name, and the
+    forbidden-name scan above reads names while this reads what would be installed.
+    """
+    resolved = _resolved_versions(lockfile)
+    accelerators = [name for name in resolved if name.startswith("onnxruntime-")]
+
+    assert not accelerators, f"uv.lock resolves accelerator builds: {accelerators}"
+
+
+def test_the_running_interpreter_is_the_one_the_confusables_data_is_pinned_to() -> None:
+    """AD-14 requires the vendored Unicode revision to equal the interpreter's own.
+
+    Asserted here against the live interpreter, not against prose in pyproject.toml: the wheels
+    admit 3.11 through 3.14 and AD-14 does not, because UCD moves with the minor version
+    (3.11=14.0.0, 3.12=15.0.0, 3.13=15.1.0, 3.14=16.0.0). Publishing the wheel range would hand
+    a stranger a preflight that approves their machine and a suite that then fails.
+    """
+    assert sys.implementation.name == "cpython"
+    assert sys.version_info[:2] == (3, 13)
+    assert unicodedata.unidata_version == "15.1.0"
