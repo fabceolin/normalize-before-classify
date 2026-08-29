@@ -214,7 +214,7 @@ def test_an_attack_label_no_row_carries_aborts_rather_than_drawing_nothing() -> 
 def test_blank_positive_rows_are_dropped_and_counted() -> None:
     """Counted rather than silently truncated: this project already shipped 3071-versus-3073."""
     pool = _pool(("train", 1, "a"), ("train", 1, ""), ("test", 1, "b"))
-    _items, report, _matches = draw_attack_items(
+    _items, _payloads, report, _matches = draw_attack_items(
         pool, ("train", "test"), _dataset(_draw(size=2)), lambda: EMPTY_INDEX
     )
     assert report.blank_positive_rows == 1
@@ -235,7 +235,7 @@ def test_payloads_the_layer_declines_to_decode_are_counted_and_published() -> No
     assert len(short.encode("utf-8")) < min_payload_bytes("base64") <= len(long.encode("utf-8"))
 
     pool = _pool(("train", 1, short), ("test", 1, long))
-    _items, report, _matches = draw_attack_items(
+    _items, _payloads, report, _matches = draw_attack_items(
         pool, ("train", "test"), _dataset(_draw(size=2)), lambda: EMPTY_INDEX
     )
     assert report.payloads_below_decode_floor == 1
@@ -246,7 +246,7 @@ def test_payloads_the_layer_declines_to_decode_are_counted_and_published() -> No
 
 def test_a_pool_the_layer_can_decode_reports_no_declined_payload() -> None:
     """The other half of the pair: a count that could not be zero would not be a count."""
-    _items, report, _matches = draw_attack_items(
+    _items, _payloads, report, _matches = draw_attack_items(
         _default_pool(), ("train", "test"), _dataset(_draw(size=2)), lambda: EMPTY_INDEX
     )
     assert report.payloads_below_decode_floor == 0
@@ -263,7 +263,7 @@ def test_a_positive_appearing_in_an_exclusion_source_is_removed_and_counted() ->
     index = build_index({"a-source": ["  IGNORE   previous instructions "]})
     assert normalize("ignore previous instructions") in index.sources_by_text
 
-    items, report, matches = draw_attack_items(
+    items, _payloads, report, matches = draw_attack_items(
         pool, ("train", "test"), _dataset(_draw(size=2)), lambda: index
     )
     assert report.removed_by_exclusion == 1
@@ -387,7 +387,7 @@ def test_the_schema_refuses_an_attack_row_carrying_the_benign_label() -> None:
 
 
 def _build(tmp_path: Path, pool: tuple[PoolRow, ...], size: int = 2) -> Path:
-    items, _report, _matches = draw_attack_items(
+    items, _payloads, _report, _matches = draw_attack_items(
         pool, ("train", "test"), _dataset(_draw(size=size)), lambda: EMPTY_INDEX
     )
     path = tmp_path / ATTACK_CORPUS_FILENAME
@@ -435,8 +435,8 @@ def test_rows_are_emitted_in_the_declared_order_regardless_of_input_order() -> N
     pool = _default_pool()
     shuffled = list(pool)
     random.Random(3).shuffle(shuffled)
-    first, _r, _m = draw_attack_items(pool, ("train", "test"), _dataset(_draw(size=3)), lambda: EMPTY_INDEX)
-    second, _r2, _m2 = draw_attack_items(
+    first, _p1, _r, _m = draw_attack_items(pool, ("train", "test"), _dataset(_draw(size=3)), lambda: EMPTY_INDEX)
+    second, _p2, _r2, _m2 = draw_attack_items(
         tuple(shuffled), ("train", "test"), _dataset(_draw(size=3)), lambda: EMPTY_INDEX
     )
     assert serialize(first) == serialize(second)
@@ -446,7 +446,7 @@ def test_rows_are_emitted_in_the_declared_order_regardless_of_input_order() -> N
 
 def test_writing_over_an_existing_corpus_is_refused(tmp_path: Path) -> None:
     path = _build(tmp_path, _default_pool())
-    items, _r, _m = draw_attack_items(
+    items, _p, _r, _m = draw_attack_items(
         _default_pool(), ("train", "test"), _dataset(), lambda: EMPTY_INDEX
     )
     with pytest.raises(CorpusWriteRefused) as caught:
@@ -457,7 +457,7 @@ def test_writing_over_an_existing_corpus_is_refused(tmp_path: Path) -> None:
 def test_an_explicit_rebuild_overwrites_byte_identically(tmp_path: Path) -> None:
     path = _build(tmp_path, _default_pool())
     before = path.read_bytes()
-    items, _r, _m = draw_attack_items(
+    items, _p, _r, _m = draw_attack_items(
         _default_pool(), ("train", "test"), _dataset(), lambda: EMPTY_INDEX
     )
     write_corpus(path, items, rebuild=True)
@@ -499,7 +499,7 @@ dataset = AttackDataset(
     licence=Licence(identifier="not-declared", source="s", attribution="a", redistributed=True),
     provenance=Provenance(checked_on="2026-08-29", card_revision="d" * 40, seeds=()),
 )
-items, report, matches = draw_attack_items(
+items, _payloads, report, matches = draw_attack_items(
     tuple(rows), ("train", "test"), dataset, lambda: ExclusionIndex(sources_by_text={})
 )
 sys.stdout.write(serialize(items))

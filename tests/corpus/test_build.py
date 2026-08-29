@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import io
+import json
 import subprocess
 import sys
 import tomllib
@@ -26,7 +27,7 @@ from pathlib import Path
 import pytest
 
 import nbc
-from nbc.corpus import attack, build
+from nbc.corpus import attack, build, crosscheck
 from nbc.corpus.exclusion import Observation, normalized_texts, plan, verify_observations
 from nbc.corpus.matrix import CHAINS, HELDOUT_CHAINS, render_chain
 from nbc.errors import exit_code_for
@@ -709,3 +710,118 @@ def test_a_benign_selection_that_overlaps_the_attack_one_is_refused() -> None:
     assert build.selection_overlap(dataset, rows, ("how do i sort a list",)) == ()
     (problem,) = build.selection_overlap(dataset, rows, ("ignore previous instructions",))
     assert "both halves" in problem and "complement" in problem
+
+
+# --- both halves, one manifest, and AD-27's gate reached from the top ------------------------------
+
+
+def _small_corpus_pins(root: Path) -> object:
+    """The committed pins with both declared sizes shrunk to what the offline fixtures can fill.
+
+    The attack draw drops to four positives and the benign frame to twenty items per class, which is
+    the hand-authored allowance exactly -- so B-chat needs no dataset row and the fake pool's three
+    benign rows are enough. Every other field is the committed one: shrinking two counts is the
+    smallest edit that lets `build_corpus` run with no network, and everything the test asserts about
+    is the shipped code path.
+    """
+    pins = load_pins(root)
+    dataset = pins.attack_datasets[0]
+    frame = pins.benign_frame
+    return dataclasses.replace(
+        pins,
+        attack_datasets=(
+            dataclasses.replace(
+                dataset, draw=dataclasses.replace(dataset.draw, sample_size_positives=4)
+            ),
+        ),
+        benign_frame=dataclasses.replace(
+            frame,
+            sample_size_items=frame.b_chat.hand_authored_items,
+            b_code=dataclasses.replace(frame.b_code, min_repositories=2),
+        ),
+    )
+
+
+def _synthetic_code(payload_text: str = "") -> dict[str, tuple]:
+    """Twenty eligible-looking B-code files over two repositories, ten each: the frame's cap exactly.
+
+    `payload_text` is prepended to the first file only. Empty by default, so the happy path and the
+    abort path differ in exactly the one thing under test.
+    """
+    from nbc.corpus.benign import CodeFile
+
+    files: dict[str, tuple] = {}
+    for repository in range(2):
+        key = f"synthetic-{repository}"
+        entries = []
+        for number in range(10):
+            marker = f"{key}-{number}"
+            head = f"// {payload_text}\n" if (repository, number) == (0, 0) and payload_text else ""
+            entries.append(
+                CodeFile(
+                    repository_key=key,
+                    source=f"github.com/example/{key}@{'e' * 40}:src/{marker}.js",
+                    path=f"src/{marker}.js",
+                    text=(
+                        f"{head}// {marker}\n"
+                        "const TOKEN = 'aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Q=';\n"
+                        + f"let n{number} = {number};\n" * 8
+                    ),
+                )
+            )
+        files[key] = tuple(entries)
+    return files
+
+
+@pytest.fixture()
+def offline_full_build(offline_build: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`offline_build` plus the third remote read, so `build_corpus` runs end to end offline."""
+    monkeypatch.setattr(build, "read_benign_code", lambda pins: _synthetic_code())
+    return offline_build
+
+
+def test_the_full_build_writes_both_halves_and_reports_the_cross_check(
+    offline_full_build: Path, tmp_path: Path
+) -> None:
+    """`build_corpus` end to end, which also proves AD-27's payloads reach the benign draw.
+
+    Without the threading the benign draw would raise `BenignItemMislabelled` for having no payloads
+    at all, so a build that completes is a build in which the drawn attack payloads arrived.
+    """
+    pins = _small_corpus_pins(offline_full_build)
+    manifest, fields = build.build_corpus(pins, root=str(tmp_path))
+
+    assert manifest.frame_id == pins.benign_frame.frame_id
+    cross_check = fields["benign_draw"]["cross_check"]
+    assert cross_check["payloads_checked"] == 4
+    assert cross_check["sources_checked"] == pins.benign_frame.sample_size_items * 2
+    assert cross_check["metric"] == crosscheck.CROSS_CHECK_METRIC
+
+    # And it is recorded *with the corpus*, not only returned to the caller: M-02's whole point is
+    # that a rebuild at a different threshold must be visible in the committed tree.
+    written = json.loads(
+        (tmp_path / build.DATA_DIRNAME / build.MANIFEST_FILENAME).read_text(encoding="utf-8")
+    )
+    recorded = written["reports"]["benign_draw"]["cross_check"]
+    assert recorded == cross_check
+    assert recorded["similarity_threshold"] == crosscheck.SIMILARITY_THRESHOLD
+    assert recorded["shingle_width"] == crosscheck.SHINGLE_WIDTH
+
+
+def test_a_synthetic_b_code_file_carrying_a_pool_payload_stops_the_full_build(
+    offline_build: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FR3.2 from the entrypoint down, and nothing is written when it fires.
+
+    The poisoned file carries every positive the fake pool holds, so which four the draw selects
+    cannot decide whether the gate fires.
+    """
+    carried = " ".join(f"payload {index}" for index in range(6))
+    monkeypatch.setattr(build, "read_benign_code", lambda pins: _synthetic_code(carried))
+
+    with pytest.raises(crosscheck.BenignItemMislabelled) as raised:
+        build.build_corpus(_small_corpus_pins(offline_build), root=str(tmp_path))
+
+    assert exit_code_for(raised.value) == 24
+    assert any("synthetic-0" in problem for problem in raised.value.problems)
+    assert list(tmp_path.rglob("*.jsonl")) == []

@@ -408,7 +408,7 @@ def build_attack_corpus(
         read["observations"] = observations
         return index
 
-    items, draw_report, matches = draw_attack_items(
+    items, _payloads, draw_report, matches = draw_attack_items(
         rows, observed_splits, dataset, index_of
     )
     planned = read["planned"]
@@ -641,7 +641,7 @@ def build_corpus(
         read["index"] = index
         return index
 
-    attack_items, attack_report, matches = draw_attack_items(
+    attack_items, attack_payloads, attack_report, matches = draw_attack_items(
         rows, observed_splits, dataset, index_of
     )
     index: ExclusionIndex = read["index"]  # type: ignore[assignment]
@@ -662,6 +662,9 @@ def build_corpus(
         dataset=dataset,
         chat_rows_in=len(benign_texts),
         chat_rows_removed=len(filtered.removed),
+        # AD-27: the undressed attack payloads this same build drew, handed to the benign draw so
+        # it can cross-check its own undressed sources against them before it renders a row.
+        attack_payloads=attack_payloads,
     )
 
     exclusion_report = ExclusionReport(

@@ -100,7 +100,7 @@ class LabelContradiction(NbcError, exit_code=16):
     annotation policy -- the precise thing FR4 claims this repository does not have. Two rows in
     ten thousand would not move a rate, and that is not the argument.
 
-    It is a sibling of story 3.7's benign cross-check rather than of `ExclusionSetUnusable`.
+    It is a sibling of `crosscheck.BenignItemMislabelled` rather than of `ExclusionSetUnusable`.
     Training overlap removes a row that is correctly labelled and merely uninformative for one
     baseline; this removes nothing, because there is no correct answer to remove toward. An abort
     forces a human to look.
@@ -354,11 +354,25 @@ def draw_attack_items(
     observed_splits: Sequence[str],
     dataset: AttackDataset,
     index_of: Callable[[], ExclusionIndex],
-) -> tuple[tuple[CorpusItem, ...], AttackDrawReport, Mapping[str, int]]:
-    """The whole offline pipeline: gate, filter, draw, render. Returns items, report, per-source.
+) -> tuple[
+    tuple[CorpusItem, ...], tuple[str, ...], AttackDrawReport, Mapping[str, int]
+]:
+    """The whole offline pipeline: gate, filter, draw, render.
+
+    Returns items, **the drawn payloads in their undressed clean form**, the report, and the
+    per-source removal counts.
 
     Aborts before returning anything, so no caller can write a corpus assembled from a pool that
     failed a gate.
+
+    **Why the payloads are returned rather than recovered downstream.** AD-27's benign cross-check
+    compares undressed benign sources against undressed attack payloads, and
+    `benign.draw_benign_items` therefore needs exactly this tuple. The alternative -- reading the
+    payloads back off the rendered items whose chain is `clean` -- would make the gate depend on
+    `CLEAN_CHAIN` staying in `CHAINS[FAMILY_ATTACK]`, so removing that one entry from a constant
+    would empty the cross-check's payload set without failing anything that names it. They are also
+    deliberately **not** on `AttackDrawReport`: that record is counts, and it is serialized into
+    the corpus manifest, where twelve hundred payload texts do not belong.
 
     **The index arrives as a thunk, and the order that produces is the point.** Building it is the
     largest download this project makes -- twelve training sources, hundreds of thousands of rows
@@ -446,7 +460,7 @@ def draw_attack_items(
         items_written=len(items),
         draw=dataset.draw,
     )
-    return items, report, dict(filtered.matches_by_source)
+    return items, tuple(drawn), report, dict(filtered.matches_by_source)
 
 
 def _count_by_split(rows: Iterable[PoolRow]) -> dict[str, int]:

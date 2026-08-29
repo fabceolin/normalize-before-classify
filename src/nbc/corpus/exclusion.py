@@ -41,8 +41,8 @@ ordering with the input that fails without it.
 specifies -- a benign source item that literally contains a pinned attack payload -- is designed to
 abort the build and make a human look, because it is a **gold-label error**: the builder labels
 benign material benign by construction, so one of the two labels is wrong and nothing here can say
-which. (That gate is not written yet; this paragraph states why the two differ, not that both
-exist.) Training overlap is not that. The row is
+which. That gate is `corpus/crosscheck.py`, run by `benign.draw_benign_items` over the undressed
+sources. Training overlap is not that. The row is
 correctly labelled and merely uninformative *for one baseline*, so removing it costs sample size
 and nothing else. What made silent exclusion unacceptable in the other case was the silence, not
 the exclusion -- which is why every removal here is counted per source and published rather than

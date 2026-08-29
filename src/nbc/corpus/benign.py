@@ -38,6 +38,7 @@ from typing import Final, Iterable, Mapping, Sequence
 
 from nbc.canon.pipeline import canonicalize, default_context
 from nbc.canon.stages import decode
+from nbc.corpus.crosscheck import BenignSource, CrossCheckReport, cross_check
 from nbc.corpus.draw import take
 from nbc.corpus.dressings import DRESSINGS, dress_declared
 from nbc.corpus.heldout import validate_heldout
@@ -303,7 +304,9 @@ def render_benign_item(
     builder's name. Here the point is sharper still -- nothing about a public source file or a
     dataset row *says* it is benign, and what makes this label true is the construction: the file
     came from a repository pinned as benign material, and the row from the benign side of a declared
-    label column. Story 3.7 is the check that the construction was not wrong.
+    label column. `crosscheck.cross_check` -- which `draw_benign_items` runs over the undressed
+    sources in the block immediately above its render loop, before this function is called once --
+    is the check that the construction was not wrong.
 
     The **payload id is the id of the undressed text**, so one file's thirteen rows share a stem and
     the harness can pair the same item across the dressing axis.
@@ -411,6 +414,7 @@ class BenignDrawReport:
     chat_drawn_from_dataset: int
     chat_hand_authored: int
     items_written: int
+    cross_check: CrossCheckReport
 
     def as_run_fields(self) -> dict[str, object]:
         return {
@@ -436,6 +440,10 @@ class BenignDrawReport:
                     "hand_authored": self.chat_hand_authored,
                 },
                 "items_written": self.items_written,
+                # AD-27's gate, published with what it compared under. A rebuild at a different
+                # threshold or shingle width otherwise produces a different admissible corpus with
+                # no visible change anywhere, which is M-02's finding against this story.
+                "cross_check": self.cross_check.as_run_fields(),
             }
         }
 
@@ -448,6 +456,7 @@ def draw_benign_items(
     dataset: AttackDataset,
     chat_rows_in: int,
     chat_rows_removed: int,
+    attack_payloads: Sequence[str],
     messages: Sequence[EncodedMessage] = MESSAGES,
 ) -> tuple[tuple[CorpusItem, ...], BenignDrawReport]:
     """Both benign classes, drawn, gated and rendered. Aborts before returning anything.
@@ -460,6 +469,13 @@ def draw_benign_items(
     gates above give a reader the diagnosis and the numbers; this one is the last line of defence
     against a draw that silently returned something other than what the frame declared. FR5.1's
     "exactly, never at least" is that equality and nothing else.
+
+    **`attack_payloads` has no default, and that is AD-27.** It is the undressed clean form of every
+    payload the attack half drew, and the cross-check runs over the drawn sources **between the draw
+    and the render loop** -- the last moment the undressed benign text exists. A default of `()`
+    would let a caller disable the gate by forgetting an argument; `crosscheck.build_index` refuses
+    an empty set for the same reason. Once `render_benign_item` has run, every comparison against a
+    plaintext payload is false and the gate passes on the corpus it exists to stop.
     """
     validate_matrix(CHAINS, DRESSINGS)
     validate_heldout()
@@ -527,10 +543,40 @@ def draw_benign_items(
     # --- B-chat ---------------------------------------------------------------------------------
     hand_authored, drawn_chat = draw_chat_texts(chat_surviving, frame, messages)
 
-    # --- render ---------------------------------------------------------------------------------
     code_chains = chains_for(BENIGN_CODE)
     chat_chains = chains_for(BENIGN_CHAT)
     dataset_source = f"{dataset.repository}@{dataset.revision}"
+
+    # --- AD-27's cross-check, on the undressed sources and before a single row is rendered --------
+    #
+    # Every drawn benign source item, in the exact text the render loop below is about to dress,
+    # against every drawn attack payload in its clean form. It sits here rather than after the loop
+    # because a dressed row never literally carries a plaintext payload, so the same check run one
+    # block later would return false for every pair and pass on the corpus it exists to stop --
+    # silently, with no count and nothing in the report to show it never fired. It is sufficient
+    # here because dressing is a pure function of the source (AD-3): one check covers all thirteen
+    # rows each source becomes.
+    cross_check_report = cross_check(
+        [
+            *(
+                BenignSource(source=file.source, benign_class=BENIGN_CODE, text=file.text)
+                for file in code_files
+            ),
+            *(
+                BenignSource(
+                    source=HAND_AUTHORED_SOURCE, benign_class=BENIGN_CHAT, text=text
+                )
+                for text in hand_authored
+            ),
+            *(
+                BenignSource(source=dataset_source, benign_class=BENIGN_CHAT, text=text)
+                for text in drawn_chat
+            ),
+        ],
+        attack_payloads,
+    )
+
+    # --- render ---------------------------------------------------------------------------------
 
     rendered: list[tuple[CorpusItem, str]] = []
     for file in code_files:
@@ -622,6 +668,7 @@ def draw_benign_items(
         chat_drawn_from_dataset=len(drawn_chat),
         chat_hand_authored=len(hand_authored),
         items_written=len(items),
+        cross_check=cross_check_report,
     )
     return items, report
 

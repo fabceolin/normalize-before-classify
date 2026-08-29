@@ -81,6 +81,29 @@ than trusted: a JWT header is decoded and required to carry an `alg`, an SSH key
 name its own algorithm in its first length-prefixed field, a data URI must decode under strict
 base64, and a content hash is recomputed from the bytes the message says it is the digest of.
 
+**A benign item that carries an attack payload stops the build.** The builder labels benign material
+benign *by construction* — the file came from a repository pinned as benign material, not because
+anything read the text — so a public source file that happens to embed an injection payload becomes a
+benign item that is actually an attack. The classifier then fires on it correctly and the run records
+a false positive: the counter-metric gets worse for being right. Before a single row is rendered, the
+build therefore cross-checks every drawn benign **source** — the undressed text — against every drawn
+attack payload in its clean form, and **aborts** naming the file and the payload when the source
+carries it or matches it above a declared threshold. Reading the source is what makes the check work
+at all: once an item is dressed, a base64, hex, base32, rot13, percent-encoded, homoglyph or
+zero-width row never literally carries a plaintext payload, every comparison returns false, and the
+gate passes silently on the corpus it exists to stop —
+[`tests/corpus/test_crosscheck.py`](tests/corpus/test_crosscheck.py) demonstrates that rather than
+asserting it. It is enough, because dressing is a pure function of the source. The metric
+(`shingle-containment`, the fraction of the payload's five-token shingles present in the source), its
+threshold and the comparison's normalization live together in
+[`src/nbc/corpus/crosscheck.py`](src/nbc/corpus/crosscheck.py) and are recorded with the corpus, so a
+rebuild at a different threshold is visible rather than invisible. It aborts rather than filtering
+because this is a gold-label error and nothing here can say which of the two labels is wrong: a
+silent exclusion would reshape the benign corpus exactly the way a silent inclusion reshapes the
+number, and an abort forces a human to look. When it fires on a drawn B-code file the frame cannot be
+topped up — 500 per class is exact — so the frame is edited deliberately, `frame_id` changes, and the
+change lands in the diff. That is the intended path, not a deadlock.
+
 ## Reproducing this
 
 The published run is one command, and it does not exist yet: the entrypoint that performs the whole
