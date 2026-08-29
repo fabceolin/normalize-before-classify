@@ -121,7 +121,7 @@ __all__ = [
 PINS_FILENAME: Final[str] = "pins.toml"
 """The file's name, at the repository root. Named once, here."""
 
-SCHEMA_VERSION: Final[int] = 1
+SCHEMA_VERSION: Final[int] = 2
 """The shape this module knows how to read. A file declaring another version is refused."""
 
 MINIMUM_BASELINES: Final[int] = 2
@@ -428,17 +428,55 @@ class Oq2Check:
     outcome: str
     decided_on: str
     decided_revision: str
+    dataset_revision: str
+    measured_at_threshold: float
+    hits: int
     clean_recall: float
     sample_size: int
+    overlap_rows: int
+    judged_sufficient_by: str
     source: str
+
+    @property
+    def ceiling(self) -> float:
+        """The recall as measured, which is an upper bound when `overlap_rows` is not zero."""
+        return self.clean_recall
+
+    @property
+    def floor(self) -> float:
+        """The recall if *every* overlapping row were a hit by memory rather than detection.
+
+        FR3.3's removal belongs to the corpus build, so a recall measured before it runs is
+        inflated by an unknown amount bounded above by the rows that reach the baseline's
+        training data. Publishing the ceiling alone invites the reader to discover the bound
+        themselves, which is the worst available outcome for a project about honest measurement.
+        """
+        if self.overlap_rows == 0:
+            # No overlap means no inflation, so the floor IS the measured value. Re-deriving it
+            # from the integers here would publish a floor differing from the ceiling in the
+            # fourth decimal purely because one is rounded and the other is not.
+            return self.clean_recall
+        remaining = self.sample_size - self.overlap_rows
+        if remaining <= 0:
+            return 0.0
+        return max(0, self.hits - self.overlap_rows) / remaining
 
     def as_run_fields(self) -> dict[str, object]:
         return {
             "outcome": self.outcome,
             "decided_on": self.decided_on,
             "decided_revision": self.decided_revision,
+            "dataset_revision": self.dataset_revision,
+            "measured_at_threshold": self.measured_at_threshold,
+            "hits": self.hits,
             "clean_recall": self.clean_recall,
             "sample_size": self.sample_size,
+            "overlap_rows": self.overlap_rows,
+            # Published together, always. The ceiling on its own is the number a reader would
+            # otherwise have to bound themselves from caveat 3d's disclosed overlap.
+            "ceiling": self.ceiling,
+            "floor": self.floor,
+            "judged_sufficient_by": self.judged_sufficient_by,
             "source": self.source,
         }
 
@@ -1049,7 +1087,7 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
         what="the baseline's card",
     )
 
-    oq2 = _read_oq2(reader, table, where, revision)
+    oq2 = _read_oq2(reader, table, where, revision, threshold)
 
     return Baseline(
         key=key,
@@ -1074,7 +1112,11 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
 
 
 def _read_oq2(
-    reader: _Reader, parent: Mapping[str, Any], where: str, revision: str
+    reader: _Reader,
+    parent: Mapping[str, Any],
+    where: str,
+    revision: str,
+    threshold: float,
 ) -> Oq2Check:
     """The OQ2 record: what this baseline scored on clean attack text, and against which pin.
 
@@ -1126,12 +1168,62 @@ def _read_oq2(
         field="decided_revision",
     )
 
+    # A recall is a function of two pinned artifacts and one parameter: the model, the rows, and
+    # the threshold. The record gated only the model, so a dataset re-pin left `clean_recall`
+    # reading as current while describing rows this file no longer pins.
+    dataset_revision = reader.matching(
+        reader.string(table, "dataset_revision", at),
+        _SHA,
+        f"{at}.dataset_revision",
+        "a 40-character lowercase hex commit sha",
+    )
+    measured_at_threshold = reader.number(table, "measured_at_threshold", at)
+    if "measured_at_threshold" in table and measured_at_threshold != threshold:
+        reader.note(
+            f"{at}.measured_at_threshold is {measured_at_threshold!r} and the baseline pins "
+            f"threshold {threshold!r}. A recall counts the items scoring at or above a "
+            f"threshold, so the two are one measurement and a threshold re-pin invalidates it"
+        )
+
+    hits = reader.integer(table, "hits", at)
+    if "hits" in table and hits < 0:
+        reader.note(f"{at}.hits must not be negative, got {hits!r}")
+    if hits and sample_size and hits > sample_size:
+        reader.note(
+            f"{at}.hits is {hits} over a sample of {sample_size}: a recall cannot count more "
+            f"items than it scored"
+        )
+    elif hits and sample_size and clean_recall:
+        # The rate is derived from two integers this block also records, so it is checkable.
+        # Recording a rate nothing recomputes is how a transposed digit survives publication.
+        places = len(str(clean_recall).partition(".")[2]) or 4
+        if round(hits / sample_size, places) != round(clean_recall, places):
+            reader.note(
+                f"{at}.clean_recall is {clean_recall!r} and {hits}/{sample_size} is "
+                f"{hits / sample_size:.{places}f}: the rate and its two integers disagree"
+            )
+
+    overlap_rows = reader.integer(table, "overlap_rows", at)
+    if "overlap_rows" in table and not 0 <= overlap_rows <= max(sample_size, 0):
+        reader.note(
+            f"{at}.overlap_rows is {overlap_rows!r} and must lie in [0, {sample_size}]: it "
+            f"counts sampled rows that reach this baseline's declared training data"
+        )
+
     return Oq2Check(
         outcome=outcome,
         decided_on=decided_on,
         decided_revision=decided_revision,
+        dataset_revision=dataset_revision,
+        measured_at_threshold=measured_at_threshold,
+        hits=hits,
         clean_recall=clean_recall,
         sample_size=sample_size,
+        overlap_rows=overlap_rows,
+        # OQ2's floor is a judgement, not a constant: "strong enough for its degradation to mean
+        # anything" has no number the run can supply. So the file records WHO judged it, rather
+        # than pretending a threshold exists or letting `outcome = "kept"` admit any rate at all.
+        judged_sufficient_by=reader.string(table, "judged_sufficient_by", at),
         source=reader.string(table, "source", at),
     )
 
@@ -1267,6 +1359,53 @@ def _check_baseline_set(baselines: Sequence[Baseline]) -> None:
                 f"{' and '.join(repositories)} both declare architecture/tokenizer families "
                 f"{pair[0]}/{pair[1]}; the mechanism under study is how encoded text "
                 f"tokenizes, so two baselines that tokenize alike cannot corroborate each other"
+            )
+
+    if problems:
+        raise BaselineSetInvalid(*problems)
+
+
+def _check_oq2_records(
+    baselines: Sequence[Baseline], datasets: Sequence[AttackDataset]
+) -> None:
+    """What OQ2's numbers are a function of, checked across the whole file.
+
+    A single `[baseline.oq2]` block cannot see the dataset it names or the other baseline it will
+    be read beside, so these three checks have no home inside `_read_oq2`. They are the ones that
+    matter: OQ2's entire reading is a *comparison* between the two baselines, and a comparison
+    across two different pools or two different pins is not one.
+    """
+    problems: list[str] = []
+    pinned = {dataset.revision: dataset.repository for dataset in datasets}
+
+    for baseline in baselines:
+        oq2 = baseline.oq2
+        if oq2.dataset_revision and oq2.dataset_revision not in pinned:
+            problems.append(
+                f"{baseline.key} recorded its clean recall against dataset revision "
+                f"{oq2.dataset_revision[:8]}, which this file no longer pins. The recall "
+                f"describes rows that are not the rows the run would score: re-measure against "
+                f"the pinned revision and update the block with the number and the sha together"
+            )
+
+    sizes = {baseline.oq2.sample_size for baseline in baselines if baseline.oq2.sample_size}
+    if len(sizes) > 1:
+        listed = ", ".join(
+            f"{baseline.key}={baseline.oq2.sample_size}" for baseline in baselines
+        )
+        problems.append(
+            f"the OQ2 records describe different sample sizes ({listed}). OQ2 is read as a "
+            f"comparison between baselines -- which of them has headroom, and whether the "
+            f"obscure one holds up -- and two recalls over two different pools do not compare"
+        )
+
+    for baseline in baselines:
+        if baseline.oq2.outcome == OQ2_KEPT and not baseline.oq2.judged_sufficient_by:
+            problems.append(
+                f"{baseline.key} is kept with no `judged_sufficient_by`. OQ2's floor is a "
+                f"judgement -- \"strong enough for its degradation to mean anything\" names no "
+                f"number -- so the file records who made it. Without that, `outcome = \"kept\"` "
+                f"admits any recall in [0, 1] and the gate cannot fail"
             )
 
     if problems:
@@ -1440,6 +1579,7 @@ def load_pins(root: Path | str | None = None) -> Pins:
         raise PinsFileInvalid(*problems)
 
     _check_baseline_set(baselines)
+    _check_oq2_records(baselines, attack_datasets)
     _check_lineage(baselines, attack_datasets)
 
     return Pins(

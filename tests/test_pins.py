@@ -106,8 +106,13 @@ def _baseline(
             "outcome": OQ2_KEPT,
             "decided_on": "2026-08-29",
             "decided_revision": revision,
+            "dataset_revision": SHA_D,
+            "measured_at_threshold": 0.5,
+            "hits": 90,
             "clean_recall": 0.9,
             "sample_size": 100,
+            "overlap_rows": 0,
+            "judged_sufficient_by": "fixture",
             "source": "spikes/oq2_clean_recall.py",
         },
     }
@@ -1460,3 +1465,115 @@ def test_a_utf8_bom_does_not_read_as_broken_toml(tmp_path: Path) -> None:
     path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
 
     assert load_pins(tmp_path).schema_version == SCHEMA_VERSION
+
+
+# --- Pass 2: the OQ2 record now gates what it claims to gate ------------------------------------
+#
+# The story that published these numbers advertised, in four places, that a pin move forces a
+# re-measurement. It did not: the record named the model and nothing else. Each mutation below
+# was verified to LOAD CLEAN before this pass.
+
+
+def _with_oq2(**overrides: Any) -> list[dict[str, Any]]:
+    """The committed two-baseline set with one baseline's OQ2 block overridden."""
+    first = _baseline()
+    first["oq2"] = {**first["oq2"], **overrides}
+    return [
+        first,
+        _baseline(
+            key="second", repository="example/second-model", revision=SHA_B,
+            architecture_family="bert", tokenizer_family="wordpiece",
+        ),
+    ]
+
+
+def test_an_oq2_record_naming_an_unpinned_dataset_is_refused(tmp_path: Path) -> None:
+    """A recall is a function of the model AND the rows; the record gated only the model."""
+    write_pins(tmp_path, _document(baselines=_with_oq2(dataset_revision="b" * 40)))
+
+    with pytest.raises(BaselineSetInvalid) as caught:
+        load_pins(tmp_path)
+    assert "no longer pins" in str(caught.value)
+
+
+def test_an_oq2_record_measured_at_another_threshold_is_refused(tmp_path: Path) -> None:
+    """Threshold is a repinnable parameter, and a recall counts items at or above one."""
+    write_pins(tmp_path, _document(baselines=_with_oq2(measured_at_threshold=0.9)))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "measured_at_threshold" in str(caught.value)
+
+
+def test_a_clean_recall_that_disagrees_with_its_own_integers_is_refused(tmp_path: Path) -> None:
+    """The rate is derived from two integers this block records, so a typo is catchable."""
+    write_pins(tmp_path, _document(baselines=_with_oq2(hits=90, clean_recall=0.75)))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "disagree" in str(caught.value)
+
+
+def test_more_hits_than_items_scored_is_refused(tmp_path: Path) -> None:
+    write_pins(tmp_path, _document(baselines=_with_oq2(hits=101, clean_recall=1.01)))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "cannot count more items" in str(caught.value)
+
+
+def test_two_baselines_measured_over_different_pools_are_refused(tmp_path: Path) -> None:
+    """OQ2's whole reading is a comparison between the baselines, and pools must match."""
+    write_pins(tmp_path, _document(baselines=_with_oq2(hits=45, sample_size=50, clean_recall=0.9)))
+
+    with pytest.raises(BaselineSetInvalid) as caught:
+        load_pins(tmp_path)
+    assert "different sample sizes" in str(caught.value)
+
+
+def test_keeping_a_baseline_without_naming_who_judged_it_is_refused(tmp_path: Path) -> None:
+    """`outcome = "kept"` admitted any recall in [0, 1]; the floor is a judgement, so name it."""
+    write_pins(tmp_path, _document(baselines=_with_oq2(judged_sufficient_by="")))
+
+    # Refused twice over: the reader rejects the empty string, and the cross-entry check rejects
+    # a kept baseline with no named judge. Either abort is the right answer.
+    with pytest.raises((PinsFileInvalid, BaselineSetInvalid)) as caught:
+        load_pins(tmp_path)
+    assert "judged_sufficient_by" in str(caught.value)
+
+
+def test_the_committed_records_publish_a_ceiling_and_its_floor(committed_pins: Any) -> None:
+    """FR3.3's removal has not run, so the measured recall is an upper bound. Both are published.
+
+    The floor assumes every overlapping row was a hit by memory rather than detection, which is
+    the worst case the disclosed overlap allows. A reader who is handed only the ceiling has to
+    derive this themselves from caveat 3d, and discovering unaided what the artifact did not
+    report is the worst outcome available to a section about honesty.
+    """
+    by_key = {baseline.key: baseline.oq2 for baseline in committed_pins.baselines}
+
+    protectai = by_key["protectai-deberta-v3"]
+    assert protectai.overlap_rows == 515
+    assert round(protectai.ceiling, 4) == 0.836
+    assert round(protectai.floor, 4) == 0.8030
+    assert protectai.floor < protectai.ceiling
+
+    # Zero overlap is a measurement here, not a missing declaration: this baseline declares no
+    # training on the pinned dataset nor on any seed its card names.
+    testsavantai = by_key["testsavantai-bert-small"]
+    assert testsavantai.overlap_rows == 0
+    assert testsavantai.floor == testsavantai.ceiling
+
+
+def test_the_committed_recalls_are_recomputable_from_their_own_integers(
+    committed_pins: Any,
+) -> None:
+    """Nothing cross-checked the published numbers against anything. Now the loader does."""
+    for baseline in committed_pins.baselines:
+        oq2 = baseline.oq2
+        places = len(str(oq2.clean_recall).partition(".")[2])
+        assert round(oq2.hits / oq2.sample_size, places) == round(oq2.clean_recall, places)
+        assert oq2.dataset_revision in {
+            dataset.revision for dataset in committed_pins.attack_datasets
+        }
+        assert oq2.measured_at_threshold == baseline.threshold

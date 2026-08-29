@@ -18,7 +18,7 @@
 # document.** `meta.verified_on` says when. Re-verify with `python -m nbc.pins --verify`.
 
 [meta]
-schema_version = 1
+schema_version = 2
 verified_on = "2026-08-28"
 verified_against = """\
 https://huggingface.co/api/{models,datasets}/<id>/revision/<sha>, plus the config.json, \
@@ -103,7 +103,12 @@ card_revision = "90c9989b1a342275dd0d1a95aad283c04e075671"
 # names VMware/open-instruct and jackhhao/jailbreak-classification among the four seeds it was
 # built from, and this baseline declares training on both -- a reach no model card can show,
 # because nothing on a model's card mentions a dataset built downstream of it. Measured on
-# 2026-08-24, that reach was 3424 of 7066 unique benign rows and 515 of 3071 unique attacks.
+# 2026-08-24, that reach was 3424 of 7066 unique benign rows and 515 unique attacks.
+# The denominator is stated per dedup rule rather than left ambiguous: 3071 under FR3.3's
+# declared normalization (NFKC, lowercased, whitespace collapsed) and 3073 on exact text.
+# The OQ2 blocks below say 3073 because the spike deduplicates on exact text, and a count
+# without its rule is a number nobody can reproduce -- which is the error this project has
+# now made five times.
 # The benign figure is the serious one: half the counter-metric would have been text the primary
 # baseline was taught to call safe.
 # Declaring it here is not a way of excusing it. It is the statement that those rows are removed
@@ -139,8 +144,20 @@ outcome = "kept"
 decided_on = "2026-08-29"
 decided_revision = "90c9989b1a342275dd0d1a95aad283c04e075671"
 # 2569 of 3073 unique attack positives at threshold 0.5, 95% Wilson [0.8225, 0.8487].
+# `hits` and `sample_size` are the two integers the rate is derived from, so `clean_recall` is
+# recomputable rather than transcribed. The reader that loads this file checks the arithmetic.
+hits = 2569
 clean_recall = 0.836
 sample_size = 3073
+dataset_revision = "a3a877d608f37b7d20d9945671902df895ecdb46"
+measured_at_threshold = 0.5
+# This is a CEILING, not a value. 515 of the 3073 sampled positives reach this baseline's
+# declared training data at one hop, and FR3.3's removal belongs to the corpus build, which has
+# not run. Assuming every one of them was a hit by memory rather than by detection, the floor is
+# 2054/2558 = 0.8030, 95% Wilson [0.7871, 0.8179]. OQ2 concludes the same at both ends, which is
+# why the run proceeds; see epic-1-context.md decision D-B.
+overlap_rows = 515
+judged_sufficient_by = "author, Pass 0 decision D-B, 2026-08-29"
 source = "spikes/oq2_clean_recall.py"
 # This number is an UPPER BOUND. This baseline declares `seeded-from-declared-training-source`
 # against the pinned dataset below, and FR3.3's overlap filter -- which belongs to the corpus
@@ -226,8 +243,16 @@ outcome = "kept"
 decided_on = "2026-08-29"
 decided_revision = "5bfc06f0b54950e6653f253eb7df1e3c9811b5cb"
 # 2680 of 3073 unique attack positives at threshold 0.5, 95% Wilson [0.8598, 0.8835].
+hits = 2680
 clean_recall = 0.8721
 sample_size = 3073
+dataset_revision = "a3a877d608f37b7d20d9945671902df895ecdb46"
+measured_at_threshold = 0.5
+# Zero, and it is a measurement rather than an omission: this baseline declares no training on
+# the pinned dataset nor on any seed its card names, so no sampled row reaches its training data
+# through the one hop AD-26 checks. Its recall is a value, not a ceiling.
+overlap_rows = 0
+judged_sufficient_by = "author, Pass 0 decision D-B, 2026-08-29"
 source = "spikes/oq2_clean_recall.py"
 # The PRD expected the obscure baseline to carry the OQ2 risk. It scored higher than the widely
 # used one, on rows it declares no relationship to. That is the finding, and it is why this pin
