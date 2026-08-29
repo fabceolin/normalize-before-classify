@@ -1,0 +1,186 @@
+# Every remote artifact this project touches, named once, here.
+#
+# A repository id, a revision sha or a sample size that appears anywhere else in the code is a
+# pin that can drift from this file without anyone noticing, so a test asserts none of them do.
+# `src/nbc/pins.py` is the only module that reads this file.
+#
+# **A revision is not a pin on its own.** `protectai` ships two different `tokenizer.json` at
+# the revision pinned below -- 8,656,744 bytes at the repository root and 8,648,886 bytes beside
+# the ONNX graph -- and they declare different truncation. A pin that named only the revision
+# would leave the choice between them to whichever loader convention the code happened to
+# follow, which is an unnamed source of variance inside the reproducibility this file promises.
+# Every artifact is therefore pinned by *path*.
+#
+# **Every value below was read from the live artifact at its pinned sha, not copied from a
+# document.** `meta.verified_on` says when. Re-verify with `python -m nbc.pins --verify`.
+
+[meta]
+schema_version = 1
+verified_on = "2026-08-28"
+verified_against = """\
+https://huggingface.co/api/{models,datasets}/<id>/revision/<sha>, plus the config.json, \
+README.md and blob listing at that sha\
+"""
+
+# --- baselines -------------------------------------------------------------------------------
+#
+# Two is the floor of SC5 and the run sits exactly on it: fewer than two aborts, and two
+# baselines declaring the same (architecture_family, tokenizer_family) pair also aborts, since
+# the mechanism under suspicion is how encoded text tokenizes and two models that tokenize
+# alike cannot corroborate each other.
+#
+# Both graphs are fp32. Where a repository publishes several precisions the fp32 graph is the
+# pinned one and fp16 or mixed-precision graphs are never pinned: reduced precision moves
+# scores in the last decimals and a hard threshold turns that into a class flip on exactly the
+# borderline encoded items this experiment measures. Neither repository pinned here publishes a
+# reduced-precision variant, so the rule currently has no subject -- it is enforced by a test
+# rather than left as prose, because the subject arrives with the next pin, not the next reader.
+
+[[baseline]]
+key = "protectai-deberta-v3"
+repository = "protectai/deberta-v3-base-prompt-injection-v2"
+revision = "90c9989b1a342275dd0d1a95aad283c04e075671"
+# The decision threshold is a declared parameter per baseline, applied in one place in
+# `harness/measure.py` and written into `results.json`. 0.5 is the default and is a choice.
+threshold = 0.5
+# `onnx/`, not the root: the model card's own ONNX example loads with `subfolder="onnx"`, so the
+# graph, the tokenizer exported beside it and its config travel together. Pinning the root
+# tokenizer against the `onnx/` graph would pair two artifacts the publisher never paired.
+graph_path = "onnx/model.onnx"
+precision = "fp32"
+# 738,563,188 bytes over ~184M parameters is 4 bytes per parameter, and `config.json` declares
+# `torch_dtype: float32`. Recorded because it is the evidence for `precision`, not decoration.
+graph_bytes = 738563188
+tokenizer_path = "onnx/tokenizer.json"
+config_path = "onnx/config.json"
+architecture_family = "deberta-v2"
+tokenizer_family = "sentencepiece-unigram"
+# `shared` is AD-19's non-overlapping, max-reduced policy. It ships in the cell key from the
+# first run even though it is currently the only value, because a key retro-fitted into a
+# published envelope is a schema break.
+window_policy = "shared"
+
+[baseline.window]
+# Read from the pinned revision's config, never from `tokenizer_config.json`, whose
+# `model_max_length` is a ~1e30 sentinel in both pinned repositories.
+length = 512
+source = "onnx/config.json::max_position_embeddings"
+confirmed_on = "2026-08-28"
+
+[baseline.licence]
+identifier = "apache-2.0"
+source = """\
+model card YAML `license:` at the pinned revision, and a LICENSE file in the repository\
+"""
+attribution = """\
+protectai/deberta-v3-base-prompt-injection-v2, Protect AI, Apache-2.0, \
+revision 90c9989b1a342275dd0d1a95aad283c04e075671\
+"""
+# The weights are fetched into the Hugging Face cache and never committed here, so this project
+# does not redistribute them. The build-time licence abort is about rows that ARE redistributed.
+redistributed = false
+
+[baseline.lineage]
+# What the baseline declares about every pinned attack dataset. The date and the card revision
+# are recorded so a check never re-run after a pin changed is visible, not assumed to hold.
+checked_on = "2026-08-28"
+card_revision = "90c9989b1a342275dd0d1a95aad283c04e075671"
+
+[baseline.lineage.attack_datasets]
+# The card's `datasets:` block names natolambert/xstest-v2-copy, VMware/open-instruct,
+# alespalla/chatbot_instruction_prompts, HuggingFaceH4/grok-conversation-harmless,
+# Harelix/Prompt-Injection-Mixed-Techniques-2024, OpenSafetyLab/Salad-Data and
+# jackhhao/jailbreak-classification. The pinned attack dataset is not among them.
+# One hop is a different question and it does not come out clean: the dataset's own card names
+# VMware/open-instruct and jackhhao/jailbreak-classification among its seeds, and this baseline
+# declares both. That is what the build-time overlap filter is for; it is not a lineage
+# declaration and it is not recorded as one.
+"xTRam1/safe-guard-prompt-injection" = "not-declared"
+
+[[baseline]]
+key = "testsavantai-bert-small"
+repository = "testsavantai/prompt-injection-defender-small-v0-onnx"
+revision = "5bfc06f0b54950e6653f253eb7df1e3c9811b5cb"
+threshold = 0.5
+graph_path = "model.onnx"
+precision = "fp32"
+# 115,167,311 bytes over ~29M parameters, and `config.json` declares `torch_dtype: float32`.
+graph_bytes = 115167311
+# This repository ships exactly one `tokenizer.json`, at the root. The path is pinned anyway:
+# the rule is that the pin names the file, not that it names it only where two exist.
+tokenizer_path = "tokenizer.json"
+config_path = "config.json"
+# The card's metadata declares `base_model: microsoft/deberta-v3-base`. That is boilerplate
+# inherited from a family card and it is wrong. The pinned revision's own `config.json` says
+# `BertForSequenceClassification`, `model_type: bert`, `vocab_size: 30522`, and ships
+# `vocab.txt` with no `spm.model`. The config is what was verified and the config is what is
+# pinned, because a reviewer auditing SC5 from the cards alone would conclude both baselines are
+# DeBERTa and that the independence this artifact rests on does not exist.
+architecture_family = "bert"
+tokenizer_family = "wordpiece"
+window_policy = "shared"
+
+[baseline.window]
+length = 512
+source = "config.json::max_position_embeddings"
+confirmed_on = "2026-08-28"
+
+[baseline.licence]
+# Read as found. There is no `license` key in the card's YAML, no `license:` tag on the model,
+# and no LICENSE file in the repository at the pinned revision. Recording a guess here would be
+# the exact defect the licence field exists to prevent, so the absence is declared instead.
+identifier = "not-declared"
+source = """\
+no license key, no license tag and no LICENSE file at the pinned revision \
+(checked 2026-08-28)\
+"""
+attribution = """\
+testsavantai/prompt-injection-defender-small-v0-onnx, TestSavant.AI, licence not declared, \
+revision 5bfc06f0b54950e6653f253eb7df1e3c9811b5cb\
+"""
+redistributed = false
+
+[baseline.lineage]
+checked_on = "2026-08-28"
+card_revision = "5bfc06f0b54950e6653f253eb7df1e3c9811b5cb"
+
+[baseline.lineage.attack_datasets]
+# The card's `datasets:` block names rubend18/ChatGPT-Jailbreak-Prompts,
+# deepset/prompt-injections, Harelix/Prompt-Injection-Mixed-Techniques-2024 and
+# JasperLS/prompt-injections. The pinned attack dataset is not among them.
+# `deepset/prompt-injections` is why that dataset is not an attack pool: dropping it is what
+# returned this baseline to eligibility.
+"xTRam1/safe-guard-prompt-injection" = "not-declared"
+
+# --- attack datasets -------------------------------------------------------------------------
+#
+# Identity only. The draw -- sample size in attack positives, selection method, and the seed or
+# sort key it needs -- is declared by the story that builds the corpus, in this same file and in
+# this same vocabulary. Until then nothing reads a sample size from anywhere, which is what the
+# no-literals test asserts.
+
+[[attack_dataset]]
+key = "xtram1-safe-guard"
+repository = "xTRam1/safe-guard-prompt-injection"
+revision = "a3a877d608f37b7d20d9945671902df895ecdb46"
+# Both, never one. Counts taken over a single split are the same error as counts taken over rows
+# instead of attack positives, one level down.
+splits = ["train", "test"]
+# Verified against the pinned revision's rows rather than assumed from the field's name.
+attack_label = 1
+
+[attack_dataset.licence]
+# Also absent, and this one matters more: these rows are redistributed into `data/*.jsonl` in a
+# public MIT repository. That makes it a build-time gate for the corpus story, and a decision a
+# human has to make before the corpus ships -- not something this file can resolve by choosing a
+# licence on the publisher's behalf.
+identifier = "not-declared"
+source = """\
+no license key and no license tag on the dataset card at the pinned revision \
+(checked 2026-08-28)\
+"""
+attribution = """\
+xTRam1/safe-guard-prompt-injection, licence not declared, \
+revision a3a877d608f37b7d20d9945671902df895ecdb46\
+"""
+redistributed = true
