@@ -34,6 +34,14 @@ a 95% interval, and the false-positive rate is reported **per benign class**, ne
 | baseline classifier | | | |
 | baseline + canonicalization | | | |
 
+That is the shape, hand-drawn and empty. The filled one is generated from `results/results.json` and
+injected between the two markers below, which are empty because no run has produced a table yet. Nothing
+between them is ever written or edited by hand, so a number in the table that no run produced cannot
+exist.
+
+<!-- RESULTS:START -->
+<!-- RESULTS:END -->
+
 Repeated for each dressing (clean, base64, hex, homoglyph, zero-width) and for each of two public
 baselines, pinned by revision, chosen to span two architectures and two tokenizer families — because the
 mechanism under suspicion is how encoded text tokenizes, and models that tokenize alike cannot corroborate
@@ -67,7 +75,126 @@ separately from inference time. No figure for it is claimed here — that is wha
       text carrying legitimate encoded content
 - [ ] canonicalization layer with a declared recursion ceiling
 - [ ] measurement harness and results table, every rate with its n and interval
-- [ ] "what this does not show"
+- [x] "what this does not show" — the eleven caveats that do not depend on the result, written
+      before the first run; slot 8 waits for what the run reveals
+
+## What this does not show
+
+These eleven do not depend on the result, so they were written before the first measurement rather than
+after it, and the numbering is the PRD's — a reader moving between the two documents lands on the same
+caveat. The section is hand-written and sits outside the generated block above; slot 8 is reserved for
+what the run actually reveals. The run will not start without it: `python -m nbc.report.caveats` checks
+that the section is here and complete, and aborts with its own exit code when it is not.
+
+**1. The corpus is constructed, not sampled from production traffic.** Attack payloads come from public,
+revision-pinned datasets and are re-rendered here in each dressing. The benign corpus is drawn the same
+way — real public source files pinned by repository, commit and path for the code half, and the
+benign-labelled rows of the same pinned datasets for the conversational half — under a sampling frame
+fixed and recorded before any measurement. Hand-authored material is confined to what no public dataset
+carries: messages legitimately containing a JWT, a content hash, a data URI or an SSH public key. Nothing
+here is a sample of what real traffic looks like, and the rates below should be read as a comparison
+between conditions, not as an estimate of how often either failure occurs in the wild. One consequence
+worth naming: the code half is drawn from a bounded list of repositories, and files from one repository
+resemble each other, so the intervals on that half are somewhat narrower than fully independent sampling
+would justify. The repository count is reported so a reader can judge by how much.
+
+**1b. Language is not a controlled variable.** The pinned attack dataset reads as predominantly English
+in sample but was never audited for language, and neither were the datasets its own card says it was
+seeded from. Nothing filters by language and nothing here claims to. A result that differs across
+languages would be invisible in this table.
+
+**2. The classifier is treated as a black box.** Both baselines are accessed through their public
+inference interface, with no access to activations or internal state. A whole class of defenses works the
+other way, reading the model's internal state rather than classifying the input text, and commercial
+systems built on that approach exist. This result says nothing about them, in either direction.
+
+**3. There are two baselines, which is the minimum this claim can rest on, and one of them is obscure.**
+They were chosen for independence rather than popularity: two architectures (DeBERTa-v3, BERT) and two
+tokenizer families (SentencePiece 128k, WordPiece 30k), because the mechanism under suspicion is how
+encoded text tokenizes, and models that tokenize alike cannot corroborate each other. Only the first is
+downloaded at scale. **A third baseline was pinned and then dropped**, and the reason belongs here rather
+than in a commit message: its published training sources included the attack datasets used here, and its
+training augmentations were the same encodings this experiment applies — so its recall on encoded payloads
+would have measured robustness it had been trained for, not the effect under study. Dropping it also cost
+one of the two attack datasets, which a second baseline had likewise trained on. Two independent
+baselines is a floor, not a comfortable margin, and a reader is entitled to weigh the result accordingly.
+
+**3b. Both baselines cap sequences at the same length**, so long documents are windowed for both and the
+per-baseline share of items that exceeded one window is reported alongside the rates. That symmetry is
+convenient here and is not a property of the model class: the dropped third baseline had a context four
+times longer and published its own long-document protocol, and had it stayed, its column would have been
+produced under a different windowing regime from the others. The comparison in this table does not have
+that problem; a reader extending it to other models should not assume the same.
+
+**3c. This measures whether a classifier fires, not whether an attack works.** A payload the classifier
+misses is a recall failure by construction, but it is only a *threat* if the model downstream decodes it
+and obeys. Nothing here tests that. If some encodings are inert against a downstream model anyway, the
+recall recovered on them is worth less than the table makes it look; if they are not inert, the recall
+lost to them is worth more. Establishing which would need a downstream model and a definition of attack
+success, and that is a different experiment. Read the rates as a comparison between conditions at the
+classifier, and nothing further.
+
+**3d. Training-data overlap is filtered where it can be measured, and one source cannot be.** A classifier
+scored on text it was trained on reports memory, not detection — and it cuts both ways: recall looks better
+on attacks it has seen, and the false-positive rate looks better on benign text it was taught to call safe.
+Reading model cards is not enough to catch this. The attack corpus used here declares on its own card that
+it was seeded from two datasets that one of the baselines declares training on, one hop that no model card
+reveals; measured literally, that reached **48% of the benign rows and 17% of the attack rows** before
+filtering. So the build downloads every declared training source it can and removes every corpus row that
+appears in one, and reports how many rows each source removed. What remains undeclared or unreachable
+remains a limit: one training source common to **both** baselines is access-restricted and returns HTTP
+401, so overlap against it is unmeasurable for any corpus this experiment could have chosen. That is stated
+here rather than quietly assumed to be zero. And that one source is a floor on what is missing, not a
+full accounting: the primary baseline's card names far fewer training datasets in prose than its own
+metadata tallies, so the number of sources this filter never sees is itself unknown. What the filter
+reaches is what the cards name and what can be downloaded, which is not the same as what these models
+were trained on.
+
+**4. No adaptive evasion was attempted.** Every payload here was encoded without knowledge of the
+canonicalization layer. An attacker who reads this repository is a different adversary, and defeating a
+published normalizer is a materially easier problem than defeating an unknown one. This is the most
+important follow-up.
+
+**5. Long documents are windowed, and a window boundary can split an instruction.** Documents past a
+model's sequence limit are scored in fixed non-overlapping windows and the document takes the maximum
+window score. An instruction that straddles a boundary is seen by neither window in full. The direction of
+this bias is worth stating, because it is the opposite of what one might assume: canonicalization
+*shortens* documents in tokens rather than lengthening them — an encoded payload tokenizes into several
+times the tokens of its decoded form — so it is the **encoded** condition that spills into extra windows,
+and taking the maximum across windows hands those extra chances to the un-canonicalized baseline.
+On the recall side, that works against the result reported here. **It does not work the same way on the
+other half, and stating only the flattering half would be the kind of selective candour this section
+exists to avoid.** Benign items are dressed in the same encodings, so encoded benign documents also spill
+into extra windows without the layer, also take an inflated maximum, and also produce extra false
+positives without the layer — which makes the layer's false-positive *cost* look smaller than it is. The
+two biases push the headline comparison in opposite directions and do not cancel in any knowable way.
+Both are reported: the share of items needing more than one window is given per baseline, and every
+cost-versus-gain comparison is accompanied by a **windows-matched** version restricted to documents that
+fit in a single window under both conditions, so a reader can see how much of the trade is the window
+policy rather than the layer.
+
+**6. The layer is itself a surface.** A canonicalizer that decodes aggressively can be attacked from the
+other direction: benign-looking encoded content that decodes into text the classifier fires on turns a
+guardrail into a denial-of-service against whoever deploys it. The declared recursion ceiling bounds
+expansion, not this. Measuring it is future work and is not attempted here.
+
+**7. Part of the recall recovery is true by construction, and you should discount it accordingly.** The
+code that encodes the payloads and the layer that decodes them draw on the same character tables, bound by
+a test that fails the build if the layer does not undo its own corpus's dressing. That binding exists for a
+good reason — without it the layer could silently fail to strip a character it emitted, quietly depressing
+the headline number with nothing failing loudly — but it has a consequence worth stating plainly: on the
+dressings the layer was written for, the canonicalized encoded document *is* the canonicalized clean
+document, so recovery is total by definition and could not have come out any other way. That column shows
+the layer was implemented as specified. It is not evidence that canonicalization is a good idea. The
+columns that could have gone differently are the recall **lost** without the layer, the false-positive cost
+of adding it, the behaviour on nested chains past the recursion ceiling, and the **held-out encodings** —
+a separate block of the table built from encodings the layer was deliberately never written against, kept
+in their own registry and exempt from the binding above precisely so that something here could come out
+badly. Read those. One held-out encoding, `rot13`, is included knowing the layer cannot touch it: it is
+there to mark the boundary of what normalization can reach, not to be recovered, and it is reported and
+excluded from the pass/fail condition for that reason.
+
+**8.** *(reserved for what the run actually revealed — written after the numbers exist)*
 
 ## License
 
