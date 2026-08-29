@@ -6,10 +6,10 @@ where each caller assembles its own sequence resolves that question differently 
 reorder here is a one-line diff a reviewer sees; a test asserts the order, so it is also a failing
 test until someone changes the assertion too.
 
-**Three steps, not four.** Step 4 — detect and decode embedded encodings — is Story 2.3. It is
-absent rather than stubbed: a name in this constant pointing at a stage that does not exist would
-be the layer describing behaviour nobody wrote, which is the failure this epic was warned about by
-name.
+**Four steps.** Steps 1 to 3 rewrite characters; step 4 decodes embedded encodings. Step 4 is last
+because the three before it are what make a run visible as a run: a zero-width joiner in the middle
+of a base64 blob leaves no base64 blob for step 4 to find. The order is not a preference and is not
+this module's to change.
 
 **The runner checks what the stages report.** Each stage hands back the text it produced and the
 edits that account for it. The runner replays those edits over the text it handed *in* and compares
@@ -29,7 +29,7 @@ module's, and this is the price of having one.
 **Depth belongs to the runner.** `Stage(text, ctx) -> StageResult` has no depth in it, by AD-5, and
 a stage genuinely does not know at what recursion depth it is being run. The runner stamps the
 depth it was called at onto every edit it collects. Nothing calls it with a depth other than `0`
-yet; Story 2.3, which canonicalizes a decoded segment as an independent document at `depth + 1`, is
+yet; Story 2.4, which canonicalizes a decoded segment as an independent document at `depth + 1`, is
 what will.
 """
 
@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Final, Protocol
 
 from nbc.canon import confusables_table
-from nbc.canon.stages import confusables, invisible, nfkc
+from nbc.canon.stages import confusables, decode, invisible, nfkc
 from nbc.errors import NbcError
 from nbc.schema import CanonContext, CanonResult, Edit, StageResult
 
@@ -88,8 +88,9 @@ PIPELINE: Final[tuple[PipelineStage, ...]] = (
     PipelineStage(invisible.NAME, invisible.run),
     PipelineStage(confusables.NAME, confusables.run),
     PipelineStage(nfkc.NAME, nfkc.run),
+    PipelineStage(decode.NAME, decode.run),
 )
-"""The canonical order, and the only place it exists. Story 2.3 appends the decode step."""
+"""The canonical order, and the only place it exists."""
 
 
 def default_context(

@@ -10,6 +10,12 @@ sequence of `(start, end, replacement)` segments that partitions the text with n
 overlap — and this module turns the cover into the output text and the coalesced edits. The cover
 is validated on the way through, so a stage that produces a broken partition is caught here rather
 than emitting a trace that quietly locates a change in the wrong place.
+
+Step 4 reports one thing the character stages never do: a span it **examined and left alone**. AD-18
+requires a refused decode candidate to be visible in the trace as an `Edit` whose `before` equals
+its `after`, and `build_edits` is built to drop exactly that segment. `build_reported_edits` is the
+second entry point for that case — the caller names the spans it is reporting, each becomes exactly
+one edit changed or not, and the unexamined text between them is copied through unreported.
 """
 
 from __future__ import annotations
@@ -18,7 +24,7 @@ from collections.abc import Callable, Iterable
 
 from nbc.schema import Edit
 
-__all__ = ["Segment", "build_edits", "map_code_points"]
+__all__ = ["Segment", "build_edits", "build_reported_edits", "map_code_points"]
 
 Segment = tuple[int, int, str]
 """`(start, end, replacement)`: the half-open span `text[start:end]` becomes `replacement`."""
@@ -123,4 +129,61 @@ def build_edits(
             f"partition the whole text"
         )
 
+    return "".join(pieces), tuple(edits)
+
+
+def build_reported_edits(
+    text: str,
+    spans: Iterable[Segment],
+    *,
+    stage: str,
+    trace: bool,
+) -> tuple[str, tuple[Edit, ...]]:
+    """Apply an ordered, non-overlapping set of **reported** spans and emit one Edit per span.
+
+    The difference from `build_edits` is the whole reason this exists: `build_edits` drops a
+    segment whose replacement equals the original, because for a character stage an unchanged
+    character is not news. Step 4 has news to report about a span it decided **not** to change —
+    AD-18 requires a refused decode candidate to appear in the trace as an `Edit` whose `before`
+    equals its `after` — so the caller states which spans are reported and every one of them
+    becomes exactly one edit.
+
+    `spans` need not partition the text: the gaps between them are the parts the stage never
+    examined, and they are copied through untouched and unreported. What `spans` must be is
+    ordered, non-overlapping and inside the text, which is what the runner will independently
+    demand of the edits that come out; a stage that breaks it raises `ValueError` here, at the
+    place that can name what it produced, rather than as a contract violation two frames later.
+
+    No coalescing. Two reported spans are never adjacent in practice — a decode candidate is a
+    *maximal* run over its alphabet, so any two are separated by at least one character that is
+    not in it — and merging two independent decisions into one edit would report two candidates
+    as one change.
+    """
+    pieces: list[str] = []
+    edits: list[Edit] = []
+    position = 0
+
+    for start, end, replacement in spans:
+        if start < position:
+            raise ValueError(
+                f"stage {stage!r} reported a span starting at {start} after a span that already "
+                f"reached {position}; reported spans are ordered and never overlap"
+            )
+        if end < start:
+            raise ValueError(f"stage {stage!r} reported the reversed span ({start}, {end})")
+        if end > len(text):
+            raise ValueError(
+                f"stage {stage!r} reported a span ending at {end}, past the {len(text)} code "
+                f"points it was handed"
+            )
+
+        pieces.append(text[position:start])
+        pieces.append(replacement)
+        if trace:
+            edits.append(
+                Edit(stage=stage, span=(start, end), before=text[start:end], after=replacement)
+            )
+        position = end
+
+    pieces.append(text[position:])
     return "".join(pieces), tuple(edits)

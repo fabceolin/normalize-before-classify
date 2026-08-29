@@ -73,7 +73,7 @@ LEAF_MODULES = [SRC / "nbc" / f"{leaf.split('.')[1]}.py" for leaf in sorted(ALLO
 
 def test_the_scan_found_the_modules_it_is_supposed_to_scan() -> None:
     # A scan over an empty file list passes vacuously. This is what makes the suite below mean
-    # something: the pipeline, the three stages and the shared helper are all in it.
+    # something: the pipeline, the four stages and the shared helper are all in it.
     found = {path.relative_to(CANON).as_posix() for path in CANON_MODULES}
     assert {
         "__init__.py",
@@ -84,6 +84,7 @@ def test_the_scan_found_the_modules_it_is_supposed_to_scan() -> None:
         "stages/invisible.py",
         "stages/confusables.py",
         "stages/nfkc.py",
+        "stages/decode.py",
     } <= found
 
 
@@ -199,6 +200,7 @@ def test_importing_the_layer_pulls_in_nothing_outside_the_bound() -> None:
         "nbc.canon.pipeline",
         "nbc.canon.stages",
         "nbc.canon.stages.confusables",
+        "nbc.canon.stages.decode",
         "nbc.canon.stages.invisible",
         "nbc.canon.stages.nfkc",
         "nbc.errors",

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from nbc.canon.edits import build_edits, map_code_points
+from nbc.canon.edits import build_edits, build_reported_edits, map_code_points
 from nbc.schema import Edit
 
 STAGE = "probe"
@@ -103,3 +103,75 @@ def test_a_broken_cover_is_refused_even_with_tracing_off() -> None:
     # not switch it off. Without this, the timing pass would silently accept a truncating stage.
     with pytest.raises(ValueError, match="covered 2 of 3"):
         build_edits("abc", [(0, 2, "ab")], stage=STAGE, trace=False)
+
+
+# --- reported spans: the edit a stage makes about a span it left alone --------------------------
+
+
+def report(text: str, spans, *, trace: bool = True) -> tuple[str, tuple[Edit, ...]]:
+    return build_reported_edits(text, spans, stage=STAGE, trace=trace)
+
+
+def test_a_reported_span_that_did_not_change_is_still_an_edit() -> None:
+    """The whole reason this function exists beside `build_edits`, which drops exactly this."""
+    text, edits = report("see abcdef now", [(4, 10, "abcdef")])
+    assert text == "see abcdef now"
+    assert edits == (Edit(stage=STAGE, span=(4, 10), before="abcdef", after="abcdef"),)
+
+    dropped = build_edits(
+        "see abcdef now",
+        [(0, 4, "see "), (4, 10, "abcdef"), (10, 14, " now")],
+        stage=STAGE,
+        trace=True,
+    )
+    assert dropped == ("see abcdef now", ())
+
+
+def test_a_reported_span_that_changed_is_replaced_in_place() -> None:
+    text, edits = report("see abcdef now", [(4, 10, "X")])
+    assert text == "see X now"
+    assert edits == (Edit(stage=STAGE, span=(4, 10), before="abcdef", after="X"),)
+
+
+def test_the_text_between_reported_spans_is_copied_through_unreported() -> None:
+    text, edits = report("a bb c dd e", [(2, 4, "B"), (7, 9, "D")])
+    assert text == "a B c D e"
+    assert [edit.span for edit in edits] == [(2, 4), (7, 9)]
+
+
+def test_no_reported_spans_leaves_the_text_alone() -> None:
+    assert report("hello", []) == ("hello", ())
+
+
+def test_reported_spans_are_not_coalesced_even_when_adjacent() -> None:
+    # Two decisions about two candidates stay two entries. Coalescing them would report two
+    # refusals as one, and the trace's job is to say how many candidates were examined.
+    text, edits = report("abcd", [(0, 2, "X"), (2, 4, "Y")])
+    assert text == "XY"
+    assert len(edits) == 2
+
+
+def test_overlapping_reported_spans_are_refused() -> None:
+    with pytest.raises(ValueError, match="ordered and never overlap"):
+        report("abcdefgh", [(0, 5, "X"), (3, 8, "Y")])
+
+
+def test_reported_spans_out_of_order_are_refused() -> None:
+    with pytest.raises(ValueError, match="ordered and never overlap"):
+        report("abcdefgh", [(4, 6, "X"), (0, 2, "Y")])
+
+
+def test_a_reversed_reported_span_is_refused() -> None:
+    with pytest.raises(ValueError, match="reversed span"):
+        report("abcdefgh", [(5, 2, "X")])
+
+
+def test_a_reported_span_past_the_end_is_refused() -> None:
+    with pytest.raises(ValueError, match="past the 8 code points"):
+        report("abcdefgh", [(4, 12, "X")])
+
+
+def test_reporting_costs_nothing_with_the_trace_off() -> None:
+    text, edits = report("see abcdef now", [(4, 10, "X")], trace=False)
+    assert text == "see X now"
+    assert edits == ()
