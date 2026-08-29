@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from nbc import schema
-from nbc.schema import Score
+from nbc.schema import CanonContext, CanonResult, Edit, Score, StageResult
 
 
 def _schema_source() -> tuple[Path, ast.Module]:
@@ -94,13 +94,13 @@ def test_score_rejects_a_window_count_below_one(bad: object) -> None:
 
 
 def test_schema_declares_only_the_types_this_epic_uses() -> None:
-    """Later stories add their own types here; none of them has run yet.
+    """Later stories add their own types here; most of them have not run yet.
 
     This is not a freeze on `schema.py`. It is a reminder that a type belongs to the story
     that first needs it, so the next story updates this list in the same commit that adds
     its type — and a type that appears with no consumer is caught.
     """
-    assert schema.__all__ == ["Score"]
+    assert schema.__all__ == ["CanonContext", "CanonResult", "Edit", "Score", "StageResult"]
 
 
 def test_every_record_type_defined_here_is_exported() -> None:
@@ -113,3 +113,109 @@ def test_every_record_type_defined_here_is_exported() -> None:
         and getattr(obj, "__module__", None) == schema.__name__
     }
     assert defined == set(schema.__all__)
+
+
+# --- the canonicalization layer's shapes ------------------------------------------------------
+
+
+def test_the_ascii_bound_is_the_same_number_the_confusables_contract_uses() -> None:
+    """The one duplicated constant in the leaf, compared rather than trusted.
+
+    `schema.py` cannot import `nbc.canon.confusables_table` — it is a leaf, and that is the whole
+    point of it. So the bound is spelled twice, and this is the check that makes the second copy a
+    comparison instead of a second opinion.
+    """
+    from nbc.canon import confusables_table
+
+    assert schema.MAX_ASCII == confusables_table.ASCII_LAST
+
+
+def test_an_edit_records_a_span_that_measures_its_own_before_text() -> None:
+    edit = Edit(stage="invisible", span=(3, 5), before="ab", after="")
+    assert edit.span == (3, 5)
+    assert edit.depth == 0
+
+
+def test_an_edit_accepts_a_span_that_arrived_as_a_list() -> None:
+    # A trace read back from JSONL has lists where the record has a tuple.
+    assert Edit(stage="s", span=[1, 2], before="a", after="b").span == (1, 2)  # type: ignore[arg-type]
+
+
+def test_a_no_op_edit_is_legal() -> None:
+    # Stories 2.3 and 2.4 record a refused candidate as an edit whose before equals its after.
+    edit = Edit(stage="decode", span=(0, 4), before="dGVz", after="dGVz")
+    assert edit.before == edit.after
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"stage": "", "span": (0, 1), "before": "a", "after": ""},
+        {"stage": 1, "span": (0, 1), "before": "a", "after": ""},
+        {"stage": "s", "span": (0, 1, 2), "before": "a", "after": ""},
+        {"stage": "s", "span": (0,), "before": "", "after": ""},
+        {"stage": "s", "span": "01", "before": "", "after": ""},
+        {"stage": "s", "span": (-1, 1), "before": "aa", "after": ""},
+        {"stage": "s", "span": (2, 1), "before": "", "after": ""},
+        {"stage": "s", "span": (0, 1.0), "before": "a", "after": ""},
+        {"stage": "s", "span": (0, True), "before": "a", "after": ""},
+        {"stage": "s", "span": (0, 2), "before": "a", "after": ""},
+        {"stage": "s", "span": (0, 1), "before": b"a", "after": ""},
+        {"stage": "s", "span": (0, 1), "before": "a", "after": None},
+        {"stage": "s", "span": (0, 1), "before": "a", "after": "", "depth": -1},
+        {"stage": "s", "span": (0, 1), "before": "a", "after": "", "depth": 1.5},
+        {"stage": "s", "span": (0, 1), "before": "a", "after": "", "depth": True},
+    ],
+)
+def test_an_edit_that_does_not_hold_together_is_refused(kwargs: dict) -> None:
+    with pytest.raises(ValueError):
+        Edit(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("record", [StageResult, CanonResult])
+def test_a_result_freezes_its_edits_into_a_tuple(record) -> None:
+    edit = Edit(stage="s", span=(0, 1), before="a", after="")
+    assert record(text="x", edits=[edit]).edits == (edit,)
+    assert record(text="x").edits == ()
+
+
+@pytest.mark.parametrize("record", [StageResult, CanonResult])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"text": 1, "edits": ()},
+        {"text": "x", "edits": "not a sequence of edits"},
+        {"text": "x", "edits": ["not an edit"]},
+        {"text": "x", "edits": 5},
+    ],
+)
+def test_a_result_that_does_not_hold_together_is_refused(record, kwargs: dict) -> None:
+    with pytest.raises(ValueError):
+        record(**kwargs)
+
+
+def test_a_context_freezes_its_table_and_defaults_to_tracing() -> None:
+    ctx = CanonContext(confusables={0x0430: "a"})
+    assert ctx.trace_enabled is True
+    assert ctx.confusables[0x0430] == "a"
+    with pytest.raises(TypeError):
+        ctx.confusables[0x0431] = "b"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "needle"),
+    [
+        ({"confusables": [(0x0430, "a")]}, "must be a mapping"),
+        ({"confusables": {"а": "a"}}, "code points"),
+        ({"confusables": {True: "a"}}, "code points"),
+        ({"confusables": {0x110000: "a"}}, "not a code point"),
+        ({"confusables": {0x61: "b"}}, "ASCII code point"),
+        ({"confusables": {0x00: "x"}}, "ASCII code point"),
+        ({"confusables": {0x0430: ""}}, "non-empty str"),
+        ({"confusables": {0x0430: 97}}, "non-empty str"),
+        ({"confusables": {}, "trace_enabled": "yes"}, "must be a bool"),
+    ],
+)
+def test_a_context_that_does_not_hold_together_is_refused(kwargs: dict, needle: str) -> None:
+    with pytest.raises(ValueError, match=needle):
+        CanonContext(**kwargs)  # type: ignore[arg-type]
