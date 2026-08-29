@@ -267,6 +267,13 @@ class OnnxBaseline:
 
     def score(self, texts: Sequence[str]) -> list[Score]:
         """One `Score` per document, in the order the documents came in."""
+        if isinstance(texts, (str, bytes)):
+            # Belt to the windower's braces: a caller reaching the adapter directly gets the same
+            # refusal rather than a plausible-looking list of one-character documents.
+            raise TypeError(
+                f"score() takes a sequence of documents and was given a bare "
+                f"{type(texts).__name__}; pass [text] for a single document"
+            )
         per_document = list(self._windower(texts))
         if len(per_document) != len(texts):
             raise ValueError(

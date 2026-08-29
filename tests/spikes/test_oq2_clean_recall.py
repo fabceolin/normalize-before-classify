@@ -90,7 +90,9 @@ def test_the_wilson_interval_matches_a_hand_computed_value(
 
 def test_the_interval_never_leaves_the_unit_range() -> None:
     """The reason it is Wilson: recall near 1.0 sends the normal interval past 1.0."""
-    for n in (1, 7, 30, 3073):
+    # Deliberately NOT the pinned sample size: this asserts a property of the interval at a
+    # large n, and spelling the corpus draw here would make the test a second home for a pin.
+    for n in (1, 7, 30, 4001):
         for hits in (0, n):
             interval = spike.wilson_interval(hits, n)
             assert 0.0 <= interval.low <= interval.high <= 1.0

@@ -13,6 +13,7 @@ covered by a suite that runs with no network at all.
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 import sys
 import tomllib
@@ -219,8 +220,14 @@ def write_pins(root: Path, document: dict[str, Any]) -> Path:
 
 
 @pytest.fixture()
-def committed_pins() -> Any:
-    return load_pins()
+def committed_pins(repo_root: Path) -> Any:
+    """Resolved the same way `committed_document` resolves it.
+
+    This called `load_pins()` with no argument, which walks up from the working directory, while
+    its sibling fixture read `repo_root / PINS_FILENAME`. Two ways to find one file is two files
+    a test can be reading, and every assertion pairing the two silently assumed they agreed.
+    """
+    return load_pins(repo_root)
 
 
 @pytest.fixture()
@@ -930,8 +937,30 @@ def test_the_committed_one_hop_reach_is_the_one_the_architecture_records(
     reaches = committed_pins.one_hop_reaches()
     assert len(reaches) == 1
     (reaching_baseline, reached_dataset), seeds = next(iter(reaches.items()))
-    assert len(seeds) == 2
-    assert set(seeds) <= set(committed_pins.required_exclusion_sources())
+
+    # Pinned from the committed document, not re-derived. The assertion here used to be
+    # `set(seeds) <= set(required_exclusion_sources())`, which is a tautology: the latter is
+    # DEFINED as the union of the former, so it held whatever the reach turned out to be, and
+    # named neither the baseline, nor the dataset, nor a single seed.
+    document = tomllib.loads(
+        (Path(nbc.__file__).resolve().parents[2] / PINS_FILENAME).read_text(encoding="utf-8")
+    )
+    declared_seeds = {
+        seed
+        for entry in document["attack_dataset"]
+        for seed in entry["provenance"]["seeds"]
+    }
+    trained_on = {
+        source
+        for entry in document["baseline"]
+        for source, relationship in entry["lineage"]["training_sources"].items()
+        if relationship == TRAINED_ON
+    }
+    expected = declared_seeds & trained_on
+
+    assert set(seeds) == expected, "the reach is not the one the committed file declares"
+    assert expected, "a reach test that passes on an empty intersection tests nothing"
+    assert set(committed_pins.required_exclusion_sources()) == expected
 
     declaring = [b for b in committed_pins.baselines if b.repository == reaching_baseline]
     assert declaring[0].lineage.relationship_to(reached_dataset) == SEEDED_FROM_TRAINING_SOURCE
@@ -1128,14 +1157,63 @@ def test_the_api_url_carries_the_pinned_revision() -> None:
 
 
 def _source_files() -> list[Path]:
-    return sorted(Path(nbc.__file__).resolve().parent.rglob("*.py"))
+    """Every Python file in the repository that could hold a pin, not only the package.
+
+    Rooted at `src/nbc/` before, so `spikes/` and `tests/` could hold a repository id, a sha or a
+    sample size freely -- and the OQ2 spike is exactly the kind of file that would, since it is
+    the one that reads the pinned dataset. The check is about the pin file being the only place
+    an artifact is named, and that claim is not scoped to one directory.
+    """
+    root = Path(nbc.__file__).resolve().parents[2]
+    return sorted(
+        path
+        for directory in ("src", "spikes")
+        for path in (root / directory).rglob("*.py")
+        if "__pycache__" not in path.parts
+    )
 
 
-def _string_constants(path: Path) -> Iterator[tuple[int, str]]:
+def _test_files() -> list[Path]:
+    root = Path(nbc.__file__).resolve().parents[2]
+    return sorted(
+        path for path in (root / "tests").rglob("*.py") if "__pycache__" not in path.parts
+    )
+
+
+def _unmistakable_pins(document: dict[str, Any]) -> set[str]:
+    """The identifiers a test could never need by coincidence.
+
+    The broad scan above cannot run over `tests/`: fixtures legitimately name `config.json` and
+    `tokenizer.json`, which are also pinned paths, and every one of those would be noise. But a
+    40-hex sha, a `namespace/name` repository id and a sample size are never coincidences -- a
+    test carrying one is a second home for a pin, which is the whole thing this file forbids.
+    """
+    return {
+        value
+        for value in _pinned_identifiers(document)
+        if (
+            re.fullmatch(r"[0-9a-f]{40}", value)
+            or re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", value)
+            and "." not in value.rsplit("/", 1)[-1]
+            or value.isdigit()
+        )
+    }
+
+
+def _literal_constants(path: Path) -> Iterator[tuple[int, str]]:
+    """String AND numeric literals.
+
+    Numbers were collected from `pins.toml` and then compared against strings only, so the
+    acceptance criterion "no sample size appears as a literal" was asserted by a scan that could
+    not fire on a sample size. A sample size is an integer.
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            yield node.lineno, node.value
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, str):
+                yield node.lineno, node.value
+            elif isinstance(node.value, int) and not isinstance(node.value, bool):
+                yield node.lineno, str(node.value)
 
 
 def _pinned_identifiers(document: dict[str, Any]) -> set[str]:
@@ -1179,7 +1257,7 @@ def test_no_pinned_identifier_appears_as_a_literal_in_the_source_tree(
 
     offenders: list[str] = []
     for path in _source_files():
-        for lineno, value in _string_constants(path):
+        for lineno, value in _literal_constants(path):
             if value in identifiers:
                 offenders.append(f"{path.name}:{lineno} {value!r}")
 
@@ -1192,7 +1270,7 @@ def test_no_commit_sha_appears_as_a_literal_in_the_source_tree() -> None:
     """Catches a revision that was hard-coded without ever being pinned."""
     offenders: list[str] = []
     for path in _source_files():
-        for lineno, value in _string_constants(path):
+        for lineno, value in _literal_constants(path):
             if len(value) == 40 and all(char in "0123456789abcdef" for char in value):
                 offenders.append(f"{path.name}:{lineno} {value!r}")
 
@@ -1204,7 +1282,7 @@ def test_only_one_module_names_the_pins_file() -> None:
     readers = [
         path.name
         for path in _source_files()
-        if any(PINS_FILENAME == value for _, value in _string_constants(path))
+        if any(PINS_FILENAME == value for _, value in _literal_constants(path))
     ]
     assert readers == ["pins.py"], readers
 
@@ -1669,3 +1747,27 @@ def test_a_graph_whose_size_matches_verifies(tmp_path: Path, monkeypatch: Any) -
     monkeypatch.delenv("HF_HUB_CACHE", raising=False)
 
     assert verify_revisions(pins, echoing_resolver)
+
+
+def test_no_sha_repository_id_or_sample_size_is_hardcoded_in_a_test(
+    committed_document: dict[str, Any],
+) -> None:
+    """The broad scan skips `tests/`, so the unmistakable identifiers are checked here instead.
+
+    The acceptance criterion says no sample size appears as a literal. The scan that asserted it
+    collected numbers from pins.toml and then compared them against string constants only, so it
+    could not fire on a sample size -- a sample size being an integer. Widening it to numeric
+    literals found one immediately, in a test.
+    """
+    pinned = _unmistakable_pins(committed_document)
+    offenders = [
+        f"{path.name}:{line} {value!r}"
+        for path in _test_files()
+        for line, value in _literal_constants(path)
+        if value in pinned
+    ]
+
+    assert not offenders, (
+        "a pinned identifier is hardcoded in a test, so pins.toml is no longer the only place "
+        f"it lives: {'; '.join(offenders)}"
+    )

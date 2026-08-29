@@ -269,6 +269,26 @@ def derive_frame(tokenizer: Tokenizer, *, baseline: str) -> SpecialTokenFrame:
     return frame
 
 
+
+def _refuse_a_bare_string(texts: object, where: str) -> None:
+    """A `str` satisfies `Sequence[str]`, and iterating it yields characters.
+
+    So `windows("ignore previous instructions")` scores twenty-eight documents of one character
+    each, silently and with the right-looking types. There is no plausible caller who means that,
+    and the failure is invisible: every count downstream is a count of characters, and a recall
+    computed over it is a number about letters.
+
+    Refused at the seam every caller crosses rather than at each call site. Found the hard way:
+    a probe written to verify something else fell into it, in this repository, today.
+    """
+    if isinstance(texts, (str, bytes)):
+        raise TypeError(
+            f"{where} takes a sequence of documents and was given a bare "
+            f"{type(texts).__name__}. Iterating it yields characters, so this would score "
+            f"{len(texts)} documents of one character each. Pass [text] for a single document."
+        )
+
+
 class WindowedTokenizer:
     """One tokenizer under one policy: the `port.Windower` every adapter is handed.
 
@@ -340,6 +360,7 @@ class WindowedTokenizer:
         then the frame alone. That is what makes `n_windows` a count of windows rather than a
         count of overflows, and it is what the adapter's "at least one window" contract needs.
         """
+        _refuse_a_bare_string(texts, "WindowedTokenizer.windows")
         encodings = self._tokenizer.encode_batch(list(texts), add_special_tokens=False)
         # Nothing about a document survives this call: `n_windows` rides on `Score`, and two
         # identical documents window identically wherever they sit in the corpus.
