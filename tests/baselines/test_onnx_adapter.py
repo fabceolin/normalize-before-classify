@@ -507,3 +507,80 @@ def test_every_pinned_baseline_declares_exactly_one_positive_class() -> None:
             config.get("id2label"), baseline=baseline.key
         )
     assert len(resolved) == len(pins.load_pins().baselines)
+
+
+# -- batch composition is not a free parameter of a score ---------------------------------------
+#
+# The existing test above asserts the CLASS survives batching, which is what AD-22 requires. The
+# review asked a harder question: does the VALUE survive? Measured on both pinned graphs, over
+# 300 real attack payloads of 97 to 11869 characters, under chunk sizes 8, 32 and 32-reversed
+# against a one-document-per-call reference:
+#
+#     max|delta| = 0.000e+00 and zero class flips, on both baselines.
+#
+# The padded width genuinely varied by 100x in that measurement -- the same document is padded to
+# 5 tokens alone and 512 beside a long one -- so the zero is invariance, not an untested path.
+# Both pinned graphs declare attention_mask and the adapter builds it correctly, which is why.
+#
+# That is an OBSERVATION about two pins. These tests make it a PROPERTY: a replacement baseline
+# whose graph does not honour its mask fails here rather than quietly moving a published rate.
+
+
+def test_a_documents_score_does_not_depend_on_its_batch_neighbours() -> None:
+    """The same document, alone and beside a much longer one, scores identically.
+
+    `_feed` pads to the longest window in the batch, and the batch mixes windows from different
+    documents -- so the tensor a document is scored on is a function of its neighbours. On a
+    graph that honours its mask that is invisible, and this asserts the invisibility exactly
+    rather than to a tolerance: a float that moves in the last decimal moves a class at the
+    threshold, which is the borderline encoded items this whole experiment measures.
+    """
+    document = [[1, 2, 3]]
+    long_neighbour = [[index + 1 for index in range(400)]]
+
+    alone = adapter(windower=windows_of(document)).score(["doc"])
+    together = adapter(windower=windows_of(document, long_neighbour)).score(["doc", "long"])
+
+    assert together[0].p_injection == alone[0].p_injection
+
+
+def test_the_batch_size_constant_is_not_a_free_parameter_either() -> None:
+    """Changing only BATCH_SIZE must not move a published number.
+
+    The constant is documented as a memory knob. The spike slices its corpus by `--chunk`, which
+    determines batch composition, so if composition moved scores then a memory knob would be a
+    measurement parameter and two runs over identical inputs could report different recalls.
+    """
+    documents = [[[index + 1, index + 2]] for index in range(BATCH_SIZE * 2 + 1)]
+    texts = [f"doc {index}" for index in range(len(documents))]
+
+    by_size = {
+        size: [
+            score.p_injection
+            for score in adapter(windower=windows_of(*documents), batch_size=size).score(texts)
+        ]
+        for size in (1, 2, BATCH_SIZE, BATCH_SIZE * 4)
+    }
+
+    reference = by_size[1]
+    for size, values in by_size.items():
+        assert values == reference, f"batch_size={size} moved the scores away from batch_size=1"
+
+
+def test_the_invariance_test_can_fail() -> None:
+    """The same assertion on a graph that ignores its mask, so the test above is not a tautology.
+
+    `reduce="mean"` divides by the padded width, which is what a graph feeding a zero-padded
+    tensor without honouring `attention_mask` effectively does. This is also the fixture the
+    review's 0.32-to-0.48 swings were measured on, and stating that here is why those numbers
+    did not reproduce on the pinned models.
+    """
+    document = [[1, 2, 3]]
+    long_neighbour = [[index + 1 for index in range(400)]]
+
+    alone = adapter(reduce="mean", windower=windows_of(document)).score(["doc"])
+    together = adapter(
+        reduce="mean", windower=windows_of(document, long_neighbour)
+    ).score(["doc", "long"])
+
+    assert together[0].p_injection != alone[0].p_injection

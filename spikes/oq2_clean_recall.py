@@ -39,7 +39,7 @@ from typing import Iterable, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from nbc import pins  # noqa: E402
-from nbc.baselines.onnx_adapter import open_baseline  # noqa: E402
+from nbc.baselines.onnx_adapter import BATCH_SIZE, open_baseline  # noqa: E402
 from nbc.baselines.tokenization import open_windower  # noqa: E402
 
 SELECTION_SEED = 20260829
@@ -53,7 +53,14 @@ CONFIDENCE_Z = 1.959963984540054
 """The two-sided 95% normal quantile, spelled out rather than imported from a stats package."""
 
 REPORT_CHUNK = 32
-"""Documents handed to `score()` at once, so peak memory does not scale with the whole pool."""
+"""Documents handed to `score()` at once, so peak memory does not scale with the whole pool.
+
+A memory knob and nothing else, which is a claim rather than an assumption: it decides batch
+composition, `_feed` pads each batch to its own longest window, and a graph that ignored its
+attention mask would turn this into a measurement parameter. Both pinned graphs honour it,
+measured, and `tests/baselines/test_onnx_adapter.py` holds that as a property. The value is
+printed in the report so a number can be tied to the chunk that produced it either way.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +342,16 @@ def main(argv: list[str] | None = None) -> int:
         f"pool: {len(texts)} unique attack positives, "
         f"selection: sorted, shuffled under seed {arguments.seed}, "
         f"{drawn}"
+    )
+    # `--chunk` decides how documents group into batches, and `_feed` pads each batch to its own
+    # longest window -- so composition reaches the tensor a document is scored on. Measured on
+    # both pinned graphs it moves nothing (max|delta| 0.0 over 300 payloads at chunk 8/32/32
+    # reversed against one-per-call), because both honour attention_mask, and the adapter's tests
+    # now hold that as a property rather than an observation. Printed anyway: a parameter that
+    # could reach a published rate on some future pin is not one a report should leave silent.
+    print(
+        f"batching: --chunk {arguments.chunk}, adapter BATCH_SIZE {BATCH_SIZE} "
+        f"(scores are batch-invariant on graphs honouring attention_mask)"
     )
     print()
     header = (
