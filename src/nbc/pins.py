@@ -392,6 +392,17 @@ class RemoteArtifact:
         prefix = _KIND_CACHE_PREFIX[self.kind]
         return f"{prefix}--" + self.repository.replace("/", "--")
 
+    def snapshot_dir(self, cache_root: Path | None = None) -> Path:
+        """Where this machine holds the pinned revision's files, if it holds them at all.
+
+        The hub names a snapshot directory by the commit it was fetched at, so this path is
+        both the resolution of the pin and the root every pinned artifact path hangs off. It
+        lives here, once, because a second module spelling out `snapshots/<revision>/` is a
+        second place the hub's layout can drift away from ours.
+        """
+        root = cache_root if cache_root is not None else hf_cache_root()
+        return root / self.cache_directory / "snapshots" / self.revision
+
     @property
     def api_url(self) -> str:
         endpoint = _KIND_ENDPOINT[self.kind]
@@ -1150,9 +1161,7 @@ def resolve_from_cache(
     existence *is* the resolution. This is what keeps a reproduction run offline after its first
     fetch.
     """
-    root = cache_root if cache_root is not None else hf_cache_root()
-    snapshot = root / artifact.cache_directory / "snapshots" / artifact.revision
-    return artifact.revision if snapshot.is_dir() else None
+    return artifact.revision if artifact.snapshot_dir(cache_root).is_dir() else None
 
 
 def resolve_over_http(artifact: RemoteArtifact) -> str | None:
