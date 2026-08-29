@@ -31,10 +31,16 @@ from nbc.corpus.exclusion import (
 )
 from nbc.errors import NbcError, declared_exit_codes
 from nbc.pins import (
+    BENIGN_CODE_ELIGIBILITY_DECODE_CANDIDATE,
+    DRAW_SEEDED_RANDOM,
     EXCLUSION_AVAILABLE,
     EXCLUSION_UNREACHABLE,
     EXCLUSION_UNREADABLE,
     HTTP_OK,
+    BenignChatFrame,
+    BenignCodeFrame,
+    BenignFrame,
+    ConfirmatoryCell,
     ExclusionSource,
     Pins,
     load_pins,
@@ -93,7 +99,41 @@ def _pins(sources: tuple[ExclusionSource, ...], *, required: tuple[str, ...] = (
         baselines=(),
         attack_datasets=(),
         exclusion_sources=sources,
+        benign_frame=_frame(),
         path=None,  # type: ignore[arg-type]
+    )
+
+
+def _frame() -> BenignFrame:
+    """A structurally valid frame. Nothing in this file reads it; `Pins` requires one.
+
+    `declaration_digest` covers the exclusion declaration and nothing else, and the tests below
+    assert exactly that -- so this fixture exists to satisfy the record's shape and is deliberately
+    not varied by any of them.
+    """
+    return BenignFrame(
+        declared_on="2026-08-29",
+        sample_size_items=4,
+        method=DRAW_SEEDED_RANDOM,
+        seed=11,
+        sort_key=None,
+        frame_id="0" * 64,
+        b_code=BenignCodeFrame(
+            min_repositories=1,
+            max_files_per_repository=1,
+            eligibility=BENIGN_CODE_ELIGIBILITY_DECODE_CANDIDATE,
+            min_file_bytes=1,
+            max_file_bytes=2,
+            file_extensions=(".py",),
+            repositories=(),
+        ),
+        b_chat=BenignChatFrame(hand_authored_items=0),
+        confirmatory_cell=ConfirmatoryCell(
+            declared_on="2026-08-29",
+            baseline="fixture",
+            dressing_chain="clean",
+            benign_class="b_code",
+        ),
     )
 
 

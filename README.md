@@ -34,6 +34,53 @@ a 95% interval, and the false-positive rate is reported **per benign class**, ne
 | baseline classifier | | | |
 | baseline + canonicalization | | | |
 
+### The benign corpus, and the frame it is drawn under
+
+A false-positive rate can always be made to look reasonable by growing the corpus until it does. No
+paragraph refutes that, so the sampling frame is declared in `pins.toml` under `[benign_frame]`,
+hashed into a `frame_id`, and fixed before anything is measured. `python -m nbc.pins` recomputes the
+digest on every read and refuses the file when it does not match the block, and the corpus, when it is
+built, carries the same id in `data/manifest.json` — so a frame edited after the corpus was drawn
+stops the run rather than publishing a table over a sample from a frame nobody declared. One level up,
+`build_id` covers the whole build declaration — the attack draw, the benign frame, both dressing
+registries, the confirmatory cell and the exclusion set — because a `frame_id` guarding only the
+benign half would let an edit to the attack sample size publish a table computed over the previous
+corpus with every check still green.
+
+**500 items per class, exactly.** Not "at least": when a class cannot be filled the build fails and
+names the shortfall, instead of topping up from another source. A frame that quietly substitutes
+sources is not a frame, and re-declaring one is a decision a person takes deliberately.
+
+**B-code** is real public source files, each pinned by repository, commit sha and path, drawn from at
+least 50 repositories with at most 10 files from any one. That is not fastidiousness: files from one
+repository share a language, a style and a base64 idiom, so 500 files drawn 50 at a time from 10
+repositories would carry a design effect putting the effective n near 150 and widening every B-code
+interval by roughly a factor of two, while the reported n stayed 500. The realized repository count
+and the per-repository counts are recorded in `data/manifest.json`, so what actually happened is
+readable rather than promised. The repositories were selected under three criteria: **permissively
+licensed** (recorded per repository, and a build abort once story 3.8 lands), **containing code that
+legitimately embeds base64 or hex**, and **not security or guardrail repositories**. The first is
+checked; the third is a human reading applied when the list was pinned, and the only part of it this
+repository can enforce is that no B-code repository is also a pinned baseline, attack pool or
+exclusion source — which `nbc.pins` refuses.
+
+The second criterion is enforced per file, by the layer itself: a file is eligible only if the
+canonicalization layer's decode stage examines a run in it. **What that costs is stated rather than
+hidden.** B-code is therefore not a uniform sample of public source code and its false-positive rate
+must not be read as one; it is a sample of the files the layer will actually try to decode, which is
+the only population where a decoding false positive can happen at all. On a file the layer leaves
+untouched both routes score identical text and the delta is zero by construction. The bias runs
+against this project's own thesis, which is the direction to err in.
+
+**B-chat** is the benign-labelled rows of the pinned dataset **that survive the training-overlap
+filter**, drawn by a declared deterministic rule. Hand-authored material is restricted to what no
+public dataset carries — messages legitimately containing a JWT, a content hash, a data URI or an SSH
+public key — it lives in `src/nbc/corpus/sources/`, its size is declared in the frame and compared
+against what that directory holds, and every item is verified against the kind it declares rather
+than trusted: a JWT header is decoded and required to carry an `alg`, an SSH key's base64 blob must
+name its own algorithm in its first length-prefixed field, a data URI must decode under strict
+base64, and a content hash is recomputed from the bytes the message says it is the digest of.
+
 ## Reproducing this
 
 The published run is one command, and it does not exist yet: the entrypoint that performs the whole
@@ -47,7 +94,16 @@ uv sync --frozen --extra build --group dev
 uv run python -m nbc.platform    # the platform floor, checked before anything else
 uv run python -m nbc.pins --verify   # every pinned artifact, resolved and checked
 uv run pytest                    # the offline unit suite, no network, no model download
+uv run python -m nbc.corpus.build build-corpus   # draws data/*.jsonl and data/manifest.json
+uv run python -m nbc.corpus.build verify-corpus  # the guarded read; touches no network
 ```
+
+`build-corpus` reaches the network and is the only way to produce a corpus anything can measure over:
+it writes `data/manifest.json`, and `verify-corpus` — the same guarded read every consumer goes
+through — refuses without one. **It does not currently succeed**, and the reason is a checked fact
+rather than a defect in it: the pinned attack pool carries two texts under both labels, so the build
+stops with the gold-label abort. Resolving that is a decision about two rows in somebody else's
+dataset, and the build stopping is what keeps it from being made silently.
 
 `uv` is pinned to an exact version by `pyproject.toml` and refuses to run under any other, so the
 environment a table came from is the environment you get. The models and the corpus are pinned by
@@ -103,7 +159,9 @@ separately from inference time. No figure for it is claimed here — that is wha
 
 - [ ] attack corpus from pinned public datasets, in five dressings: clean, base64, hex, homoglyph, zero-width
 - [ ] benign corpus, two classes reported separately: real pinned public source files, and conversational
-      text carrying legitimate encoded content
+      text carrying legitimate encoded content — the frame is declared, hashed and enforced, and the
+      builder is written; no corpus is committed yet, because the build stops on the pinned pool's
+      gold-label contradiction
 - [ ] canonicalization layer with a declared recursion ceiling
 - [ ] measurement harness and results table, every rate with its n and interval
 - [x] "what this does not show" — the eleven caveats that do not depend on the result, written

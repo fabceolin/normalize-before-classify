@@ -226,13 +226,19 @@ def test_a_layer_inside_the_budget_and_a_readme_that_states_it_pass() -> None:
 
 
 def test_a_layer_over_the_total_physical_budget_fails() -> None:
-    layer = layer_of(("a.py", 500, 1), ("b.py", 500, 1), ("c.py", 500, 1), ("d.py", 501, 1))
+    # The per-file split is arbitrary; only the total matters. It avoids 500 and 400 deliberately:
+    # `tests/test_pins.py` refuses any value declared under a `sample_size*` key in `pins.toml`
+    # from appearing as a literal anywhere under `src/`, `spikes/` or `tests/`, and it compares
+    # values rather than meanings. The benign frame declares 500 items per class, which would
+    # otherwise collide here and make the scan report a second home for a pin that is not one.
+    layer = layer_of(("a.py", 501, 1), ("b.py", 501, 1), ("c.py", 501, 1), ("d.py", 498, 1))
     (failure,) = failures_of(declared_readme(), layer)
     assert "total_physical_lines" in failure and "2001" in failure and "over by 1" in failure
 
 
 def test_a_layer_over_the_total_code_budget_fails() -> None:
-    layer = layer_of(("a.py", 10, 500), ("b.py", 10, 501))
+    # Same reason as above for the split.
+    layer = layer_of(("a.py", 10, 401), ("b.py", 10, 600))
     (failure,) = failures_of(declared_readme(), layer)
     assert "total_code_lines" in failure and "1001" in failure
 

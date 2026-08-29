@@ -18,15 +18,11 @@ from pathlib import Path
 import pytest
 
 from nbc.corpus.attack import (
-    ID_SEPARATOR,
-    PAYLOAD_ID_HEX,
     AttackDrawUnsatisfiable,
     LabelContradiction,
     PoolRow,
     contradictions,
     draw_attack_items,
-    item_id,
-    payload_id,
     render_attack_item,
     select_payloads,
     serialize,
@@ -34,7 +30,16 @@ from nbc.corpus.attack import (
 )
 from nbc.corpus.build import ATTACK_CORPUS_FILENAME, CorpusWriteRefused, write_corpus
 from nbc.corpus.dressings import dress, dress_declared
-from nbc.corpus.matrix import CHAINS, HELDOUT_CHAINS, CLEAN_CHAIN_NAME
+from nbc.corpus.matrix import (
+    CHAINS,
+    CLEAN_CHAIN_NAME,
+    HELDOUT_CHAINS,
+    ID_SEPARATOR,
+    PAYLOAD_ID_HEX,
+    id_collisions,
+    item_id,
+    payload_id,
+)
 from nbc.corpus.exclusion import ExclusionIndex, build_index, normalize
 from nbc.errors import exit_code_for
 from nbc.corpus.roundtrip import min_payload_bytes
@@ -560,8 +565,6 @@ def test_two_payloads_under_one_id_are_reported() -> None:
     Two payloads under one id would merge into one corpus row, drop the count by one, and every
     rate computed afterwards would be over a pool the report does not describe.
     """
-    from nbc.corpus.attack import id_collisions
-
     assert id_collisions([("x::clean", "a"), ("y::clean", "b")]) == ()
     (problem,) = id_collisions([("x::clean", "a"), ("x::clean", "b")])
     assert "x::clean" in problem and "'a'" in problem and "'b'" in problem

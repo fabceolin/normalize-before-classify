@@ -501,18 +501,40 @@ def test_no_stage_module_mentions_the_ceiling_at_all() -> None:
         assert "ceiling" not in bound
 
 
+CONTEXT_BUILDERS: dict[str, str] = {
+    "nbc/corpus/benign.py": (
+        "story 3.6's B-code file-eligibility rule asks the layer whether it would examine a decode "
+        "candidate in a file. That is a BUILD-TIME selection question, not a measurement pass: it "
+        "runs once per candidate file while the corpus is drawn, and the context it needs is the "
+        "layer as shipped, which is what `default_context` is. Building it there is also the only "
+        "way to build it ONCE -- `default_context` reads and validates the vendored table on every "
+        "call by design, and the alternative was a call per file"
+    ),
+}
+"""Every module under `src/` that may build its own `CanonContext`, each with its reason.
+
+An exact set rather than a widened rule, so `harness/measure.py` and `harness/timing.py` acquiring
+one still fails here and names the file -- which is the whole point of the check below.
+"""
+
+
 def test_only_the_pipeline_constructs_a_context() -> None:
     """The tripwire for "a context the entrypoint constructs once".
 
     `harness/measure.py` and `harness/timing.py` do not exist yet — they are Epic 4's — so the
     literal assertion that both passes received the *same* context cannot be written here without
     describing behaviour nobody wrote. What can be written is the rule that makes it true when they
-    arrive: nothing in `src/` builds its own `CanonContext`, so a second pass has no way to invent a
-    second ceiling. The day either module calls `CanonContext(...)` or `default_context(...)`, this
-    fails and names the file.
+    arrive: nothing on the measurement path builds its own `CanonContext`, so a second pass has no
+    way to invent a second ceiling. The day either module calls `CanonContext(...)` or
+    `default_context(...)`, this fails and names the file.
+
+    The allow-list is `CONTEXT_BUILDERS` and it is an exact set, not a prefix or a pattern: the one
+    entry in it is the corpus build, whose question is which files to draw rather than what to
+    score, and every other module in the tree -- the harness above all -- is still refused.
     """
     assert construction_sites(SRC, "CanonContext") == ["nbc/canon/pipeline.py"]
-    assert construction_sites(SRC, "default_context") == []
+    assert construction_sites(SRC, "default_context") == sorted(CONTEXT_BUILDERS)
+    assert not [site for site in CONTEXT_BUILDERS if site.startswith("nbc/harness/")]
 
 
 def test_the_construction_site_scan_reports_a_module_that_builds_its_own(tmp_path: Path) -> None:

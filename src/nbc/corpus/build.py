@@ -29,11 +29,29 @@ visible. What replaces the column declaration as a check is `texts_loaded > 0` p
     python -m nbc.corpus.build exclusion-report   # probe and load every exclusion source
     python -m nbc.corpus.build build-attack       # draw and write data/attack.jsonl
     python -m nbc.corpus.build rebuild-attack     # the same, over a corpus that already exists
+    python -m nbc.corpus.build build-corpus       # both halves and data/manifest.json
+    python -m nbc.corpus.build rebuild-corpus     # the same, over a corpus that already exists
+    python -m nbc.corpus.build verify-corpus      # the guarded read, over what is on disk
 
 Rebuilding an existing corpus is an **explicit subcommand and never a side effect**: `build-attack`
 aborts with `CorpusWriteRefused` rather than overwriting, so no run can replace the corpus a table
-was computed over while looking like it did something else. Every subcommand touches the network,
-so none of them is part of the offline unit suite.
+was computed over while looking like it did something else.
+
+`build-corpus` is the one that produces a **measurable** corpus, and `build-attack` deliberately
+does not: only `build-corpus` writes `data/manifest.json`, and `manifest.read_corpus` -- the only
+door into `data/*.jsonl` -- refuses without one. An attack half on disk with no manifest is
+therefore inert rather than half-usable, which is the outcome FR5.1 asks for one level up.
+`build-attack` survives because it is the cheap path that proves the gold-label abort fires against
+the live pool, and CI runs it for exactly that.
+
+Every subcommand except `verify-corpus` touches the network, so none of those is part of the
+offline unit suite.
+
+**Where B-code comes from, and why not the REST API.** Each pinned repository is read once, as the
+gzipped tar of its tree at the pinned sha, streamed rather than downloaded whole. Listing a tree
+through GitHub's REST API costs one request against an unauthenticated budget of sixty an hour and
+the frame pins more repositories than that; `codeload` carries no such budget. Nothing here reads a
+token from the environment, so the build has the same access a stranger has.
 
 **This module is the only writer of `data/*.jsonl`** (AD-1). An AST scan over `src/` and `spikes/`
 in `tests/corpus/test_build.py` holds that: it collects every write primitive in the tree and
@@ -46,14 +64,37 @@ from __future__ import annotations
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final, Iterable, Iterator
+from typing import Final, Iterable, Iterator, Sequence
 
 from nbc.corpus.attack import (
     AttackDrawReport,
     AttackDrawUnsatisfiable,
+    LabelContradiction,
     PoolRow,
     draw_attack_items,
     serialize,
+)
+from nbc.corpus.benign import (
+    CodeFile,
+    SourceFile,
+    default_eligibility_context,
+    draw_benign_items,
+    select_repository_files,
+)
+from nbc.corpus.manifest import (
+    ATTACK_CORPUS_FILENAME,
+    BENIGN_CORPUS_FILENAME,
+    DATA_DIRNAME,
+    MANIFEST_FILENAME,
+    MANIFEST_SCHEMA_VERSION,
+    CorpusManifestMismatch,
+    Manifest,
+    build_id,
+    confirmatory_cell_problems,
+    corpus_directory,
+    files_for,
+    read_corpus,
+    render as render_manifest,
 )
 from nbc.corpus.exclusion import (
     NO_ANSWER,
@@ -64,6 +105,7 @@ from nbc.corpus.exclusion import (
     PlannedSource,
     build_index,
     declaration_digest,
+    filter_rows,
     normalized_texts,
     outcomes_of,
     plan,
@@ -71,21 +113,37 @@ from nbc.corpus.exclusion import (
 )
 from nbc.errors import NbcError, exit_code_for
 from nbc.schema import CorpusItem
-from nbc.pins import HTTP_OK, AttackDataset as AttackDatasetPin, ExclusionSource, Pins, load_pins
+from nbc.pins import (
+    HTTP_OK,
+    AttackDataset as AttackDatasetPin,
+    BenignCodeRepository,
+    ExclusionSource,
+    Pins,
+    load_pins,
+)
 
 __all__ = [
+    "ARCHIVE_MEMBER_LIMIT",
+    "ARCHIVE_TIMEOUT_SECONDS",
     "ATTACK_CORPUS_FILENAME",
+    "BENIGN_CORPUS_FILENAME",
     "CorpusWriteRefused",
     "DATA_DIRNAME",
     "HTTP_TIMEOUT_SECONDS",
+    "RepositoryUnreadable",
     "build_attack_corpus",
+    "build_corpus",
     "corpus_directory",
     "iter_exclusion_texts",
     "main",
     "observe_exclusion_sources",
     "probe",
     "read_attack_pool",
+    "read_benign_code",
+    "read_benign_rows",
     "read_exclusion_index",
+    "read_repository_files",
+    "selection_overlap",
     "write_corpus",
 ]
 
@@ -97,22 +155,6 @@ class CorpusWriteRefused(NbcError, exit_code=18):
     tell "you meant `rebuild-attack`" apart from "the data is contradictory".
     """
 
-
-ATTACK_CORPUS_FILENAME: Final[str] = "attack.jsonl"
-"""The attack corpus' filename under `data/`. Named once, here."""
-
-DATA_DIRNAME: Final[str] = "data"
-"""Where the committed corpus lives, relative to the repository root. Named once, here."""
-
-
-def corpus_directory(root: str | None = None) -> Path:
-    """The directory `data/*.jsonl` is written to.
-
-    Takes a root so a test can build into `tmp_path`: CI refuses a dirty tree, and a builder that
-    could only ever write into the checkout would make every end-to-end test of it a violation.
-    """
-    base = Path(root) if root is not None else Path(__file__).resolve().parents[3]
-    return base / DATA_DIRNAME
 
 HTTP_TIMEOUT_SECONDS: Final[float] = 30.0
 """How long one hub probe may take. A timeout is `NO_ANSWER`, which fails the declared status.
@@ -386,6 +428,298 @@ def build_attack_corpus(
 
 
 
+ARCHIVE_TIMEOUT_SECONDS: Final[float] = 300.0
+"""How long one repository archive may take. Longer than a hub probe, because it is a whole tree."""
+
+ARCHIVE_MEMBER_LIMIT: Final[int] = 200_000
+"""How many entries one pinned archive may hold before the build refuses to keep reading.
+
+A pin at a sha is this build's trust boundary for a git repository -- there is no second party to
+verify the bytes against -- so the guard that matters is the one that keeps a pathological archive
+from being read forever rather than one that tries to judge its contents. It is a **loud abort
+naming the repository**, never a silent truncation: a repository read halfway would contribute a
+different candidate set from the one its sha describes, and nothing downstream could tell.
+
+The other half of the guard is the frame's own size band: no member above `max_file_bytes` is ever
+read, so the bytes this build holds are bounded by that number times the members it accepts.
+"""
+
+
+class RepositoryUnreadable(NbcError, exit_code=23):
+    """A pinned benign-code repository could not be read at its pinned sha.
+
+    Code 23 because 3 through 22 are taken. An abort rather than a skip, and the reason is FR5.1's:
+    a repository silently contributing zero is a frame quietly drawing from fewer sources than it
+    declares, and the floor on realized repositories would then be met by whatever happened to be
+    reachable that afternoon. A 404 here usually means the sha moved or the repository was renamed,
+    which is a pin that has stopped describing the world -- exactly what `--verify` catches for the
+    Hugging Face artifacts and what nothing else could catch for these.
+    """
+
+
+def read_repository_files(
+    repository: BenignCodeRepository,
+    minimum_bytes: int,
+    maximum_bytes: int,
+    timeout: float = ARCHIVE_TIMEOUT_SECONDS,
+) -> Iterator[SourceFile]:
+    """Every file in one pinned repository, at its pinned sha, inside the frame's size band.
+
+    **Streamed, never buffered.** `tarfile` in `r|gz` mode reads forward through the response, so a
+    repository is never held whole in memory or on disk. Nothing is extracted: members are read out
+    of the stream and decoded, so no path from the archive ever reaches the filesystem and the
+    directory-traversal question does not arise.
+
+    The size band applied here is the **frame's own**, passed in rather than read from a constant of
+    this module, and it is a read guard rather than a second rule: `benign.eligible` remains the
+    authority and re-checks it. Skipping a member the frame could never accept is what keeps the
+    build from decoding a repository's vendored bundles to throw them away.
+
+    A member whose bytes are not UTF-8 is skipped. `UnicodeDecodeError` is a `ValueError`, and the
+    narrow name alone would let the sibling escape.
+    """
+    import tarfile
+    import urllib.error
+    import urllib.request
+
+    try:
+        response = urllib.request.urlopen(repository.archive_url, timeout=timeout)
+    except urllib.error.HTTPError as answered:
+        raise RepositoryUnreadable(
+            f"{repository.repository} at {repository.revision} answered HTTP {answered.code}; the "
+            f"pin names a commit this host no longer serves, so the frame is drawing from a "
+            f"repository nobody can reproduce"
+        ) from None
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as refusal:
+        raise RepositoryUnreadable(
+            f"{repository.repository} at {repository.revision} could not be fetched: "
+            f"{type(refusal).__name__}: {refusal}"
+        ) from None
+
+    seen = 0
+    with response:
+        try:
+            with tarfile.open(fileobj=response, mode="r|gz") as archive:
+                for member in archive:
+                    seen += 1
+                    if seen > ARCHIVE_MEMBER_LIMIT:
+                        raise RepositoryUnreadable(
+                            f"{repository.repository} at {repository.revision} holds more than "
+                            f"{ARCHIVE_MEMBER_LIMIT} entries; the build stops rather than reading "
+                            f"part of a repository and reporting it as the whole"
+                        )
+                    if not member.isfile():
+                        continue
+                    if not minimum_bytes <= member.size <= maximum_bytes:
+                        continue
+                    # `codeload` wraps the tree in one top-level directory named for the sha.
+                    # Dropping exactly one component is what turns the archive's path into the
+                    # repository path a reader can open on the web.
+                    _root, _slash, path = member.name.partition("/")
+                    if not path:
+                        continue
+                    handle = archive.extractfile(member)
+                    if handle is None:
+                        continue
+                    try:
+                        text = handle.read().decode("utf-8")
+                    except ValueError:
+                        continue
+                    yield SourceFile(path=path, text=text)
+        except tarfile.TarError as broken:
+            raise RepositoryUnreadable(
+                f"{repository.repository} at {repository.revision} is not a readable archive: "
+                f"{type(broken).__name__}: {broken}"
+            ) from None
+
+
+def read_benign_code(pins: Pins) -> dict[str, tuple[CodeFile, ...]]:
+    """Every pinned repository's contribution to B-code, capped by the frame, keyed by pin key.
+
+    The layer context is built **once**, here, and handed down: `default_context()` reads and
+    validates the vendored confusables table on every call by design, and the eligibility rule runs
+    over every candidate file in sixty-three repositories.
+
+    A repository that yields no eligible file is present in the result with an empty tuple rather
+    than absent, so the difference between "read and contributed nothing" and "never read" survives
+    into the report.
+    """
+    frame = pins.benign_frame
+    ctx = default_eligibility_context()
+    contributions: dict[str, tuple[CodeFile, ...]] = {}
+    for repository in frame.b_code.repositories:
+        files = read_repository_files(
+            repository, frame.b_code.min_file_bytes, frame.b_code.max_file_bytes
+        )
+        contributions[repository.key] = select_repository_files(repository, files, frame, ctx)
+        print(
+            f"{repository.repository}: {len(contributions[repository.key])} eligible files",
+            file=sys.stderr,
+        )
+    return contributions
+
+
+def read_benign_rows(
+    dataset: AttackDatasetPin, rows: Sequence[PoolRow]
+) -> tuple[str, ...]:
+    """The pinned dataset's benign texts: every row not carrying the declared attack label.
+
+    Derived from `attack_label` rather than from a second declared value, because a benign label
+    declared separately could disagree with the attack one and the disagreement would be invisible:
+    a third label value would then be drawn into neither half and silently leave the corpus.
+    """
+    return tuple(
+        sorted({row.text for row in rows if row.label != dataset.attack_label and row.text})
+    )
+
+
+def selection_overlap(
+    dataset: AttackDatasetPin, rows: Sequence[PoolRow], benign_texts: Sequence[str]
+) -> tuple[str, ...]:
+    """One message if the two halves of the corpus were selected from overlapping text. Empty if not.
+
+    A **different computation** from the contradiction gate `draw_attack_items` already ran: that
+    one asks whether the *pool* carries one text under two labels, this one asks whether the two
+    *selections* overlap. The failing input is a `read_benign_rows` that selected on the attack
+    label instead of against it, which would put every attack payload into the benign corpus under a
+    benign gold label and would not trip a single other check in this repository.
+
+    A separate function so that input can be handed to it offline; the caller reaches it only after
+    a download.
+    """
+    positives = {row.text for row in rows if row.label == dataset.attack_label and row.text}
+    both = sorted(positives & set(benign_texts))
+    if not both:
+        return ()
+    return (
+        f"{len(both)} text(s) were selected into both halves of the corpus, starting with "
+        f"{both[0]!r}; the benign selection is the complement of the attack label, and an overlap "
+        f"means it is not",
+    )
+
+
+def build_corpus(
+    pins: Pins, *, root: str | None = None, rebuild: bool = False
+) -> tuple[Manifest, dict[str, object]]:
+    """Both halves of the corpus and the manifest that identifies them. Aborts before it writes.
+
+    The order is what makes an abort cheap where it can be:
+
+    1. the pool, the contradiction gate and the split gate -- seconds, no archive fetched;
+    2. the exclusion index -- the largest download, and the filter both halves depend on;
+    3. the attack draw, which fails if the declared size does not survive the filter;
+    4. the sixty-three archives, which is the longest step and the one worth not reaching if
+       anything above it was going to fail anyway;
+    5. the benign draw, then one write of three files.
+
+    **Three files, one manifest, one `build_id`.** A corpus is both halves or it is not a corpus:
+    writing one half against a declaration and the other against a later one is exactly what
+    `build_id` exists to make impossible, and building them in one call is what makes the id
+    describe both.
+    """
+    if len(pins.attack_datasets) != 1:
+        raise AttackDrawUnsatisfiable(
+            f"{len(pins.attack_datasets)} attack datasets are pinned and this build implements "
+            f"the draw for exactly one"
+        )
+    dataset = pins.attack_datasets[0]
+
+    # Before the first byte is fetched: the confirmatory cell has to name a cell this corpus will
+    # actually carry rows in, or the whole build produces a verdict computed over nothing.
+    cell_problems = confirmatory_cell_problems(pins)
+    if cell_problems:
+        raise CorpusManifestMismatch(*cell_problems)
+
+    rows, observed_splits = read_attack_pool(dataset)
+
+    read: dict[str, object] = {}
+
+    def index_of() -> ExclusionIndex:
+        index, planned, observations = read_exclusion_index(pins)
+        read["planned"] = planned
+        read["observations"] = observations
+        read["index"] = index
+        return index
+
+    attack_items, attack_report, matches = draw_attack_items(
+        rows, observed_splits, dataset, index_of
+    )
+    index: ExclusionIndex = read["index"]  # type: ignore[assignment]
+
+    benign_texts = read_benign_rows(dataset, rows)
+
+    overlap = selection_overlap(dataset, rows, benign_texts)
+    if overlap:
+        raise LabelContradiction(*overlap)
+    filtered = filter_rows(benign_texts, index, lambda text: text)
+
+    code_by_repository = read_benign_code(pins)
+
+    benign_items, benign_report = draw_benign_items(
+        frame=pins.benign_frame,
+        code_by_repository=code_by_repository,
+        chat_surviving=filtered.kept,
+        dataset=dataset,
+        chat_rows_in=len(benign_texts),
+        chat_rows_removed=len(filtered.removed),
+    )
+
+    exclusion_report = ExclusionReport(
+        normalization=NORMALIZATION,
+        declaration_digest=declaration_digest(pins),
+        rows_in=attack_report.unique_positives + len(benign_texts),
+        rows_removed=attack_report.removed_by_exclusion + len(filtered.removed),
+        outcomes=outcomes_of(read["planned"], read["observations"], matches),  # type: ignore[arg-type]
+    )
+
+    directory = corpus_directory(root)
+    payloads = (
+        (ATTACK_CORPUS_FILENAME, serialize(attack_items), len(attack_items)),
+        (BENIGN_CORPUS_FILENAME, serialize(benign_items), len(benign_items)),
+    )
+    for name in (*(entry[0] for entry in payloads), MANIFEST_FILENAME):
+        target = directory / name
+        if target.exists() and not rebuild:
+            raise CorpusWriteRefused(
+                f"{target} already exists and this is not a rebuild. Rebuilding an existing corpus "
+                f"is an explicit subcommand and never a side effect of anything else, because a "
+                f"corpus silently replaced mid-run publishes a table computed over two different "
+                f"corpora"
+            )
+
+    manifest = Manifest(
+        schema_version=MANIFEST_SCHEMA_VERSION,
+        frame_id=pins.benign_frame.frame_id,
+        build_id=build_id(pins),
+        files=files_for(
+            [(name, text.encode("utf-8"), rows) for name, text, rows in payloads]
+        ),
+        reports={
+            **attack_report.as_run_fields(),
+            **benign_report.as_run_fields(),
+            **exclusion_report.as_run_fields(),
+        },
+    )
+
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, text, _rows in payloads:
+        (directory / name).write_text(text, encoding="utf-8", newline="\n")
+    (directory / MANIFEST_FILENAME).write_text(
+        render_manifest(manifest), encoding="utf-8", newline="\n"
+    )
+
+    return manifest, {
+        **attack_report.as_run_fields(),
+        **benign_report.as_run_fields(),
+        **exclusion_report.as_run_fields(),
+        "written": {
+            "directory": str(directory),
+            "files": [entry.as_json_object() for entry in manifest.files],
+            "manifest": MANIFEST_FILENAME,
+        },
+    }
+
+
 def write_corpus(path: Path, items: Iterable[CorpusItem], *, rebuild: bool = False) -> int:
     """Write the corpus, refusing to overwrite unless this was the explicit rebuild. Returns bytes.
 
@@ -455,6 +789,25 @@ def main(argv: list[str] | None = None) -> int:
             "replaced as a side effect publishes a table computed over two different corpora"
         ),
     )
+    subcommands.add_parser(
+        "build-corpus",
+        help=(
+            f"draw both halves and write data/{ATTACK_CORPUS_FILENAME}, "
+            f"data/{BENIGN_CORPUS_FILENAME} and data/{MANIFEST_FILENAME}; refuses to overwrite"
+        ),
+    )
+    subcommands.add_parser(
+        "rebuild-corpus",
+        help="the same build, over a corpus that already exists",
+    )
+    subcommands.add_parser(
+        "verify-corpus",
+        help=(
+            "read the committed corpus through the one guarded door: refuses when the recorded "
+            "frame_id or build_id is not the one this declaration computes, or when a corpus "
+            "file's bytes no longer hash to what the manifest records. Touches no network"
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -468,6 +821,20 @@ def main(argv: list[str] | None = None) -> int:
                 rows_removed=0,
                 outcomes=outcomes_of(planned, observations, {}),
             ).as_run_fields()
+        elif args.subcommand == "verify-corpus":
+            manifest, items = read_corpus(pins, args.root)
+            report = {
+                "verified_corpus": {
+                    "frame_id": manifest.frame_id,
+                    "build_id": manifest.build_id,
+                    "files": [entry.as_json_object() for entry in manifest.files],
+                    "items_read": len(items),
+                }
+            }
+        elif args.subcommand in ("build-corpus", "rebuild-corpus"):
+            _manifest, report = build_corpus(
+                pins, root=args.root, rebuild=args.subcommand == "rebuild-corpus"
+            )
         else:
             draw_report, exclusion_report, path, written = build_attack_corpus(
                 pins, root=args.root, rebuild=args.subcommand == "rebuild-attack"

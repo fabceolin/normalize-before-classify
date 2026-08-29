@@ -536,3 +536,852 @@ checked_on = "2026-08-29"
 # resolves. Recorded because a reader comparing this file against the hub's page will see a
 # different name and needs to know it is the same artifact, not a mis-pin.
 evidence = "hub API answered 200 with this sha, unauthenticated; canonical id is fka/prompts.chat"
+
+# --- the benign frame ---------------------------------------------------------------------------
+#
+# FR5.1's sampling frame: declared, hashed and frozen BEFORE anything is measured, because the
+# objection this block exists to answer -- that the benign corpus was grown until the number looked
+# reasonable -- is not answerable by a promise.
+#
+# `frame_id` is the SHA-256 of this whole block with `frame_id` itself removed, recomputed by
+# `load_pins` on every read and refused on mismatch. Editing any field here without re-declaring the
+# digest stops the run; editing it *with* a new digest is a visible diff against a corpus whose
+# `data/manifest.json` still records the old one. `build_id`, computed in `corpus/manifest.py`,
+# covers this block together with the attack draw, `CHAINS`, `HELDOUT_CHAINS` and the confirmatory
+# cell, so an edit to the attack sample size cannot publish a table computed over the previous
+# corpus with every check here still green.
+#
+# **500 per class, exactly, never "at least".** A class whose surviving material cannot fill it
+# fails the build rather than topping up from another source: a frame that quietly substitutes
+# sources is not a frame. That rule is enforced where the realized count exists, in
+# `corpus/benign.py`, in both directions.
+
+[benign_frame]
+declared_on = "2026-08-29"
+
+# Items per benign class. The two classes are reported separately and never pooled (FR3.1), so this
+# is the n behind every B-code and every B-chat interval in the table.
+#
+# Why 500 rather than the attack draw's 1200: the attack pool is one dataset and a larger draw costs
+# nothing but inference time, while each benign item is a fetched file or a filtered row and both
+# classes must reach the number or the build stops. At p near 0.05 a Wilson half-width at n=500 is
+# about 2 points, which is the resolution the false-positive half of the table needs to say
+# something. Fixed here before anything was measured and hashed into `frame_id`.
+sample_size_items = 500
+
+# The same closed vocabulary as `[attack_dataset.draw]`, read by the same function
+# (`pins._read_selection_method`), so "the same selection-method vocabulary as the attack draw" is
+# a shared implementation rather than two declarations that happen to agree today. `head` needs a
+# `sort_key` and refuses `seed`; `seeded_random` needs a `seed` and refuses `sort_key`.
+method = "seeded_random"
+
+# Deliberately not the attack draw's seed and not the OQ2 spike's. Three draws answering three
+# questions that share an integer would invite a reader to think one reproduces another.
+seed = 2718281
+
+# The digest of everything above and below, recomputed at load. See the block header.
+frame_id = "7703e504efbdf0907bdc2b39b8f3ed10d1bd05193ce898e91c137fd0243d4312"
+
+[benign_frame.b_chat]
+# The dataset is NOT named here: B-chat is drawn from the benign-labelled rows of the pinned attack
+# dataset, whose identity `[[attack_dataset]]` already carries. A second copy of that repository id
+# is a second place it can drift from, which is what this file's own header refuses.
+#
+# The rows are taken AFTER the training-overlap filter of FR3.3, never before. The measured reach of
+# `VMware/open-instruct` alone is 3424 of 7066 unique benign rows -- 48% -- and three more declared
+# seeds are unmeasured. If what survives cannot fill the class, the build fails and says by how
+# much; it does not reach for another dataset.
+#
+# The hand-authored allowance, and its limit. FR5.1 restricts hand-authored material to what no
+# public dataset carries: messages legitimately containing a JWT, a content hash, a data URI or an
+# SSH public key. Those are exactly the legitimate encoded content a canonicalizer converts into
+# false positives, and no conversational dataset carries them. The count is declared here and
+# compared against what `src/nbc/corpus/sources/` actually holds, so an item added there without
+# widening the frame fails the build rather than quietly enlarging the share of the counter-metric
+# this repository wrote for itself. Five per kind, four kinds.
+hand_authored_items = 20
+
+[benign_frame.confirmatory_cell]
+# FR5.4's single cell, declared here -- in the epic that builds the corpus -- and hashed into
+# `build_id`, so it cannot have been chosen after the numbers existed. Emission and evaluation are
+# the measurement epic's, and story 3.9 adds the assertion that the chain must be held out or nested
+# past the recursion ceiling and never a bound one. This block is the declaration and the hash.
+declared_on = "2026-08-29"
+baseline = "protectai-deberta-v3"
+# Four base64 links: `matrix.encoding_depth` is 4 against a declared ceiling of 3, so this cell sits
+# past the ceiling rather than on a bound chain whose recovery is total by the story 3.4 contract.
+dressing_chain = "base64+base64+base64+base64"
+benign_class = "b_code"
+
+[benign_frame.b_code]
+# FR5.1's floor and cap, declared here and compared at load against `pins.MINIMUM_BENIGN_CODE_
+# REPOSITORIES` and `pins.MAXIMUM_FILES_PER_BENIGN_CODE_REPOSITORY`. The reason is a design effect:
+# files from one repository share a language, a style and a base64 idiom, so 500 files drawn 50 at a
+# time from 10 repositories would carry an effective n near 150 and widen every B-code interval by
+# roughly a factor of two while the reported n stayed 500. The REALIZED repository count and the
+# per-repository counts are the builder's output and are written into `data/manifest.json`.
+min_repositories = 50
+max_files_per_repository = 10
+
+# The file-eligibility rule, declared because it decides which files become corpus rows. The one
+# admissible value means: the canonicalization layer's decode stage examines at least one run in
+# this file. That is the sharpest available reading of the README's "code that legitimately embeds
+# base64 or hex" -- the population where a decoding false positive can happen at all -- and it is
+# measured against the layer rather than matched with a pattern of this file's own.
+#
+# What it costs, stated rather than hidden: B-code is therefore NOT a uniform sample of public
+# source code, and its false-positive rate must not be read as one. It is a sample of source files
+# the layer will actually try to decode.
+eligibility = "layer_decode_candidate"
+
+# The size band, in bytes of the undressed file. Both ends are substantive. Below the floor a file
+# carries too little text for a classifier to have an opinion about; above the ceiling AD-19's
+# max-over-windows policy turns length itself into false-positive probability, since a longer
+# document is simply more windows and the document takes the maximum. A band declared here keeps
+# that from being an uncontrolled variable of whichever files the draw happened to reach.
+#
+# The ceiling is 20000 because that is where the frame can be filled, measured rather than guessed.
+# Over the 63 repositories pinned below, at their pinned shas, the number of eligible files after
+# the 10-per-repository cap is:
+#
+#     band 200..4000    457 files over 61 repositories   -- SHORT of 500, the build would abort
+#     band 200..8000    517 files over 62 repositories   -- 3% headroom
+#     band 200..20000   573 files over 63 repositories   -- 15% headroom
+#
+# Measured on 2026-08-29 by streaming each archive and applying this frame's own eligibility rule.
+# A band that only just reaches 500 makes the build fail the first time one repository is
+# unreachable, which would be an abort about the network wearing the frame's clothes. The 15% is
+# what separates "the frame could not be filled" from "one fetch went wrong".
+min_file_bytes = 200
+max_file_bytes = 20000
+
+# Which paths are source files at all. Without this the draw reads lockfiles, minified bundles and
+# vendored blobs, which are neither written by a human nor representative of the traffic FR3.1 is
+# about. Matched against the path's own suffix, lowercased.
+file_extensions = [
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cs",
+    ".go",
+    ".h",
+    ".java",
+    ".js",
+    ".jsx",
+    ".py",
+    ".rb",
+    ".rs",
+    ".sh",
+    ".ts",
+    ".tsx",
+]
+
+# The repositories, pinned by repository and commit sha, each with the licence read from its own
+# licence file at that sha. Selected under the three criteria the README states: permissively
+# licensed, containing code that legitimately embeds base64 or hex, and NOT security or guardrail
+# repositories. The first is recorded here and becomes a build abort in story 3.8; the third is a
+# human reading, and the only part of it this file can enforce is that none of these is also a
+# pinned baseline, attack pool or exclusion source, which `load_pins` refuses.
+#
+# These are git repositories on GitHub, not Hugging Face artifacts, so they are deliberately absent
+# from `remote_artifacts()` and from `python -m nbc.pins --verify`: that resolver asks the Hugging
+# Face API about an id, and asking it about `psf/requests` would report a pin as unresolvable that
+# was never its to resolve. What verifies these is the build, which fetches the archive AT THIS SHA
+# and gets a 404 rather than a branch head if the sha has gone.
+#
+# More repositories are pinned than the floor requires. A repository that yields no eligible file
+# contributes nothing, and the floor is checked against the REALIZED count, so the headroom is what
+# keeps a single unreachable repository from being the difference between a corpus and an abort.
+
+[[benign_frame.b_code.repository]]
+key = "psf-requests"
+repository = "psf/requests"
+revision = "5460f467b02e49471c0fd6cfc9ca0adab6351f98"
+
+[benign_frame.b_code.repository.licence]
+identifier = "Apache-2.0"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "psf/requests, Apache-2.0, revision 5460f467b02e49471c0fd6cfc9ca0adab6351f98"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "pallets-flask"
+repository = "pallets/flask"
+revision = "d318b683471101618febed18996405ad26462110"
+
+[benign_frame.b_code.repository.licence]
+identifier = "BSD-3-Clause"
+source = "LICENSE.txt at the pinned revision, read 2026-08-29"
+attribution = "pallets/flask, BSD-3-Clause, revision d318b683471101618febed18996405ad26462110"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "pallets-click"
+repository = "pallets/click"
+revision = "36baa15ff831b939a22bc527cd76ce653ef6f66d"
+
+[benign_frame.b_code.repository.licence]
+identifier = "BSD-3-Clause"
+source = "LICENSE.txt at the pinned revision, read 2026-08-29"
+attribution = "pallets/click, BSD-3-Clause, revision 36baa15ff831b939a22bc527cd76ce653ef6f66d"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "pallets-jinja"
+repository = "pallets/jinja"
+revision = "5ef70112a1ff19c05324ff889dd30405b1002044"
+
+[benign_frame.b_code.repository.licence]
+identifier = "BSD-3-Clause"
+source = "LICENSE.txt at the pinned revision, read 2026-08-29"
+attribution = "pallets/jinja, BSD-3-Clause, revision 5ef70112a1ff19c05324ff889dd30405b1002044"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "pallets-werkzeug"
+repository = "pallets/werkzeug"
+revision = "0005c79e09bae5f4cc2bd8ccd468d7dafe24a455"
+
+[benign_frame.b_code.repository.licence]
+identifier = "BSD-3-Clause"
+source = "LICENSE.txt at the pinned revision, read 2026-08-29"
+attribution = "pallets/werkzeug, BSD-3-Clause, revision 0005c79e09bae5f4cc2bd8ccd468d7dafe24a455"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "pallets-itsdangerous"
+repository = "pallets/itsdangerous"
+revision = "672971d66a2ef9f85151e53283113f33d642dabd"
+
+[benign_frame.b_code.repository.licence]
+identifier = "BSD-3-Clause"
+source = "LICENSE.txt at the pinned revision, read 2026-08-29"
+attribution = "pallets/itsdangerous, BSD-3-Clause, revision 672971d66a2ef9f85151e53283113f33d642dabd"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "pallets-markupsafe"
+repository = "pallets/markupsafe"
+revision = "b2e4d9c7687be25695fffbe93a37622302b24fb1"
+
+[benign_frame.b_code.repository.licence]
+identifier = "BSD-3-Clause"
+source = "LICENSE.txt at the pinned revision, read 2026-08-29"
+attribution = "pallets/markupsafe, BSD-3-Clause, revision b2e4d9c7687be25695fffbe93a37622302b24fb1"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "urllib3-urllib3"
+repository = "urllib3/urllib3"
+revision = "85a8a9cfad3398bc504d088233d0a11af219a82a"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE.txt at the pinned revision, read 2026-08-29"
+attribution = "urllib3/urllib3, MIT, revision 85a8a9cfad3398bc504d088233d0a11af219a82a"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "encode-httpx"
+repository = "encode/httpx"
+revision = "b5addb64f0161ff6bfe94c124ef76f6a1fba5254"
+
+[benign_frame.b_code.repository.licence]
+identifier = "BSD-3-Clause"
+source = "LICENSE.md at the pinned revision, read 2026-08-29"
+attribution = "encode/httpx, BSD-3-Clause, revision b5addb64f0161ff6bfe94c124ef76f6a1fba5254"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "encode-httpcore"
+repository = "encode/httpcore"
+revision = "10a658221deb38a4c5b16db55ab554b0bf731707"
+
+[benign_frame.b_code.repository.licence]
+identifier = "BSD-3-Clause"
+source = "LICENSE.md at the pinned revision, read 2026-08-29"
+attribution = "encode/httpcore, BSD-3-Clause, revision 10a658221deb38a4c5b16db55ab554b0bf731707"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "encode-starlette"
+repository = "encode/starlette"
+revision = "d9ed5b0f98fdf081fb138473129b72eb035153a3"
+
+[benign_frame.b_code.repository.licence]
+identifier = "BSD-3-Clause"
+source = "LICENSE.md at the pinned revision, read 2026-08-29"
+attribution = "encode/starlette, BSD-3-Clause, revision d9ed5b0f98fdf081fb138473129b72eb035153a3"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "fastapi-fastapi"
+repository = "fastapi/fastapi"
+revision = "49033471594ea5d99a80abdf1043231b7791ee49"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "fastapi/fastapi, MIT, revision 49033471594ea5d99a80abdf1043231b7791ee49"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "pydantic-pydantic"
+repository = "pydantic/pydantic"
+revision = "f512b087202f58ec90a9d38c9102858567d72440"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "pydantic/pydantic, MIT, revision f512b087202f58ec90a9d38c9102858567d72440"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "fastapi-typer"
+repository = "fastapi/typer"
+revision = "99eb220df7c69a0f14a0b69214042677e0760b9d"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "fastapi/typer, MIT, revision 99eb220df7c69a0f14a0b69214042677e0760b9d"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "python-attrs-attrs"
+repository = "python-attrs/attrs"
+revision = "764bf92a1c96abe4615b59f3e5a7b738b0340a94"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "python-attrs/attrs, MIT, revision 764bf92a1c96abe4615b59f3e5a7b738b0340a94"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "psf-black"
+repository = "psf/black"
+revision = "8947c48ef2077c3a301b03c1e814dc2e3f78436e"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "psf/black, MIT, revision 8947c48ef2077c3a301b03c1e814dc2e3f78436e"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "pytest-dev-pytest"
+repository = "pytest-dev/pytest"
+revision = "fdba12e1708313f56e9cf713d260c029764ca2b7"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "pytest-dev/pytest, MIT, revision fdba12e1708313f56e9cf713d260c029764ca2b7"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "textualize-rich"
+repository = "Textualize/rich"
+revision = "9d8f9a372cc5916fd4781fec207ced7ddac2f08f"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "Textualize/rich, MIT, revision 9d8f9a372cc5916fd4781fec207ced7ddac2f08f"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "tornadoweb-tornado"
+repository = "tornadoweb/tornado"
+revision = "0096f2897c98facdcd9716009ee934a7381af5ef"
+
+[benign_frame.b_code.repository.licence]
+identifier = "Apache-2.0"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "tornadoweb/tornado, Apache-2.0, revision 0096f2897c98facdcd9716009ee934a7381af5ef"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "sqlalchemy-sqlalchemy"
+repository = "sqlalchemy/sqlalchemy"
+revision = "5961e52cdf19343586cb795b5126e06752c5dd2f"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "sqlalchemy/sqlalchemy, MIT, revision 5961e52cdf19343586cb795b5126e06752c5dd2f"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "python-poetry-poetry"
+repository = "python-poetry/poetry"
+revision = "e33ce99067f6a28537aebd23caabc2c49aae5ed8"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "python-poetry/poetry, MIT, revision e33ce99067f6a28537aebd23caabc2c49aae5ed8"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "pypa-pip"
+repository = "pypa/pip"
+revision = "a3dfd76dd76bca2ed07eed75ddeb6050cf215438"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE.txt at the pinned revision, read 2026-08-29"
+attribution = "pypa/pip, MIT, revision a3dfd76dd76bca2ed07eed75ddeb6050cf215438"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "pypa-setuptools"
+repository = "pypa/setuptools"
+revision = "7d531288b7c8708d4cc186213da93eaf5d11833d"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "pypa/setuptools, MIT, revision 7d531288b7c8708d4cc186213da93eaf5d11833d"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "python-mypy"
+repository = "python/mypy"
+revision = "6934a9d01cab6226a64b38642e124368f8ddc653"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "python/mypy, MIT, revision 6934a9d01cab6226a64b38642e124368f8ddc653"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "pycqa-flake8"
+repository = "PyCQA/flake8"
+revision = "efe6750405be77b661f64e60002c4ef8e922daf5"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "PyCQA/flake8, MIT, revision efe6750405be77b661f64e60002c4ef8e922daf5"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "benoitc-gunicorn"
+repository = "benoitc/gunicorn"
+revision = "36f2a3c1b80dfa41d70859d12c5bfbbdc23a3c38"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "benoitc/gunicorn, MIT, revision 36f2a3c1b80dfa41d70859d12c5bfbbdc23a3c38"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "celery-celery"
+repository = "celery/celery"
+revision = "fda3c5b0785d5b260ae4ff785a87961452c4c2f9"
+
+[benign_frame.b_code.repository.licence]
+identifier = "BSD-3-Clause"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "celery/celery, BSD-3-Clause, revision fda3c5b0785d5b260ae4ff785a87961452c4c2f9"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "aio-libs-aiohttp"
+repository = "aio-libs/aiohttp"
+revision = "20acdf440b0a39c00054d4a70ea59376b793c83d"
+
+[benign_frame.b_code.repository.licence]
+identifier = "Apache-2.0"
+source = "LICENSE.txt at the pinned revision, read 2026-08-29"
+attribution = "aio-libs/aiohttp, Apache-2.0, revision 20acdf440b0a39c00054d4a70ea59376b793c83d"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "jd-tenacity"
+repository = "jd/tenacity"
+revision = "26f719dc73d3c5612b9c1b8d18a7883837790ad8"
+
+[benign_frame.b_code.repository.licence]
+identifier = "Apache-2.0"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "jd/tenacity, Apache-2.0, revision 26f719dc73d3c5612b9c1b8d18a7883837790ad8"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "kurtmckee-feedparser"
+repository = "kurtmckee/feedparser"
+revision = "a22c5521cbb109871f1a2318948581901bd47e26"
+
+[benign_frame.b_code.repository.licence]
+identifier = "BSD-2-Clause"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "kurtmckee/feedparser, BSD-2-Clause, revision a22c5521cbb109871f1a2318948581901bd47e26"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "lodash-lodash"
+repository = "lodash/lodash"
+revision = "a666ba591064c8011988275790ad7d625279f09c"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "lodash/lodash, MIT, revision a666ba591064c8011988275790ad7d625279f09c"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "axios-axios"
+repository = "axios/axios"
+revision = "fede1d1562e308077da7994305d63fb7722b66ac"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "axios/axios, MIT, revision fede1d1562e308077da7994305d63fb7722b66ac"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "expressjs-express"
+repository = "expressjs/express"
+revision = "023767fe9872e029271df1418f73401bff20ff40"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "expressjs/express, MIT, revision 023767fe9872e029271df1418f73401bff20ff40"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "sveltejs-svelte"
+repository = "sveltejs/svelte"
+revision = "7bc0a70fe64dbb3fa3848b741963f31d1e10a8dc"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE.md at the pinned revision, read 2026-08-29"
+attribution = "sveltejs/svelte, MIT, revision 7bc0a70fe64dbb3fa3848b741963f31d1e10a8dc"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "vuejs-core"
+repository = "vuejs/core"
+revision = "d63616ca17de965ed32dcb449a4c5cd9982f15d2"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "vuejs/core, MIT, revision d63616ca17de965ed32dcb449a4c5cd9982f15d2"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "facebook-react"
+repository = "facebook/react"
+revision = "2dc7da790d6388b95b83198ca9b588b2ad5f5c0b"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "facebook/react, MIT, revision 2dc7da790d6388b95b83198ca9b588b2ad5f5c0b"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "chartjs-chart-js"
+repository = "chartjs/Chart.js"
+revision = "cb02e1d207bd4c4c40b20c259017f85f26f1e30a"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE.md at the pinned revision, read 2026-08-29"
+attribution = "chartjs/Chart.js, MIT, revision cb02e1d207bd4c4c40b20c259017f85f26f1e30a"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "babel-babel"
+repository = "babel/babel"
+revision = "d061c26365c42272f3c7666451fbe25743c22a20"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "babel/babel, MIT, revision d061c26365c42272f3c7666451fbe25743c22a20"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "eslint-eslint"
+repository = "eslint/eslint"
+revision = "08a02be429e21fc93d86c8dd16cec6dc945ea2c1"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "eslint/eslint, MIT, revision 08a02be429e21fc93d86c8dd16cec6dc945ea2c1"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "prettier-prettier"
+repository = "prettier/prettier"
+revision = "26a32bbafcdcc485174507a5e9564d66c56bc42d"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "prettier/prettier, MIT, revision 26a32bbafcdcc485174507a5e9564d66c56bc42d"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "jquery-jquery"
+repository = "jquery/jquery"
+revision = "71c0dd14927c41d1aab5ce5ef2687d7808a4186b"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE.txt at the pinned revision, read 2026-08-29"
+attribution = "jquery/jquery, MIT, revision 71c0dd14927c41d1aab5ce5ef2687d7808a4186b"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "socketio-socket-io"
+repository = "socketio/socket.io"
+revision = "ae7fb46e08c5ed964b4a1ea8b1703e816511598e"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "socketio/socket.io, MIT, revision ae7fb46e08c5ed964b4a1ea8b1703e816511598e"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "nodejs-undici"
+repository = "nodejs/undici"
+revision = "fc3450dcf1d5faea8e3971dd8c6973604292470b"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "nodejs/undici, MIT, revision fc3450dcf1d5faea8e3971dd8c6973604292470b"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "webpack-webpack"
+repository = "webpack/webpack"
+revision = "e7ad244d985fc677744f797700a4bb1ee18e9672"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "webpack/webpack, MIT, revision e7ad244d985fc677744f797700a4bb1ee18e9672"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "tailwindlabs-tailwindcss"
+repository = "tailwindlabs/tailwindcss"
+revision = "90f8ff41c8e2a4d17bc76921e23e9d672123da76"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "tailwindlabs/tailwindcss, MIT, revision 90f8ff41c8e2a4d17bc76921e23e9d672123da76"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "vitejs-vite"
+repository = "vitejs/vite"
+revision = "e2b597de0ef14598901703f5aa52f8c962007d02"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "vitejs/vite, MIT, revision e2b597de0ef14598901703f5aa52f8c962007d02"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "jestjs-jest"
+repository = "jestjs/jest"
+revision = "be425a0b0e3bd60a74e4a7e350aa38c63a2d25ef"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "jestjs/jest, MIT, revision be425a0b0e3bd60a74e4a7e350aa38c63a2d25ef"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "rollup-rollup"
+repository = "rollup/rollup"
+revision = "78bfef0cb94479566f81012fafa372c84b90bd34"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE.md at the pinned revision, read 2026-08-29"
+attribution = "rollup/rollup, MIT, revision 78bfef0cb94479566f81012fafa372c84b90bd34"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "gin-gonic-gin"
+repository = "gin-gonic/gin"
+revision = "dcaa4296d111981ffb31ac3eba90bb63e1eb5ab9"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "gin-gonic/gin, MIT, revision dcaa4296d111981ffb31ac3eba90bb63e1eb5ab9"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "spf13-cobra"
+repository = "spf13/cobra"
+revision = "adbc8813901bba65827259daa8e22ff94ec1f30e"
+
+[benign_frame.b_code.repository.licence]
+identifier = "Apache-2.0"
+source = "LICENSE.txt at the pinned revision, read 2026-08-29"
+attribution = "spf13/cobra, Apache-2.0, revision adbc8813901bba65827259daa8e22ff94ec1f30e"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "spf13-viper"
+repository = "spf13/viper"
+revision = "528f7416c4b56a4948673984b190bf8713f0c3c4"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "spf13/viper, MIT, revision 528f7416c4b56a4948673984b190bf8713f0c3c4"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "gorilla-mux"
+repository = "gorilla/mux"
+revision = "db9d1d0073d27a0a2d9a8c1bc52aa0af4374d265"
+
+[benign_frame.b_code.repository.licence]
+identifier = "BSD-3-Clause"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "gorilla/mux, BSD-3-Clause, revision db9d1d0073d27a0a2d9a8c1bc52aa0af4374d265"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "sirupsen-logrus"
+repository = "sirupsen/logrus"
+revision = "6d6a132bc03324d4ceb78e1b927f995d014cda20"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "sirupsen/logrus, MIT, revision 6d6a132bc03324d4ceb78e1b927f995d014cda20"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "stretchr-testify"
+repository = "stretchr/testify"
+revision = "9f9d4f4cd868b1667991148401d30a012470b9c9"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "stretchr/testify, MIT, revision 9f9d4f4cd868b1667991148401d30a012470b9c9"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "go-yaml-yaml"
+repository = "go-yaml/yaml"
+revision = "944c86a7d29391925ed6ac33bee98a0516f1287a"
+
+[benign_frame.b_code.repository.licence]
+identifier = "Apache-2.0"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "go-yaml/yaml, Apache-2.0, revision 944c86a7d29391925ed6ac33bee98a0516f1287a"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "rust-lang-regex"
+repository = "rust-lang/regex"
+revision = "72d650cb0a880a01ab6dc2137c0888e8f89740f7"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE-MIT at the pinned revision, read 2026-08-29"
+attribution = "rust-lang/regex, MIT, revision 72d650cb0a880a01ab6dc2137c0888e8f89740f7"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "serde-rs-serde"
+repository = "serde-rs/serde"
+revision = "a874a1b1bb1cc16cf5ee3b1b7b527af5705742bb"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE-MIT at the pinned revision, read 2026-08-29"
+attribution = "serde-rs/serde, MIT, revision a874a1b1bb1cc16cf5ee3b1b7b527af5705742bb"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "tokio-rs-tokio"
+repository = "tokio-rs/tokio"
+revision = "ea91b33ca57ff0581b38e735cc108f831bccbdaa"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "tokio-rs/tokio, MIT, revision ea91b33ca57ff0581b38e735cc108f831bccbdaa"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "clap-rs-clap"
+repository = "clap-rs/clap"
+revision = "6982fb1c98c7247e38a6d4f04191b94e30497e7b"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE-MIT at the pinned revision, read 2026-08-29"
+attribution = "clap-rs/clap, MIT, revision 6982fb1c98c7247e38a6d4f04191b94e30497e7b"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "sharkdp-bat"
+repository = "sharkdp/bat"
+revision = "b671e53c2cd0177beb357cf6cb997ee4215c7155"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE-MIT at the pinned revision, read 2026-08-29"
+attribution = "sharkdp/bat, MIT, revision b671e53c2cd0177beb357cf6cb997ee4215c7155"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "seanmonstar-reqwest"
+repository = "seanmonstar/reqwest"
+revision = "9f06fd28abe53e5ff84a091825ea5ce8984b51e0"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE-MIT at the pinned revision, read 2026-08-29"
+attribution = "seanmonstar/reqwest, MIT, revision 9f06fd28abe53e5ff84a091825ea5ce8984b51e0"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "dtolnay-anyhow"
+repository = "dtolnay/anyhow"
+revision = "c63b279f3f4af2b02ca6267d9eb47d6d10497f69"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE-MIT at the pinned revision, read 2026-08-29"
+attribution = "dtolnay/anyhow, MIT, revision c63b279f3f4af2b02ca6267d9eb47d6d10497f69"
+redistributed = true
+
+[[benign_frame.b_code.repository]]
+key = "sinatra-sinatra"
+repository = "sinatra/sinatra"
+revision = "cb22afd7902b566b6eaba6c4ea89739494a65d12"
+
+[benign_frame.b_code.repository.licence]
+identifier = "MIT"
+source = "LICENSE at the pinned revision, read 2026-08-29"
+attribution = "sinatra/sinatra, MIT, revision cb22afd7902b566b6eaba6c4ea89739494a65d12"
+redistributed = true

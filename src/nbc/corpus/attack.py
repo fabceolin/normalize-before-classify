@@ -55,12 +55,11 @@ that silently does not exist.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import random
 from dataclasses import dataclass
-from typing import Callable, Final, Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
+from nbc.corpus.draw import take
 from nbc.corpus.dressings import DRESSINGS, dress_declared
 from nbc.corpus.exclusion import ExclusionIndex, filter_rows
 from nbc.corpus.heldout import validate_heldout
@@ -69,6 +68,9 @@ from nbc.corpus.matrix import (
     CHAINS,
     CLEAN_CHAIN,
     HELDOUT_CHAINS,
+    id_collisions,
+    item_id,
+    payload_id,
     render_chain,
     validate as validate_matrix,
 )
@@ -77,40 +79,17 @@ from nbc.pins import DRAW_HEAD, DRAW_SEEDED_RANDOM, AttackDataset, AttackDraw
 from nbc.schema import ATTACK, FAMILY_ATTACK, CorpusItem
 
 __all__ = [
-    "ID_SEPARATOR",
-    "PAYLOAD_ID_HEX",
     "AttackDrawReport",
     "AttackDrawUnsatisfiable",
     "LabelContradiction",
     "PoolRow",
     "contradictions",
     "draw_attack_items",
-    "id_collisions",
-    "item_id",
-    "payload_id",
     "render_attack_item",
     "select_payloads",
     "serialize",
-    "sort_key_for",
     "verify_splits",
 ]
-
-PAYLOAD_ID_HEX: Final[int] = 16
-"""Hex characters of SHA-256 kept in a payload id.
-
-64 bits. Over a pool of ten thousand payloads the birthday probability of a collision is about
-3e-12, and a collision would be caught rather than silently merging two payloads: the builder
-refuses a pool in which two distinct texts produce one id.
-"""
-
-ID_SEPARATOR: Final[str] = "::"
-"""What separates the payload id from the chain in an item id.
-
-The chain half of AD-3's rule -- the names joined by `+`, or the literal `clean` -- is
-`matrix.render_chain`, because the benign builders and the held-out registry need the same
-spelling and may not reach into the attack module for it.
-"""
-
 
 class LabelContradiction(NbcError, exit_code=16):
     """The pinned dataset carries one text under both labels, and nothing here can say which wins.
@@ -176,25 +155,6 @@ class PoolRow:
     label: int
 
 
-def payload_id(text: str) -> str:
-    """A stable, content-derived id for one payload.
-
-    Content-derived rather than positional because AD-1's stable order is `(source, payload_id,
-    chain)`: an id that carried a row number would make the file's order a property of the read,
-    which is the one thing the byte-identical claim cannot depend on.
-    """
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:PAYLOAD_ID_HEX]
-
-
-def item_id(payload: str, chain: Sequence[str] = CLEAN_CHAIN) -> str:
-    """AD-3's item id: `<payload_id>::<chain>`, the chain joined by `+`, or the literal `clean`.
-
-    The full chain, never the last link: a reported dressing axis that named only the outermost
-    dressing would make `base64+base64` and `base64` the same cell.
-    """
-    return f"{payload}{ID_SEPARATOR}{render_chain(chain)}"
-
-
 def contradictions(rows: Iterable[PoolRow]) -> tuple[str, ...]:
     """One message per text the pool carries under more than one label. Empty when there are none.
 
@@ -251,72 +211,34 @@ def verify_splits(declared: Sequence[str], observed: Sequence[str]) -> tuple[str
     return tuple(problems)
 
 
-def sort_key_for(name: str):
-    """The declared sort key for a `head` draw, as a function of the payload text.
-
-    A closed mapping rather than a lookup by attribute name: both keys are pure functions of the
-    payload, and neither can be made to read a row position, a split or a file order.
-    """
-    keys = {"text": lambda text: text, "payload_id": payload_id}
-    return keys[name]
-
-
 def select_payloads(payloads: Iterable[str], draw: AttackDraw) -> tuple[str, ...]:
-    """The declared draw, taken from a pool that is sorted before anything else happens.
+    """The declared draw, taken by `corpus/draw.py`, which the benign frame draws through too.
 
-    Sorting first is what makes the result a function of the seed and of nothing else: not of
-    parquet row order, not of which split was read first, not of the process hash seed. The
-    result is sorted again on the way out so the returned order is content-derived too.
+    Both halves of the corpus take their draw with one implementation, so FR5.1's "the same
+    selection-method vocabulary as the attack draw" is a shared function rather than two that agree
+    today. What stays here is the abort: a method nothing implements is this half's diagnosis, with
+    this half's exit code.
 
-    `random.Random(seed).shuffle` is the draw. The interpreter is pinned to CPython 3.13 exactly
-    by `pyproject.toml`, and the Mersenne Twister stream for a given seed is stable within it, so
-    the same seed reproduces the same sample wherever this project is allowed to run at all.
-
-    A pool at or below the declared size is taken whole -- but nothing here decides whether that
+    A pool at or below the declared size is taken whole -- but nothing there decides whether that
     is acceptable. The floor is `AttackDrawUnsatisfiable`'s, raised by `draw_attack_items`, so the
-    rule lives in one place instead of being half-enforced by a silent truncation here.
+    rule lives in one place instead of being half-enforced by a silent truncation.
     """
-    unique = sorted(set(payloads))
-    size = draw.sample_size_positives
-    if size >= len(unique):
-        return tuple(unique)
-
-    if draw.method == DRAW_HEAD:
-        ordered = sorted(unique, key=sort_key_for(str(draw.sort_key)))
-        return tuple(sorted(ordered[:size]))
-    if draw.method == DRAW_SEEDED_RANDOM:
-        pool = list(unique)
-        random.Random(draw.seed).shuffle(pool)
-        return tuple(sorted(pool[:size]))
-    # `load_pins` refuses any other value, so reaching here means a `Pins` was assembled in code
-    # with a method nothing implements. Silently drawing something would publish a corpus under a
-    # rule that does not exist.
-    raise AttackDrawUnsatisfiable(
-        f"the draw declares selection method {draw.method!r}, which nothing implements; the "
-        f"admissible methods are {DRAW_HEAD!r} and {DRAW_SEEDED_RANDOM!r}"
+    drawn = take(
+        payloads,
+        draw.sample_size_positives,
+        method=draw.method,
+        seed=draw.seed,
+        sort_key=draw.sort_key,
     )
-
-
-def id_collisions(pairs: Iterable[tuple[str, str]]) -> tuple[str, ...]:
-    """One message per item id that two different payloads produced. Empty when there are none.
-
-    A separate function so it has a failing input a test can supply: producing a real SHA-256
-    prefix collision is not something a test can do, and a check nobody has seen fire is a check
-    nobody knows fires. `tests/corpus/test_attack.py` hands it two payloads under one id directly.
-
-    The consequence it prevents is silent: two distinct payloads under one id merge into one
-    corpus row, the count drops by one, and every rate computed from it is over a pool that is not
-    the pool the report describes.
-    """
-    seen: dict[str, str] = {}
-    problems: list[str] = []
-    for identifier, payload in pairs:
-        first = seen.setdefault(identifier, payload)
-        if first != payload:
-            problems.append(
-                f"payloads {first!r} and {payload!r} both produce item id {identifier}"
-            )
-    return tuple(problems)
+    if drawn is None:
+        # `load_pins` refuses any other value, so reaching here means a `Pins` was assembled in
+        # code with a method nothing implements. Silently drawing something would publish a corpus
+        # under a rule that does not exist.
+        raise AttackDrawUnsatisfiable(
+            f"the draw declares selection method {draw.method!r}, which nothing implements; the "
+            f"admissible methods are {DRAW_HEAD!r} and {DRAW_SEEDED_RANDOM!r}"
+        )
+    return drawn
 
 
 def render_attack_item(

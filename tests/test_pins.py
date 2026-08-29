@@ -37,6 +37,12 @@ from nbc.pins import (
     LINEAGE_RELATIONSHIPS,
     MINIMUM_BASELINES,
     NOT_DECLARED,
+    BENIGN_CHAT_CLASS,
+    BENIGN_CODE_CLASS,
+    BENIGN_CODE_ELIGIBILITY_DECODE_CANDIDATE,
+    FRAME_ID_FIELD,
+    MAXIMUM_FILES_PER_BENIGN_CODE_REPOSITORY,
+    MINIMUM_BENIGN_CODE_REPOSITORIES,
     OQ2_KEPT,
     OQ2_OUTCOMES,
     PINNED_PRECISION,
@@ -55,6 +61,7 @@ from nbc.pins import (
     CHECKED_AGAINST_HUB,
     RemoteArtifact,
     Resolution,
+    frame_digest,
     load_pins,
     resolve_from_cache,
     verify_revisions,
@@ -75,6 +82,64 @@ SHA_E = "e" * 40
 # the one-hop reach has to say so, and a test that does not is not silently sitting on one.
 SEED_ONE = "example/seed-one"
 SEED_TWO = "example/seed-two"
+
+SHA_F = "f" * 40
+
+
+def _benign_code_repository(index: int) -> dict[str, Any]:
+    return {
+        "key": f"example-code-{index}",
+        "repository": f"example/code-{index}",
+        "revision": SHA_F,
+        "licence": {
+            "identifier": "MIT",
+            "source": "fixture",
+            "attribution": "fixture",
+            "redistributed": True,
+        },
+    }
+
+
+def _benign_frame(**overrides: Any) -> dict[str, Any]:
+    """A loadable `[benign_frame]`, with `frame_id` computed from the block it ends up being.
+
+    The digest is computed here rather than written as a literal, because a fixture carrying a
+    frozen digest would have to be re-hashed by hand every time a test overrode a field -- and the
+    tests that want the refusal to fire supply a WRONG id on purpose, which is the only way the two
+    sides of that comparison come from different places.
+    """
+    frame: dict[str, Any] = {
+        "declared_on": "2026-08-29",
+        "sample_size_items": 4,
+        "method": DRAW_SEEDED_RANDOM,
+        "seed": 11,
+        "b_code": {
+            "min_repositories": MINIMUM_BENIGN_CODE_REPOSITORIES,
+            "max_files_per_repository": MAXIMUM_FILES_PER_BENIGN_CODE_REPOSITORY,
+            "eligibility": BENIGN_CODE_ELIGIBILITY_DECODE_CANDIDATE,
+            "min_file_bytes": 200,
+            "max_file_bytes": 4000,
+            "file_extensions": [".py"],
+            "repository": [
+                _benign_code_repository(index)
+                for index in range(MINIMUM_BENIGN_CODE_REPOSITORIES)
+            ],
+        },
+        "b_chat": {"hand_authored_items": 1},
+        "confirmatory_cell": {
+            "declared_on": "2026-08-29",
+            "baseline": "first",
+            "dressing_chain": "base64+base64+base64+base64",
+            "benign_class": "b_code",
+        },
+    }
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(frame.get(key), dict):
+            frame[key] = {**frame[key], **value}
+        else:
+            frame[key] = value
+    frame[FRAME_ID_FIELD] = frame_digest(frame)
+    return frame
 
 
 def _baseline(
@@ -212,6 +277,7 @@ def _document(
     baselines: list[dict[str, Any]] | None = None,
     datasets: list[dict[str, Any]] | None = None,
     exclusion_sources: list[dict[str, Any]] | None = None,
+    benign_frame: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved_baselines = (
         baselines
@@ -239,6 +305,7 @@ def _document(
         "exclusion_source": exclusion_sources
         if exclusion_sources is not None
         else _derived_exclusions(resolved_baselines, resolved_datasets),
+        "benign_frame": benign_frame if benign_frame is not None else _benign_frame(),
     }
 
 
@@ -257,14 +324,25 @@ def _dump(value: Any) -> str:
 
 def _write_table(lines: list[str], header: str, table: dict[str, Any], array: bool) -> None:
     lines.append(f"[[{header}]]" if array else f"[{header}]")
-    nested: list[tuple[str, dict[str, Any]]] = []
+    nested: list[tuple[str, Any]] = []
     for key, value in table.items():
-        if isinstance(value, dict):
+        if isinstance(value, dict) or _is_table_array(value):
+            # A nested array of TABLES is `[[parent.key]]`, one header per entry; a list of
+            # scalars stays inline. The benign frame carries both -- its repository array and its
+            # `file_extensions` -- so the writer has to tell them apart rather than guess by key.
             nested.append((key, value))
         else:
             lines.append(f"{_key(key)} = {_dump(value)}")
     for key, value in nested:
-        _write_table(lines, f"{header}.{key}", value, array=False)
+        if isinstance(value, dict):
+            _write_table(lines, f"{header}.{key}", value, array=False)
+            continue
+        for entry in value:
+            _write_table(lines, f"{header}.{key}", entry, array=True)
+
+
+def _is_table_array(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(isinstance(item, dict) for item in value)
 
 
 def _key(key: str) -> str:
@@ -281,6 +359,8 @@ def write_pins(root: Path, document: dict[str, Any]) -> Path:
         _write_table(lines, "attack_dataset", entry, array=True)
     for entry in document.get("exclusion_source", []):
         _write_table(lines, "exclusion_source", entry, array=True)
+    if "benign_frame" in document:
+        _write_table(lines, "benign_frame", document["benign_frame"], array=False)
     path = root / PINS_FILENAME
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -1311,6 +1391,11 @@ def _pinned_identifiers(document: dict[str, Any]) -> set[str]:
         elif isinstance(value, str):
             if key in {"repository", "revision", "card_revision"} or key.endswith("_path"):
                 identifiers.add(value)
+            elif key == FRAME_ID_FIELD:
+                # The frame's digest is a pin like any other: a copy of it under `src/` would be a
+                # second place the frame's identity lives, and the one thing `data/manifest.json`
+                # is compared against must not have a twin in the code that does the comparing.
+                identifiers.add(value)
         elif isinstance(value, int) and not isinstance(value, bool):
             # Sizes and seeds both. A seed is a draw parameter exactly as a sample size is, and a
             # second copy of one reproduces a different sample while looking like the declared
@@ -2312,3 +2397,180 @@ def test_the_draw_reaches_the_run_fields(repo_root: Path) -> None:
             "seed",
             "sort_key",
         }
+
+
+# --- the benign frame (story 3.6) ----------------------------------------------------------
+
+
+def test_a_frame_edited_without_its_digest_is_refused(tmp_path: Path) -> None:
+    """The frame's whole content: it cannot be changed while the id that fixed it stays.
+
+    The failing input is the realistic one -- a field edited and the digest left alone, which is
+    exactly what growing a benign corpus until the number looked reasonable would look like.
+    """
+    frame = _benign_frame()
+    frame["seed"] = frame["seed"] + 1
+    write_pins(tmp_path, _document(benign_frame=frame))
+    with pytest.raises(PinsFileInvalid) as raised:
+        load_pins(tmp_path)
+    assert any(FRAME_ID_FIELD in problem for problem in raised.value.problems)
+
+
+def test_a_frame_re_declared_with_its_new_digest_loads(tmp_path: Path) -> None:
+    """The other direction: re-declaring the frame deliberately is allowed and is a visible diff."""
+    write_pins(tmp_path, _document(benign_frame=_benign_frame(seed=4242)))
+    assert load_pins(tmp_path).benign_frame.seed == 4242
+
+
+def test_the_committed_frame_id_is_the_digest_of_the_committed_block(
+    committed_document: dict[str, Any],
+) -> None:
+    """CI's assertion, written here too: the file on disk hashes to the id it carries."""
+    block = committed_document["benign_frame"]
+    assert block[FRAME_ID_FIELD] == frame_digest(block)
+
+
+def test_the_committed_frame_reaches_the_declared_repository_floor(
+    committed_pins: Any,
+) -> None:
+    frame = committed_pins.benign_frame
+    assert frame.b_code.min_repositories >= MINIMUM_BENIGN_CODE_REPOSITORIES
+    assert len(frame.b_code.repositories) >= frame.b_code.min_repositories
+    assert frame.b_code.max_files_per_repository <= MAXIMUM_FILES_PER_BENIGN_CODE_REPOSITORY
+
+
+def test_the_frame_s_class_names_are_the_schema_s(committed_document: dict[str, Any]) -> None:
+    """`pins.py` may not import `nbc.schema`, so the duplication is checked rather than avoided."""
+    from nbc.schema import BENIGN_CLASSES
+
+    assert (BENIGN_CODE_CLASS, BENIGN_CHAT_CLASS) == BENIGN_CLASSES
+    assert set(BENIGN_CLASSES) <= set(committed_document["benign_frame"])
+
+
+def test_a_frame_below_the_requirement_floor_is_refused(tmp_path: Path) -> None:
+    frame = _benign_frame(
+        b_code={"min_repositories": MINIMUM_BENIGN_CODE_REPOSITORIES - 1}
+    )
+    write_pins(tmp_path, _document(benign_frame=frame))
+    with pytest.raises(PinsFileInvalid) as raised:
+        load_pins(tmp_path)
+    assert any("design effect" in problem for problem in raised.value.problems)
+
+
+def test_a_frame_above_the_requirement_cap_is_refused(tmp_path: Path) -> None:
+    frame = _benign_frame(
+        b_code={"max_files_per_repository": MAXIMUM_FILES_PER_BENIGN_CODE_REPOSITORY + 1}
+    )
+    write_pins(tmp_path, _document(benign_frame=frame))
+    with pytest.raises(PinsFileInvalid) as raised:
+        load_pins(tmp_path)
+    assert any("cap" in problem for problem in raised.value.problems)
+
+
+def test_a_frame_pinning_fewer_repositories_than_its_own_floor_is_refused(
+    tmp_path: Path,
+) -> None:
+    frame = _benign_frame(
+        b_code={"repository": [_benign_code_repository(index) for index in range(3)]}
+    )
+    write_pins(tmp_path, _document(benign_frame=frame))
+    with pytest.raises(PinsFileInvalid) as raised:
+        load_pins(tmp_path)
+    assert any("could only reach it" in problem for problem in raised.value.problems)
+
+
+def test_an_eligibility_rule_outside_the_vocabulary_is_refused(tmp_path: Path) -> None:
+    frame = _benign_frame(b_code={"eligibility": "looks_like_base64"})
+    write_pins(tmp_path, _document(benign_frame=frame))
+    with pytest.raises(PinsFileInvalid) as raised:
+        load_pins(tmp_path)
+    assert any("looks_like_base64" in problem for problem in raised.value.problems)
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ({"file_extensions": []}, "vendored blobs"),
+        ({"file_extensions": ["py"]}, "beginning with a dot"),
+        ({"file_extensions": [".PY"]}, "beginning with a dot"),
+        ({"file_extensions": [".py", ".py"]}, "repeats an entry"),
+        ({"min_file_bytes": 0}, "not a corpus row"),
+        ({"min_file_bytes": 900, "max_file_bytes": 400}, "band is empty"),
+    ],
+)
+def test_a_malformed_b_code_frame_is_refused(
+    tmp_path: Path, override: dict[str, Any], expected: str
+) -> None:
+    write_pins(tmp_path, _document(benign_frame=_benign_frame(b_code=override)))
+    with pytest.raises(PinsFileInvalid) as raised:
+        load_pins(tmp_path)
+    assert any(expected in problem for problem in raised.value.problems), raised.value.problems
+
+
+def test_a_hand_authored_allowance_that_swallows_the_class_is_refused(tmp_path: Path) -> None:
+    """A class made entirely of hand-authored material is a corpus this repository wrote itself."""
+    frame = _benign_frame(b_chat={"hand_authored_items": 4})
+    write_pins(tmp_path, _document(benign_frame=frame))
+    with pytest.raises(PinsFileInvalid) as raised:
+        load_pins(tmp_path)
+    assert any("wrote for itself" in problem for problem in raised.value.problems)
+
+
+def test_a_confirmatory_cell_naming_no_declared_baseline_is_refused(tmp_path: Path) -> None:
+    frame = _benign_frame(confirmatory_cell={"baseline": "a-model-nobody-pinned"})
+    write_pins(tmp_path, _document(benign_frame=frame))
+    with pytest.raises(PinsFileInvalid) as raised:
+        load_pins(tmp_path)
+    assert any("a-model-nobody-pinned" in problem for problem in raised.value.problems)
+
+
+def test_a_benign_repository_that_is_also_a_pinned_source_is_refused(tmp_path: Path) -> None:
+    """B-code is what the false-positive rate is measured over; it may not be exclusion material."""
+    entry = _benign_code_repository(0)
+    entry["repository"] = SEED_ONE
+    frame = _benign_frame(
+        b_code={
+            "repository": [entry]
+            + [
+                _benign_code_repository(index)
+                for index in range(1, MINIMUM_BENIGN_CODE_REPOSITORIES)
+            ]
+        }
+    )
+    write_pins(tmp_path, _document(benign_frame=frame))
+    with pytest.raises(PinsFileInvalid) as raised:
+        load_pins(tmp_path)
+    assert any("measures the filter rather than the layer" in p for p in raised.value.problems)
+
+
+def test_two_benign_repositories_sharing_a_key_are_refused(tmp_path: Path) -> None:
+    entries = [
+        _benign_code_repository(index)
+        for index in range(MINIMUM_BENIGN_CODE_REPOSITORIES)
+    ]
+    entries[1]["key"] = entries[0]["key"]
+    write_pins(tmp_path, _document(benign_frame=_benign_frame(b_code={"repository": entries})))
+    with pytest.raises(PinsFileInvalid) as raised:
+        load_pins(tmp_path)
+    assert any("share key" in problem for problem in raised.value.problems)
+
+
+def test_the_frame_reaches_the_run_fields(committed_pins: Any) -> None:
+    fields = committed_pins.as_run_fields()["pins"]["benign_frame"]
+    assert fields[FRAME_ID_FIELD] == committed_pins.benign_frame.frame_id
+    assert fields["confirmatory_cell"]["baseline"]
+    assert len(fields[BENIGN_CODE_CLASS]["repositories"]) >= MINIMUM_BENIGN_CODE_REPOSITORIES
+
+
+def test_the_frame_draw_uses_the_same_vocabulary_as_the_attack_draw(
+    committed_pins: Any,
+) -> None:
+    """Not "the same words": the same reader, so the two cannot drift into two vocabularies."""
+    from nbc.pins import DRAW_METHODS
+
+    assert committed_pins.benign_frame.method in DRAW_METHODS
+    frame = committed_pins.benign_frame
+    if frame.method == DRAW_SEEDED_RANDOM:
+        assert frame.seed is not None and frame.sort_key is None
+    else:
+        assert frame.sort_key is not None and frame.seed is None

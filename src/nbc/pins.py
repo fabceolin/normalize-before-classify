@@ -77,6 +77,8 @@ is imported, and a test asserts that importing or running it leaves the runtime 
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import sys
@@ -91,6 +93,18 @@ from nbc.errors import NbcError
 __all__ = [
     "AttackDataset",
     "AttackDraw",
+    "BENIGN_CHAT_CLASS",
+    "BENIGN_CODE_CLASS",
+    "BENIGN_CODE_ELIGIBILITIES",
+    "BENIGN_CODE_ELIGIBILITY_DECODE_CANDIDATE",
+    "BenignChatFrame",
+    "BenignCodeFrame",
+    "BenignCodeRepository",
+    "BenignFrame",
+    "ConfirmatoryCell",
+    "FRAME_ID_FIELD",
+    "MAXIMUM_FILES_PER_BENIGN_CODE_REPOSITORY",
+    "MINIMUM_BENIGN_CODE_REPOSITORIES",
     "DRAW_HEAD",
     "DRAW_METHODS",
     "DRAW_SEEDED_RANDOM",
@@ -302,6 +316,60 @@ two different corpora on two machines.
 
 HTTP_OK: Final[int] = 200
 """The status an `available` exclusion source must declare, and the one the build must observe."""
+
+# --- the benign frame's vocabulary and its floors ----------------------------------------------
+#
+# FR5.1 fixes three things about the benign frame that a declaration may not weaken, so each is a
+# requirement constant here and a declared value in `pins.toml`, and the reader **compares** them.
+# The alternative -- reading the floor off the file it is supposed to bound -- is a check whose two
+# sides come from the same place, which is the defect this project has found in its own history
+# often enough to name. `MINIMUM_BASELINES` above is the same shape and predates these.
+#
+# The per-class item count is deliberately NOT one of them. It is declared in `pins.toml` and
+# nowhere else, because `tests/test_pins.py` refuses any value under a `sample_size*` key from
+# appearing as a literal under `src/`, `spikes/` or `tests/` -- and a requirement constant here
+# would be exactly that second copy. What FR5.1's "exactly, never at least" actually forbids is a
+# realized count that silently differs from the declared one, and that is enforced where the
+# realized count exists: `corpus/benign.py` aborts when the two disagree in either direction.
+
+FRAME_ID_FIELD: Final[str] = "frame_id"
+"""The field inside `[benign_frame]` that carries the digest of the rest of the block."""
+
+MINIMUM_BENIGN_CODE_REPOSITORIES: Final[int] = 50
+"""FR5.1's floor on how many repositories B-code is drawn from.
+
+Not a taste: files from one repository share a language, a style and a base64 idiom, so 500 files
+drawn 50 at a time from 10 repositories carry a design effect that puts the effective n near 150
+and widens every B-code interval by roughly a factor of two. The frame declares its own floor and
+this constant refuses a frame that declares a smaller one; the **realized** count is a separate
+question, answered by the builder against the frame's number.
+"""
+
+MAXIMUM_FILES_PER_BENIGN_CODE_REPOSITORY: Final[int] = 10
+"""FR5.1's cap on how many files any one repository may contribute. Same reason, other side."""
+
+BENIGN_CODE_ELIGIBILITY_DECODE_CANDIDATE: Final[str] = "layer_decode_candidate"
+"""The one declared file-eligibility rule: the layer's decode stage examines a run in this file.
+
+A closed vocabulary of one, for the reason `window_policy` is one: the rule decides which files
+become corpus rows, so it belongs in the frame that is hashed rather than in whichever module
+happened to implement it first. The predicate itself lives in `corpus/benign.py`, which is where
+the canonicalization layer may be imported.
+"""
+
+BENIGN_CODE_ELIGIBILITIES: Final[tuple[str, ...]] = (
+    BENIGN_CODE_ELIGIBILITY_DECODE_CANDIDATE,
+)
+
+BENIGN_CODE_CLASS: Final[str] = "b_code"
+BENIGN_CHAT_CLASS: Final[str] = "b_chat"
+"""The two benign classes, as the names of the frame's two sub-tables.
+
+`nbc.schema.BENIGN_CLASSES` is the vocabulary's home and this module may not import it -- it is a
+leaf over `nbc.errors` and a test holds that. So the two names are spelled here and
+`tests/test_pins.py` compares them against `schema.BENIGN_CLASSES`, which makes the duplication a
+comparison rather than a second opinion.
+"""
 
 _REDUCED_PRECISION: Final[re.Pattern[str]] = re.compile(
     r"fp16|float16|bf16|bfloat16|mixed|int8|uint8|quant|_q4|_q8", re.IGNORECASE
@@ -777,11 +845,11 @@ class AttackDraw:
     as many rows as positives, so a size read as rows would draw roughly a third of what it says.
     The key name carries the unit rather than a comment doing it.
 
-    `declared_on` is the date a human wrote this block, and **nothing compares it to anything**.
-    It is metadata of the same kind as an exclusion source's `checked_on`, and it is recorded here
-    rather than left out because story 3.6 folds the whole build declaration -- this block
-    included -- into a `build_id`, at which point the date becomes part of what a changed corpus
-    is distinguishable by. Until that story runs, this field is a note and is described as one.
+    `declared_on` is the date a human wrote this block. Nothing *compares* it to anything, and it is
+    not decoration either: story 3.6's `corpus/manifest.py::build_id` folds the whole build
+    declaration -- this block included -- into the corpus' identity, so re-declaring the draw on a
+    later date produces a different `build_id` and the committed corpus stops being readable until
+    it is rebuilt. The date is part of what a changed corpus is distinguishable by.
 
     The two methods each admit exactly one companion field, and the reader refuses the other:
     `head` consumes `sort_key` and `seeded_random` consumes `seed`. A declaration carrying a
@@ -838,6 +906,203 @@ class AttackDataset:
             "licence": self.licence.as_run_fields(),
             "provenance": self.provenance.as_run_fields(),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class BenignCodeRepository:
+    """One public source repository B-code is drawn from, pinned by repository and commit sha.
+
+    **Not a `RemoteArtifact`.** `remote_artifacts()` is the set `verify_revisions` asks the
+    Hugging Face hub about, and these are git repositories on a different host with a different
+    API. Putting them in there would ask the wrong server about the wrong id and report the
+    resulting `None` as a pin that could not be resolved. What verifies these instead is the build
+    itself: it fetches the archive **at this sha**, and a sha that no longer exists is a 404 rather
+    than a silent fallback to a branch head.
+
+    The licence is recorded here because story 3.8's redistribution gate reads it; nothing in this
+    story aborts on it. `redistributed` is `true` for every entry, because B-code rows are the file
+    text and they land in `data/*.jsonl` in an MIT repository.
+    """
+
+    key: str
+    repository: str
+    revision: str
+    licence: Licence
+
+    @property
+    def archive_url(self) -> str:
+        """The gzipped tar of the whole repository at the pinned sha.
+
+        `codeload` rather than the REST API on purpose: listing a tree through the API costs one
+        request against an unauthenticated hourly budget of sixty, and the frame declares more
+        repositories than that budget would allow. This endpoint carries no such budget, and one
+        request per repository yields every path and every byte the draw needs.
+        """
+        return f"https://codeload.github.com/{self.repository}/tar.gz/{self.revision}"
+
+    def file_source(self, path: str) -> str:
+        """How one drawn file names itself in the corpus: repository, commit sha and path.
+
+        This string is the `source` field of the `CorpusItem`, so FR5.1's "pinned by repository,
+        commit sha and path" is a property of the committed corpus row rather than of a build log.
+        """
+        return f"github.com/{self.repository}@{self.revision}:{path}"
+
+    def as_run_fields(self) -> dict[str, object]:
+        return {
+            "key": self.key,
+            "repository": self.repository,
+            "revision": self.revision,
+            "licence": self.licence.as_run_fields(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class BenignCodeFrame:
+    """How B-code is drawn: from which repositories, which files, and how many of each.
+
+    Every field decides which rows the corpus ends up holding, which is why all of them sit inside
+    the block `frame_id` hashes. `min_repositories` and `max_files_per_repository` are the frame's
+    own copies of FR5.1's floor and cap, compared at load against the requirement constants above;
+    the **realized** repository count is the builder's output and is compared against
+    `min_repositories` there.
+    """
+
+    min_repositories: int
+    max_files_per_repository: int
+    eligibility: str
+    min_file_bytes: int
+    max_file_bytes: int
+    file_extensions: tuple[str, ...]
+    repositories: tuple[BenignCodeRepository, ...]
+
+    def as_run_fields(self) -> dict[str, object]:
+        return {
+            "min_repositories": self.min_repositories,
+            "max_files_per_repository": self.max_files_per_repository,
+            "eligibility": self.eligibility,
+            "min_file_bytes": self.min_file_bytes,
+            "max_file_bytes": self.max_file_bytes,
+            "file_extensions": list(self.file_extensions),
+            "repositories": [entry.as_run_fields() for entry in self.repositories],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class BenignChatFrame:
+    """How B-chat is drawn: from the pinned dataset's benign rows, plus a closed hand-authored set.
+
+    The dataset is **not named here**. It is the pinned attack dataset, whose benign-labelled rows
+    are what FR5.1 draws from, and naming it a second time in this block would be a second home for
+    a repository id that `[[attack_dataset]]` already pins -- the exact drift `pins.toml`'s own
+    header refuses. `build_id` covers the attack draw, so the dataset's identity is inside the build
+    identity either way.
+
+    `hand_authored_items` is the size of the allowance FR5.1 grants for material no public dataset
+    carries: messages legitimately containing a JWT, a content hash, a data URI or an SSH public
+    key. It is a **declared count compared against what `corpus/sources/` actually holds**, so an
+    item added there without widening the frame fails the build rather than quietly enlarging the
+    hand-authored share of the counter-metric.
+    """
+
+    hand_authored_items: int
+
+    def as_run_fields(self) -> dict[str, object]:
+        return {"hand_authored_items": self.hand_authored_items}
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmatoryCell:
+    """The one `(baseline, dressing_chain, benign_class)` cell the N1 verdict rests on.
+
+    Declared here, in the epic that builds the corpus, and hashed into `build_id` with everything
+    else, so the cell cannot be chosen after the numbers exist. This story declares it, checks its
+    shape and hashes it. **Story 3.9 owns the rest**: that the chain must be held out or nested past
+    the recursion ceiling and never a bound one, and the reason. That split is deliberate and is
+    FR5.4's own: declaration and hashing live in the corpus epic, emission and evaluation in the
+    measurement epic, because a requirement whose pre-registration half lands in the epic that
+    evaluates it is a requirement that gets pre-registered after measuring.
+
+    `baseline` is a baseline **key**, and `load_pins` refuses one that names no declared baseline.
+    `benign_class` and `dressing_chain` are checked for shape here and against the corpus
+    vocabulary in `corpus/manifest.py`, which is the module allowed to import `nbc.schema` and
+    `nbc.corpus.matrix`; this one is a leaf over `nbc.errors`.
+    """
+
+    declared_on: str
+    baseline: str
+    dressing_chain: str
+    benign_class: str
+
+    def as_run_fields(self) -> dict[str, object]:
+        return {
+            "declared_on": self.declared_on,
+            "baseline": self.baseline,
+            "dressing_chain": self.dressing_chain,
+            "benign_class": self.benign_class,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class BenignFrame:
+    """FR5.1's sampling frame: fixed, hashed and declared before anything is measured.
+
+    The suspicion this exists to answer is that the benign corpus was grown until the number looked
+    reasonable. What answers it is not a promise but `frame_id`: the digest of this whole block,
+    written in the block, recomputed by `load_pins`, and refused on mismatch -- so an edit to any
+    field of the frame that is not accompanied by a new digest stops the run, and an edit that *is*
+    accompanied by one is a visible diff against a corpus whose manifest still records the old id.
+
+    The draw vocabulary is the attack draw's, read by the same function, so "the same
+    selection-method vocabulary as the attack draw" is a shared implementation rather than two
+    declarations that happen to agree today.
+    """
+
+    declared_on: str
+    sample_size_items: int
+    method: str
+    seed: int | None
+    sort_key: str | None
+    frame_id: str
+    b_code: BenignCodeFrame
+    b_chat: BenignChatFrame
+    confirmatory_cell: ConfirmatoryCell
+
+    def as_run_fields(self) -> dict[str, object]:
+        return {
+            "declared_on": self.declared_on,
+            "sample_size_items": self.sample_size_items,
+            "method": self.method,
+            "seed": self.seed,
+            "sort_key": self.sort_key,
+            FRAME_ID_FIELD: self.frame_id,
+            BENIGN_CODE_CLASS: self.b_code.as_run_fields(),
+            BENIGN_CHAT_CLASS: self.b_chat.as_run_fields(),
+            "confirmatory_cell": self.confirmatory_cell.as_run_fields(),
+        }
+
+
+def frame_digest(frame: Mapping[str, Any]) -> str:
+    """The digest `frame_id` must equal: SHA-256 over the frame block with `frame_id` removed.
+
+    Over the **raw table as the file declares it**, not over the parsed dataclasses, and that is
+    the point: a field added to the block that no reader consumes yet still changes the digest, so
+    the frame cannot grow a parameter behind the id that is supposed to fix it.
+
+    Order-sensitive on lists, unlike `exclusion.declaration_digest`, which sorts. Reordering the
+    repository array draws the same corpus, so a sorted digest would be defensible -- but the frame
+    is a declaration a reviewer reads, and this errs toward refusing an edit that changes nothing
+    rather than admitting one that changes something. The conservative direction is the one that
+    fails loudly.
+
+    `default=str` renders the TOML date and datetime values `tomllib` produces; every other value
+    in the block is a string, an integer, a boolean or a container of those.
+    """
+    payload = {key: value for key, value in frame.items() if key != FRAME_ID_FIELD}
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -945,6 +1210,7 @@ class Pins:
     baselines: tuple[Baseline, ...]
     attack_datasets: tuple[AttackDataset, ...]
     exclusion_sources: tuple[ExclusionSource, ...]
+    benign_frame: BenignFrame
     path: Path
 
     def remote_artifacts(self) -> tuple[RemoteArtifact, ...]:
@@ -1018,6 +1284,10 @@ class Pins:
                 "exclusion_sources": [
                     source.as_run_fields() for source in self.exclusion_sources
                 ],
+                # FR5.1's frame, published with everything else it constrains. The `frame_id` in
+                # here is what `data/manifest.json` is compared against before a corpus row is
+                # handed to anything that measures.
+                "benign_frame": self.benign_frame.as_run_fields(),
                 # Derived, not declared: a reader can recompute it from the two blocks above,
                 # and the corpus build reads it rather than a second copy of the same list.
                 "required_exclusion_sources": list(self.required_exclusion_sources()),
@@ -1504,10 +1774,16 @@ def _read_oq2(
     )
 
 
-def _read_attack_draw(
-    reader: _Reader, parent: Mapping[str, Any], where: str
-) -> AttackDraw:
-    """The `[attack_dataset.draw]` sub-table, with the coupling between method and parameter.
+def _read_selection_method(
+    reader: _Reader, table: Mapping[str, Any], where: str
+) -> tuple[str, int | None, str | None]:
+    """The `(method, seed, sort_key)` triple, with the coupling between method and parameter.
+
+    **One implementation, two callers.** The attack draw declared this vocabulary first and FR5.1
+    requires the benign frame to use "the same selection-method vocabulary". Two readers that
+    happened to accept the same words would satisfy that sentence today and drift the first time
+    one of them grew a method; one reader makes it the same vocabulary by construction, and the
+    tests that supply a failing input to one supply it to both.
 
     Four refusals, each with an input that produces it:
 
@@ -1519,24 +1795,7 @@ def _read_attack_draw(
     - either method carrying the *other* one's parameter. That one is refused rather than
       ignored: an ignored seed sitting in the file reads as a declared draw and is not one, and a
       later edit to `method` would silently start consuming it.
-
-    `sample_size_positives` must be positive. Zero would draw an empty corpus and publish a rate
-    over nothing.
     """
-    table = reader.table(parent, "draw", where)
-    where = f"{where}.draw"
-
-    declared_on = reader.calendar_date(
-        reader.string(table, "declared_on", where), f"{where}.declared_on"
-    )
-
-    size = reader.integer(table, "sample_size_positives", where)
-    if size <= 0:
-        reader.note(
-            f"{where}.sample_size_positives must be a positive count of attack positives, "
-            f"got {size!r}; a draw of none publishes a rate over nothing"
-        )
-
     method = reader.string(table, "method", where)
     if method and method not in DRAW_METHODS:
         reader.note(
@@ -1579,6 +1838,36 @@ def _read_attack_draw(
             )
         else:
             seed = reader.integer(table, "seed", where)
+
+    return method, seed, sort_key
+
+
+def _read_attack_draw(
+    reader: _Reader, parent: Mapping[str, Any], where: str
+) -> AttackDraw:
+    """The `[attack_dataset.draw]` sub-table.
+
+    The method and its companion parameter are `_read_selection_method`'s, shared with the benign
+    frame so the two declarations cannot drift into two vocabularies.
+
+    `sample_size_positives` must be positive. Zero would draw an empty corpus and publish a rate
+    over nothing.
+    """
+    table = reader.table(parent, "draw", where)
+    where = f"{where}.draw"
+
+    declared_on = reader.calendar_date(
+        reader.string(table, "declared_on", where), f"{where}.declared_on"
+    )
+
+    size = reader.integer(table, "sample_size_positives", where)
+    if size <= 0:
+        reader.note(
+            f"{where}.sample_size_positives must be a positive count of attack positives, "
+            f"got {size!r}; a draw of none publishes a rate over nothing"
+        )
+
+    method, seed, sort_key = _read_selection_method(reader, table, where)
 
     return AttackDraw(
         declared_on=declared_on,
@@ -1660,6 +1949,209 @@ def _read_attack_dataset(
         draw=_read_attack_draw(reader, table, where),
         licence=_read_licence(reader, table, where),
         provenance=provenance,
+    )
+
+
+def _read_benign_code_repository(
+    reader: _Reader, table: Mapping[str, Any], index: int
+) -> BenignCodeRepository:
+    where = f"benign_frame.code_repository[{index}]"
+    key = reader.string(table, "key", where)
+    if key:
+        where = f"{where} ({key})"
+    repository = reader.matching(
+        reader.string(table, "repository", where),
+        _REPOSITORY,
+        f"{where}.repository",
+        "a `namespace/name` repository id",
+    )
+    revision = reader.matching(
+        reader.string(table, "revision", where),
+        _SHA,
+        f"{where}.revision",
+        "a 40-character lowercase commit sha",
+    )
+    return BenignCodeRepository(
+        key=key,
+        repository=repository,
+        revision=revision,
+        licence=_read_licence(reader, table, where),
+    )
+
+
+def _read_benign_frame(
+    reader: _Reader, document: Mapping[str, Any], baselines: Sequence[Baseline]
+) -> BenignFrame:
+    """The `[benign_frame]` block: FR5.1's sampling frame, and the digest that fixes it.
+
+    The digest is computed over the **raw** block and compared against the declared `frame_id`
+    before anything else about the frame is judged, because every other problem in here is a
+    problem with a frame that at least still is the frame it says it is.
+    """
+    frame = reader.table(document, "benign_frame", "")
+    where = "benign_frame"
+
+    declared_id = reader.string(frame, FRAME_ID_FIELD, where)
+    computed = frame_digest(frame)
+    if declared_id and declared_id != computed:
+        reader.note(
+            f"{where}.{FRAME_ID_FIELD} is {declared_id!r} and the block hashes to {computed!r}. "
+            f"The frame is the answer to 'was the benign corpus grown until the number looked "
+            f"reasonable', and an edited frame carrying its previous digest is that answer "
+            f"withdrawn. Re-declare the frame deliberately, with a new id, so the change is a "
+            f"diff against a corpus whose manifest still records the old one"
+        )
+
+    declared_on = reader.calendar_date(
+        reader.string(frame, "declared_on", where), f"{where}.declared_on"
+    )
+
+    size = reader.integer(frame, "sample_size_items", where)
+    if size <= 0:
+        reader.note(
+            f"{where}.sample_size_items must be a positive count of items per benign class, "
+            f"got {size!r}; a benign class of none publishes a false-positive rate over nothing"
+        )
+
+    method, seed, sort_key = _read_selection_method(reader, frame, where)
+
+    # --- B-code -------------------------------------------------------------------------------
+    code_where = f"{where}.{BENIGN_CODE_CLASS}"
+    code = reader.table(frame, BENIGN_CODE_CLASS, where)
+
+    min_repositories = reader.integer(code, "min_repositories", code_where)
+    if "min_repositories" in code and min_repositories < MINIMUM_BENIGN_CODE_REPOSITORIES:
+        reader.note(
+            f"{code_where}.min_repositories is {min_repositories} and FR5.1's floor is "
+            f"{MINIMUM_BENIGN_CODE_REPOSITORIES}; files from one repository share a language, a "
+            f"style and a base64 idiom, so a frame drawing from fewer carries a design effect "
+            f"that widens every B-code interval while the reported n stays the same"
+        )
+
+    max_files = reader.integer(code, "max_files_per_repository", code_where)
+    if (
+        "max_files_per_repository" in code
+        and max_files > MAXIMUM_FILES_PER_BENIGN_CODE_REPOSITORY
+    ):
+        reader.note(
+            f"{code_where}.max_files_per_repository is {max_files} and FR5.1's cap is "
+            f"{MAXIMUM_FILES_PER_BENIGN_CODE_REPOSITORY}; the cap is the other side of the floor "
+            f"and lifting it reaches the same design effect from the other direction"
+        )
+    if "max_files_per_repository" in code and max_files < 1:
+        reader.note(
+            f"{code_where}.max_files_per_repository is {max_files}; a cap below one draws no "
+            f"file from any repository"
+        )
+
+    eligibility = reader.string(code, "eligibility", code_where)
+    if eligibility and eligibility not in BENIGN_CODE_ELIGIBILITIES:
+        reader.note(
+            f"{code_where}.eligibility must be one of "
+            f"{', '.join(BENIGN_CODE_ELIGIBILITIES)}, got {eligibility!r}; the rule decides which "
+            f"files become corpus rows, so a rule nobody implemented reads exactly like one "
+            f"somebody did"
+        )
+
+    min_bytes = reader.integer(code, "min_file_bytes", code_where)
+    max_bytes = reader.integer(code, "max_file_bytes", code_where)
+    if "min_file_bytes" in code and min_bytes < 1:
+        reader.note(f"{code_where}.min_file_bytes is {min_bytes}; an empty file is not a corpus row")
+    if "min_file_bytes" in code and "max_file_bytes" in code and max_bytes <= min_bytes:
+        reader.note(
+            f"{code_where} declares min_file_bytes {min_bytes} and max_file_bytes {max_bytes}; "
+            f"the band is empty and no file could be drawn"
+        )
+
+    extensions = reader.strings(code, "file_extensions", code_where)
+    if "file_extensions" in code and not extensions:
+        reader.note(
+            f"{code_where}.file_extensions is empty; a draw over every path in a repository "
+            f"reads lockfiles, minified bundles and vendored blobs as source code"
+        )
+    for extension in extensions:
+        if not extension.startswith(".") or extension != extension.lower():
+            reader.note(
+                f"{code_where}.file_extensions holds {extension!r}; each entry is a lowercase "
+                f"suffix beginning with a dot, and the match is on the path's own suffix"
+            )
+    if len(set(extensions)) != len(extensions):
+        reader.note(f"{code_where}.file_extensions repeats an entry: {list(extensions)}")
+
+    repositories = tuple(
+        _read_benign_code_repository(reader, table, index)
+        for index, table in enumerate(_entries(reader, code, "repository"))
+    )
+    if len(repositories) < min_repositories:
+        reader.note(
+            f"{code_where} declares min_repositories {min_repositories} and pins "
+            f"{len(repositories)}; a frame that cannot reach its own floor could only reach it "
+            f"by topping up from somewhere the frame does not name"
+        )
+    _note_duplicates(reader, f"{code_where}.repository", [entry.key for entry in repositories], "key")
+    _note_duplicates(
+        reader,
+        f"{code_where}.repository",
+        [entry.repository for entry in repositories],
+        "repository",
+    )
+
+    # --- B-chat -------------------------------------------------------------------------------
+    chat_where = f"{where}.{BENIGN_CHAT_CLASS}"
+    chat = reader.table(frame, BENIGN_CHAT_CLASS, where)
+    hand_authored = reader.integer(chat, "hand_authored_items", chat_where)
+    if "hand_authored_items" in chat and hand_authored < 0:
+        reader.note(
+            f"{chat_where}.hand_authored_items is {hand_authored!r}; it counts items and a "
+            f"negative allowance is not a smaller one"
+        )
+    if "hand_authored_items" in chat and size > 0 and hand_authored >= size:
+        reader.note(
+            f"{chat_where}.hand_authored_items is {hand_authored} against a class of {size}; the "
+            f"allowance is for what no public dataset carries, and a class made entirely of it "
+            f"would be a benign corpus this repository wrote for itself"
+        )
+
+    # --- the confirmatory cell ------------------------------------------------------------------
+    cell_where = f"{where}.confirmatory_cell"
+    cell_table = reader.table(frame, "confirmatory_cell", where)
+    cell = ConfirmatoryCell(
+        declared_on=reader.calendar_date(
+            reader.string(cell_table, "declared_on", cell_where), f"{cell_where}.declared_on"
+        ),
+        baseline=reader.string(cell_table, "baseline", cell_where),
+        dressing_chain=reader.string(cell_table, "dressing_chain", cell_where),
+        benign_class=reader.string(cell_table, "benign_class", cell_where),
+    )
+    keys = {baseline.key for baseline in baselines}
+    # Only when there is a baseline set to name. With none declared, `_check_baseline_set` already
+    # aborts on the count, and adding "names no declared baseline" would report the same absence
+    # twice under a different diagnosis.
+    if cell.baseline and keys and cell.baseline not in keys:
+        reader.note(
+            f"{cell_where}.baseline is {cell.baseline!r}, which is not a declared baseline key "
+            f"({sorted(keys)}); the verdict rests on this cell and a cell naming no column of the "
+            f"table cannot be evaluated"
+        )
+
+    return BenignFrame(
+        declared_on=declared_on,
+        sample_size_items=size,
+        method=method,
+        seed=seed,
+        sort_key=sort_key,
+        frame_id=declared_id,
+        b_code=BenignCodeFrame(
+            min_repositories=min_repositories,
+            max_files_per_repository=max_files,
+            eligibility=eligibility,
+            min_file_bytes=min_bytes,
+            max_file_bytes=max_bytes,
+            file_extensions=extensions,
+            repositories=repositories,
+        ),
+        b_chat=BenignChatFrame(hand_authored_items=hand_authored),
+        confirmatory_cell=cell,
     )
 
 
@@ -1961,6 +2453,7 @@ def load_pins(root: Path | str | None = None) -> Pins:
         _read_exclusion_source(reader, table, index)
         for index, table in enumerate(_entries(reader, document, "exclusion_source"))
     )
+    benign_frame = _read_benign_frame(reader, document, baselines)
 
     _note_duplicates(reader, "baseline", [b.key for b in baselines], "key")
     _note_duplicates(reader, "attack_dataset", [d.key for d in attack_datasets], "key")
@@ -1977,6 +2470,28 @@ def load_pins(root: Path | str | None = None) -> Pins:
         + [s.repository for s in exclusion_sources],
         "repository",
     )
+
+    # The benign code repositories are on a different host and in a different namespace, so they
+    # are not in the duplicate check above -- one id can legitimately name a GitHub repository and
+    # a Hugging Face one. This is the check that matters instead: B-code is drawn from material
+    # this project is measuring a **false-positive** rate over, and a repository that is also a
+    # pinned baseline's training source, a pinned attack pool or an exclusion source is material
+    # the corpus is supposed to be removing rather than drawing. It is also the enforceable half of
+    # the README's "not security or guardrail repositories" criterion; the rest of that criterion is
+    # a human reading, declared as one.
+    hosted_elsewhere = (
+        {_canonical(entry.repository) for entry in baselines}
+        | {_canonical(entry.repository) for entry in attack_datasets}
+        | {_canonical(entry.repository) for entry in exclusion_sources}
+    )
+    for entry in benign_frame.b_code.repositories:
+        if _canonical(entry.repository) in hosted_elsewhere:
+            reader.note(
+                f"benign_frame.{BENIGN_CODE_CLASS}.repository {entry.repository!r} is also pinned "
+                f"as a baseline, an attack dataset or an exclusion source; B-code is the material "
+                f"the false-positive rate is measured over, and drawing it from a source the "
+                f"corpus is meant to be removing against measures the filter rather than the layer"
+            )
 
     # A relationship to a dataset that is not pinned is a relationship to nothing, and a pinned
     # dataset a baseline says nothing about is the gap the lineage check exists to close.
@@ -2071,6 +2586,7 @@ def load_pins(root: Path | str | None = None) -> Pins:
         baselines=baselines,
         attack_datasets=attack_datasets,
         exclusion_sources=exclusion_sources,
+        benign_frame=benign_frame,
         path=path,
     )
 

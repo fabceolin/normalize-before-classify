@@ -21,16 +21,20 @@ break it. The opposite rule governs `corpus/dressings.py`, which must share the 
 source; the two rules are what keep the bound and held-out halves of the table from collapsing
 into each other.
 
-**Where the chain vocabulary lives.** `CLEAN_CHAIN`, `CLEAN_CHAIN_NAME`, `CHAIN_SEPARATOR` and
-`render_chain` are here rather than in `corpus/attack.py`, where story 3.2 first needed them. The
-benign builders and the held-out registry need to know how a chain is spelled and may not reach
-into the attack module to find out.
+**Where the chain and id vocabulary lives.** `CLEAN_CHAIN`, `CLEAN_CHAIN_NAME`,
+`CHAIN_SEPARATOR`, `render_chain`, `PAYLOAD_ID_HEX`, `ID_SEPARATOR`, `payload_id` and `item_id` are
+here rather than in `corpus/attack.py`, where story 3.2 first needed them. The benign builders and
+the held-out registry need to know how a chain is spelled and how a row is addressed, and may not
+reach into the attack module to find out -- an id scheme shared by both halves of the corpus and
+owned by one of them is a second home waiting to happen. Story 3.6 moved the four id names here
+when `corpus/benign.py` became the second caller.
 """
 
 from __future__ import annotations
 
+import hashlib
 from types import MappingProxyType
-from typing import Callable, Final, Mapping, Sequence
+from typing import Callable, Final, Iterable, Mapping, Sequence
 
 from nbc.errors import NbcError
 from nbc.schema import BENIGN_CLASSES, FAMILY_ATTACK
@@ -46,11 +50,16 @@ __all__ = [
     "CORPUS_CLASSES",
     "DECODED_LINKS",
     "HELDOUT_CHAINS",
+    "ID_SEPARATOR",
+    "PAYLOAD_ID_HEX",
     "CorpusMatrixInvalid",
     "chain_class",
     "chain_problems",
     "declared_links",
     "encoding_depth",
+    "id_collisions",
+    "item_id",
+    "payload_id",
     "render_chain",
     "validate",
 ]
@@ -102,6 +111,62 @@ def render_chain(chain: Sequence[str]) -> str:
     `base64+base64` and `base64` in the same cell, which is the one distinction N4 is about.
     """
     return CHAIN_SEPARATOR.join(chain) if chain else CLEAN_CHAIN_NAME
+
+
+# --- the item id ------------------------------------------------------------------------------
+
+PAYLOAD_ID_HEX: Final[int] = 16
+"""Hex characters of SHA-256 kept in a payload id.
+
+64 bits. Over a pool of ten thousand payloads the birthday probability of a collision is about
+3e-12, and a collision would be caught rather than silently merging two payloads: both builders
+refuse a pool in which two distinct texts produce one id.
+"""
+
+ID_SEPARATOR: Final[str] = "::"
+"""What separates the payload id from the chain in an item id."""
+
+
+def payload_id(text: str) -> str:
+    """A stable, content-derived id for one payload.
+
+    Content-derived rather than positional because AD-1's stable order is `(source, payload_id,
+    chain)`: an id that carried a row number would make the file's order a property of the read,
+    which is the one thing the byte-identical claim cannot depend on.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:PAYLOAD_ID_HEX]
+
+
+def item_id(payload: str, chain: Sequence[str] = CLEAN_CHAIN) -> str:
+    """AD-3's item id: `<payload_id>::<chain>`, the chain joined by `+`, or the literal `clean`.
+
+    The full chain, never the last link: a reported dressing axis that named only the outermost
+    dressing would make `base64+base64` and `base64` the same cell.
+    """
+    return f"{payload}{ID_SEPARATOR}{render_chain(chain)}"
+
+
+def id_collisions(pairs: Iterable[tuple[str, str]]) -> tuple[str, ...]:
+    """One message per item id that two different payloads produced. Empty when there are none.
+
+    A separate function so it has a failing input a test can supply: producing a real SHA-256
+    prefix collision is not something a test can do, and a check nobody has seen fire is a check
+    nobody knows fires. The tests hand it two payloads under one id directly.
+
+    The consequence it prevents is silent: two distinct payloads under one id merge into one
+    corpus row, the count drops by one, and every rate computed from it is over a pool that is not
+    the pool the report describes. Both halves of the corpus run it, which is why it lives here
+    beside `item_id` rather than in whichever builder needed it first.
+    """
+    seen: dict[str, str] = {}
+    problems: list[str] = []
+    for identifier, payload in pairs:
+        first = seen.setdefault(identifier, payload)
+        if first != payload:
+            problems.append(
+                f"payloads {first!r} and {payload!r} both produce item id {identifier}"
+            )
+    return tuple(problems)
 
 
 # --- the declared matrix ----------------------------------------------------------------------

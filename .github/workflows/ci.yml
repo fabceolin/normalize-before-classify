@@ -93,6 +93,47 @@ jobs:
         # off a cache directory name, and those are different guarantees.
         run: uv run python -m nbc.pins --verify
 
+      - name: Prove the benign frame's digest is the digest of the block
+        # FR5.1: `frame_id == hash(the frame block)`, asserted where it cannot be forgotten. The
+        # positive half is already covered by the step above -- `nbc.pins` refuses the file on
+        # mismatch, so a green `--verify` is the frame hashing to its own id. This step is the
+        # NEGATIVE half: a frame edited without re-declaring its digest has to stop the run, and a
+        # check nobody has seen refuse anything is a number in a file.
+        #
+        # The EXIT CODE, not non-zero-ness: 4 is PinsFileInvalid and 2 is a usage error, which is
+        # what a typo in this very step produces. The edit is made in a temporary copy, so the
+        # working tree stays clean for the dirty-tree gate below.
+        run: |
+          mkdir -p "$RUNNER_TEMP/frame"
+          sed 's/^seed = 2718281$/seed = 2718282/' pins.toml > "$RUNNER_TEMP/frame/pins.toml"
+          if cmp -s pins.toml "$RUNNER_TEMP/frame/pins.toml"; then
+            echo "::error::the edit changed nothing, so this step would pass without a frame check"
+            exit 1
+          fi
+          set +e
+          uv run python -m nbc.pins --root "$RUNNER_TEMP/frame"
+          status=$?
+          set -e
+          if [ "$status" -ne 4 ]; then
+            echo "::error::expected exit 4 (PinsFileInvalid) from an edited frame, got $status"
+            exit 1
+          fi
+
+      - name: Prove nothing reads the corpus without its manifest
+        # FR5.1's last clause, end to end and offline. There is no committed corpus, so the guarded
+        # read refuses -- and that refusal is the property: `data/*.jsonl` is reachable only through
+        # `manifest.read_corpus`, which compares the recorded frame_id and build_id before it hands
+        # back a row. 22 is CorpusManifestMismatch; 0 would mean something was read unverified.
+        run: |
+          set +e
+          uv run python -m nbc.corpus.build verify-corpus
+          status=$?
+          set -e
+          if [ "$status" -ne 22 ]; then
+            echo "::error::expected exit 22 (CorpusManifestMismatch), got $status"
+            exit 1
+          fi
+
       - name: Verify the layer is inside its declared size budget
         # NFR5, made falsifiable. Checks three things against each other in one pass: the budget
         # the README states, the budget `SizeBudget` declares, and the layer as measured. Editing

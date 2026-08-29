@@ -122,6 +122,13 @@ STAGE_IMPORTERS: dict[str, str] = {
         "contract by the layer's own published candidate floors rather than by a second "
         "declaration of them. It calls no entry point, which the test below enforces"
     ),
+    "nbc/corpus/benign.py": (
+        "reads decode.NAME and decode.CEILING_NAME, the two stage names a trace carries when the "
+        "layer examined a decode candidate. Story 3.6's B-code file-eligibility rule is a question "
+        "about the layer, and naming the stages here rather than spelling their strings is what "
+        "makes a renamed stage move the predicate instead of silently emptying the draw. It calls "
+        "no entry point, which the test below enforces"
+    ),
 }
 """Every module under `src/` that may import a stage module at all, each with its reason.
 
