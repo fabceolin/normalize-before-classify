@@ -167,6 +167,13 @@ def _dataset(tmp_path: Path) -> "object":
         revision="d" * 40,
         splits=("train",),
         attack_label=1,
+        draw=pins.AttackDraw(
+            declared_on="2026-08-29",
+            sample_size_positives=3,
+            method=pins.DRAW_SEEDED_RANDOM,
+            seed=7,
+            sort_key=None,
+        ),
         licence=pins.Licence(
             identifier=pins.NOT_DECLARED, source="s", attribution="a", redistributed=True
         ),

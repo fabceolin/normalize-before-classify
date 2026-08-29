@@ -90,6 +90,11 @@ from nbc.errors import NbcError
 
 __all__ = [
     "AttackDataset",
+    "AttackDraw",
+    "DRAW_HEAD",
+    "DRAW_METHODS",
+    "DRAW_SEEDED_RANDOM",
+    "DRAW_SORT_KEYS",
     "ExclusionSource",
     "Baseline",
     "BaselineIneligible",
@@ -137,8 +142,13 @@ __all__ = [
 PINS_FILENAME: Final[str] = "pins.toml"
 """The file's name, at the repository root. Named once, here."""
 
-SCHEMA_VERSION: Final[int] = 2
-"""The shape this module knows how to read. A file declaring another version is refused."""
+SCHEMA_VERSION: Final[int] = 3
+"""The shape this module knows how to read. A file declaring another version is refused.
+
+Version 3 adds the required `[attack_dataset.draw]` sub-table. A version-2 file has no draw at
+all, and defaulting one would be a draw nobody declared, so the version moves rather than the
+field becoming optional.
+"""
 
 MINIMUM_BASELINES: Final[int] = 2
 """Two baselines is the floor of SC5 and the run sits exactly on it.
@@ -267,6 +277,27 @@ The build probes and loads each source and compares what it observes against thi
 **both** directions: a source declared available that no longer resolves or no longer loads, and
 a source declared unreachable or unreadable that suddenly works, are all moves in the exclusion
 set -- and a moving exclusion set silently changes which rows survive into the corpus.
+"""
+
+DRAW_HEAD: Final[str] = "head"
+"""Take the first N of the pool under a declared sort key. Needs `sort_key`, refuses `seed`."""
+
+DRAW_SEEDED_RANDOM: Final[str] = "seeded_random"
+"""Shuffle the sorted pool under an explicit integer seed. Needs `seed`, refuses `sort_key`."""
+
+DRAW_METHODS: Final[tuple[str, ...]] = (DRAW_HEAD, DRAW_SEEDED_RANDOM)
+"""The only two ways a draw may be declared.
+
+A closed vocabulary rather than free text, for the reason every other vocabulary in this file is
+one: a method nobody implemented reads exactly like a method somebody did, and the difference
+only shows up in which rows the corpus ends up holding.
+"""
+
+DRAW_SORT_KEYS: Final[tuple[str, ...]] = ("text", "payload_id")
+"""What a `head` draw may sort by. Both are pure functions of the payload and of nothing else.
+
+Neither admits row position, split or file order, which is what would make the same pins produce
+two different corpora on two machines.
 """
 
 HTTP_OK: Final[int] = 200
@@ -736,12 +767,51 @@ class Baseline:
 
 
 @dataclass(frozen=True, slots=True)
-class AttackDataset:
-    """One pinned attack dataset, by identity.
+class AttackDraw:
+    """How many attack positives are drawn from a pinned dataset, and by what rule.
 
-    The draw -- sample size in attack positives, selection method, seed or sort key -- is
-    declared by the corpus story in this same file. It is absent rather than defaulted, because
-    a default draw is a draw nobody declared.
+    Every field is declared; none is defaulted. A default draw is a draw nobody declared, and the
+    whole point of writing it here is that a reviewer can read the rule without reading the code.
+
+    **The size is in positives.** The pinned pool is mixed-label and holds more than three times
+    as many rows as positives, so a size read as rows would draw roughly a third of what it says.
+    The key name carries the unit rather than a comment doing it.
+
+    `declared_on` is the date a human wrote this block, and **nothing compares it to anything**.
+    It is metadata of the same kind as an exclusion source's `checked_on`, and it is recorded here
+    rather than left out because story 3.6 folds the whole build declaration -- this block
+    included -- into a `build_id`, at which point the date becomes part of what a changed corpus
+    is distinguishable by. Until that story runs, this field is a note and is described as one.
+
+    The two methods each admit exactly one companion field, and the reader refuses the other:
+    `head` consumes `sort_key` and `seeded_random` consumes `seed`. A declaration carrying a
+    parameter its own method ignores is refused rather than tolerated, because an ignored seed
+    reads as a declared draw and is not one.
+    """
+
+    declared_on: str
+    sample_size_positives: int
+    method: str
+    seed: int | None
+    sort_key: str | None
+
+    def as_run_fields(self) -> dict[str, object]:
+        return {
+            "declared_on": self.declared_on,
+            "sample_size_positives": self.sample_size_positives,
+            "method": self.method,
+            "seed": self.seed,
+            "sort_key": self.sort_key,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AttackDataset:
+    """One pinned attack dataset, by identity and by draw.
+
+    `splits` is the whole set the counts are taken over, never one of them: the build compares
+    this list against the splits the reader actually yields, in both directions, because reading
+    a split as the dataset is the same error as reading a row count as a positive count.
     """
 
     key: str
@@ -749,6 +819,7 @@ class AttackDataset:
     revision: str
     splits: tuple[str, ...]
     attack_label: int
+    draw: AttackDraw
     licence: Licence
     provenance: Provenance
 
@@ -763,6 +834,7 @@ class AttackDataset:
             "revision": self.revision,
             "splits": list(self.splits),
             "attack_label": self.attack_label,
+            "draw": self.draw.as_run_fields(),
             "licence": self.licence.as_run_fields(),
             "provenance": self.provenance.as_run_fields(),
         }
@@ -1432,6 +1504,91 @@ def _read_oq2(
     )
 
 
+def _read_attack_draw(
+    reader: _Reader, parent: Mapping[str, Any], where: str
+) -> AttackDraw:
+    """The `[attack_dataset.draw]` sub-table, with the coupling between method and parameter.
+
+    Four refusals, each with an input that produces it:
+
+    - a `method` outside `DRAW_METHODS` -- a method nobody implemented reads exactly like one
+      somebody did, and the difference is which rows end up in the corpus;
+    - `head` with no `sort_key`, or a `sort_key` outside `DRAW_SORT_KEYS` -- a head take with no
+      declared order is "whatever the reader yielded first", which is not a rule;
+    - `seeded_random` with no `seed`, or a non-integer one -- the same, one level down;
+    - either method carrying the *other* one's parameter. That one is refused rather than
+      ignored: an ignored seed sitting in the file reads as a declared draw and is not one, and a
+      later edit to `method` would silently start consuming it.
+
+    `sample_size_positives` must be positive. Zero would draw an empty corpus and publish a rate
+    over nothing.
+    """
+    table = reader.table(parent, "draw", where)
+    where = f"{where}.draw"
+
+    declared_on = reader.calendar_date(
+        reader.string(table, "declared_on", where), f"{where}.declared_on"
+    )
+
+    size = reader.integer(table, "sample_size_positives", where)
+    if size <= 0:
+        reader.note(
+            f"{where}.sample_size_positives must be a positive count of attack positives, "
+            f"got {size!r}; a draw of none publishes a rate over nothing"
+        )
+
+    method = reader.string(table, "method", where)
+    if method and method not in DRAW_METHODS:
+        reader.note(
+            f"{where}.method must be one of {', '.join(DRAW_METHODS)}, got {method!r}"
+        )
+
+    has_seed = "seed" in table
+    has_sort_key = "sort_key" in table
+    seed: int | None = None
+    sort_key: str | None = None
+
+    if method == DRAW_HEAD:
+        if has_seed:
+            reader.note(
+                f"{where} declares method {DRAW_HEAD!r} and a seed; a head take consumes no "
+                f"randomness, so the seed would sit in the file looking like a declared draw"
+            )
+        if not has_sort_key:
+            reader.note(
+                f"{where} declares method {DRAW_HEAD!r} and no sort_key; the first N of an "
+                f"undeclared order is whatever the reader yielded first, which is not a rule"
+            )
+        else:
+            sort_key = reader.string(table, "sort_key", where)
+            if sort_key and sort_key not in DRAW_SORT_KEYS:
+                reader.note(
+                    f"{where}.sort_key must be one of {', '.join(DRAW_SORT_KEYS)}, "
+                    f"got {sort_key!r}"
+                )
+    elif method == DRAW_SEEDED_RANDOM:
+        if has_sort_key:
+            reader.note(
+                f"{where} declares method {DRAW_SEEDED_RANDOM!r} and a sort_key; the shuffle "
+                f"decides the order, so the sort_key would sit in the file consumed by nothing"
+            )
+        if not has_seed:
+            reader.note(
+                f"{where} declares method {DRAW_SEEDED_RANDOM!r} and no seed; a shuffle with no "
+                f"declared seed produces a different corpus on every run"
+            )
+        else:
+            seed = reader.integer(table, "seed", where)
+
+    return AttackDraw(
+        declared_on=declared_on,
+        sample_size_positives=size,
+        method=method,
+        seed=seed,
+        sort_key=sort_key,
+    )
+
+
 def _read_attack_dataset(
     reader: _Reader, table: Mapping[str, Any], index: int
 ) -> AttackDataset:
@@ -1500,6 +1657,7 @@ def _read_attack_dataset(
         revision=revision,
         splits=reader.distinct_strings(table, "splits", where),
         attack_label=reader.label_value(table, "attack_label", where),
+        draw=_read_attack_draw(reader, table, where),
         licence=_read_licence(reader, table, where),
         provenance=provenance,
     )

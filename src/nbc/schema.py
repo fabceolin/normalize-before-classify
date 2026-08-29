@@ -27,7 +27,21 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final
 
-__all__ = ["CanonContext", "CanonResult", "Edit", "Score", "StageResult"]
+__all__ = [
+    "ATTACK",
+    "BENIGN",
+    "BENIGN_CLASSES",
+    "CanonContext",
+    "CanonResult",
+    "CorpusItem",
+    "Edit",
+    "FAMILIES",
+    "FAMILY_ATTACK",
+    "FAMILY_BENIGN",
+    "LABELS",
+    "Score",
+    "StageResult",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +80,122 @@ class Score:
                 f"n_windows must be at least 1: a scored document occupies at least one "
                 f"window, got {n!r}"
             )
+
+
+# --- the corpus ------------------------------------------------------------------------------
+
+ATTACK: Final[int] = 1
+"""The gold label of an attack item. Named here so no builder writes the integer.
+
+This is the *corpus* vocabulary, and it is not the same thing as a pinned dataset's
+`attack_label` even where the two integers coincide. The dataset's value decides which of its
+rows are drawn; this one is the label the builder asserts by construction over what it rendered.
+Reading the corpus label off the source row would make the gold label a copy of somebody else's
+annotation, which is the one thing FR4 says this repository does not do -- and while the two
+integers agree, nothing would show it.
+"""
+
+BENIGN: Final[int] = 0
+"""The gold label of a benign item."""
+
+LABELS: Final[tuple[int, ...]] = (BENIGN, ATTACK)
+"""The only two gold labels. A third would make every rate in the project ill-defined."""
+
+FAMILY_ATTACK: Final[str] = "attack"
+FAMILY_BENIGN: Final[str] = "benign"
+
+FAMILIES: Final[tuple[str, ...]] = (FAMILY_ATTACK, FAMILY_BENIGN)
+"""The two halves of the table. Reported separately and never pooled."""
+
+BENIGN_CLASSES: Final[tuple[str, ...]] = ("b_code", "b_chat")
+"""The benign classes, named here because `ItemScore` carries the distinction rather than
+inferring it: `label == 0` separates benign from attack, but nothing separates code from chat,
+and that is the one distinction FR3.1 exists to protect. The corpus for these classes is drawn by
+story 3.6; the vocabulary lives here because the field does.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class CorpusItem:
+    """One line of `data/*.jsonl`: the text as rendered, and the label as asserted.
+
+    The two travel together by construction. `corpus/build.py` is the only writer, it produces
+    both in one constructor call, and an AST scan refuses a `label=` argument that is anything
+    other than one of the two constants above -- so a gold label can never be a value read off a
+    source row.
+
+    `benign_class` is always present as a key and is `None` for an attack. Absent-versus-null is
+    the difference between "this item has no benign class" and "somebody forgot to write one",
+    and a reader of the file cannot tell those apart if the key comes and goes.
+
+    `dressing` is the ordered chain the text was rendered through, empty for the clean chain.
+    The fold that applies it and the chain registry are story 3.3's; this type carries the field
+    because the id and the ordering already depend on it.
+    """
+
+    id: str
+    source: str
+    family: str
+    benign_class: str | None
+    dressing: tuple[str, ...]
+    text: str
+    label: int
+
+    def __post_init__(self) -> None:
+        for name in ("id", "source", "text"):
+            value = getattr(self, name)
+            if not isinstance(value, str):
+                raise ValueError(f"{name} must be a string, got {value!r}")
+        if not self.id:
+            raise ValueError("id is empty; every corpus row is addressable by id")
+        if not self.source:
+            raise ValueError("source is empty; every corpus row names where it came from")
+
+        if self.family not in FAMILIES:
+            raise ValueError(f"family must be one of {FAMILIES}, got {self.family!r}")
+        if isinstance(self.label, bool) or self.label not in LABELS:
+            raise ValueError(f"label must be one of {LABELS}, got {self.label!r}")
+
+        # The pair is checked, not each side alone. An attack row carrying label 0 is exactly the
+        # drift this type exists to make impossible, and each field is individually valid.
+        expected = ATTACK if self.family == FAMILY_ATTACK else BENIGN
+        if self.label != expected:
+            raise ValueError(
+                f"family {self.family!r} carries label {expected}, got {self.label!r}"
+            )
+
+        if self.family == FAMILY_ATTACK:
+            if self.benign_class is not None:
+                raise ValueError(
+                    f"an attack item has no benign class, got {self.benign_class!r}"
+                )
+        elif self.benign_class not in BENIGN_CLASSES:
+            raise ValueError(
+                f"a benign item must name one of {BENIGN_CLASSES}, got {self.benign_class!r}"
+            )
+
+        if not isinstance(self.dressing, tuple) or not all(
+            isinstance(link, str) and link for link in self.dressing
+        ):
+            raise ValueError(
+                f"dressing must be a tuple of non-empty dressing names, got {self.dressing!r}"
+            )
+
+    def as_json_object(self) -> dict[str, object]:
+        """The serialized form, with every key present and in a declared order.
+
+        Written by one module and read by another, so the key set is fixed here rather than in
+        whichever of the two is edited first.
+        """
+        return {
+            "id": self.id,
+            "source": self.source,
+            "family": self.family,
+            "benign_class": self.benign_class,
+            "dressing": list(self.dressing),
+            "text": self.text,
+            "label": self.label,
+        }
 
 
 # --- the canonicalization layer's shapes -----------------------------------------------------

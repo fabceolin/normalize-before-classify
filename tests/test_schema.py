@@ -100,7 +100,21 @@ def test_schema_declares_only_the_types_this_epic_uses() -> None:
     that first needs it, so the next story updates this list in the same commit that adds
     its type — and a type that appears with no consumer is caught.
     """
-    assert schema.__all__ == ["CanonContext", "CanonResult", "Edit", "Score", "StageResult"]
+    assert schema.__all__ == [
+        "ATTACK",
+        "BENIGN",
+        "BENIGN_CLASSES",
+        "CanonContext",
+        "CanonResult",
+        "CorpusItem",
+        "Edit",
+        "FAMILIES",
+        "FAMILY_ATTACK",
+        "FAMILY_BENIGN",
+        "LABELS",
+        "Score",
+        "StageResult",
+    ]
 
 
 def test_every_record_type_defined_here_is_exported() -> None:
@@ -112,7 +126,14 @@ def test_every_record_type_defined_here_is_exported() -> None:
         and dataclasses.is_dataclass(obj)
         and getattr(obj, "__module__", None) == schema.__name__
     }
-    assert defined == set(schema.__all__)
+    # Containment, not equality: `__all__` also carries the corpus vocabulary constants, which
+    # are not dataclasses. The claim under test is one-directional -- a record type defined here
+    # and not exported is a type with no contract -- so the failing input is a new dataclass whose
+    # name nobody added to `__all__`.
+    assert defined, "the scan found no record types, which would pass vacuously"
+    assert defined <= set(schema.__all__)
+    missing = [name for name in schema.__all__ if not hasattr(schema, name)]
+    assert not missing, f"{missing} are exported and not defined"
 
 
 # --- the canonicalization layer's shapes ------------------------------------------------------

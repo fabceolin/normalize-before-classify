@@ -18,7 +18,7 @@
 # document.** `meta.verified_on` says when. Re-verify with `python -m nbc.pins --verify`.
 
 [meta]
-schema_version = 2
+schema_version = 3
 verified_on = "2026-08-28"
 verified_against = """\
 https://huggingface.co/api/{models,datasets}/<id>/revision/<sha>, plus the config.json, \
@@ -274,6 +274,53 @@ revision = "a3a877d608f37b7d20d9945671902df895ecdb46"
 splits = ["train", "test"]
 # Verified against the pinned revision's rows rather than assumed from the field's name.
 attack_label = 1
+
+[attack_dataset.draw]
+# The draw, declared here and nowhere else. `pins.toml` is the only home for a sample size, and
+# `tests/test_pins.py` refuses a literal copy of any of these values under `src/`, `spikes/` or
+# `tests/`.
+declared_on = "2026-08-29"
+
+# **Positives, never rows.** This dataset is mixed-label and carries 10296 rows against 3146
+# attack positives, so a size read as rows would draw roughly a third of what it says. The name of
+# the key carries the unit for the same reason every count in this project does.
+#
+# Why 1200. Nothing upstream fixes this number -- FR1 says only that it is expressed in positives,
+# and the PRD deliberately asserts no post-filter count because the filter is a build output.
+# Three things set it:
+#   - the interval. Every attack cell has this n; every benign cell has the frame's 500. At
+#     p ~ 0.85 a Wilson half-width is about +/-2.0 points here against +/-3 there, so the recall
+#     column is never the loose half of a comparison read cell for cell.
+#   - the headroom. The pool holds 3073 unique positives. Two of the twelve exclusion sources have
+#     been measured and reach 515 of them; the other ten are unmeasured and can only remove more.
+#     A draw near the survivors would abort the first time an unmeasured source bit, and the abort
+#     would be correct -- which is an argument for leaving room, not for removing the abort.
+#   - not a round power of ten, and that is not superstition. `tests/test_pins.py` forbids any
+#     value declared here from appearing as a literal under `src/`, `spikes/` or `tests/`, and it
+#     compares values rather than meanings. `report/size_budget.py` declares
+#     `total_code_lines=1000`, an unrelated fact that would have collided and made the scan report
+#     a second home for a pin that is not one. Verified before this number was written.
+sample_size_positives = 1200
+
+# The closed vocabulary is `head` and `seeded_random`, and each admits exactly one companion key:
+# `head` needs `sort_key` and refuses `seed`, `seeded_random` needs `seed` and refuses `sort_key`.
+# A declaration carrying a parameter its own method does not consume is refused rather than
+# ignored, because an ignored seed reads as a declared draw and is not one.
+#
+# Why not `head`. A head take under any sort key over payload text is a lexical slice -- every
+# payload beginning with the same character class -- which is a systematically biased subsample
+# wearing a declared rule. The seeded shuffle has no such structure.
+method = "seeded_random"
+
+# Arbitrary by design and fixed by declaration: what makes a seeded draw honest is that the seed
+# was written down before the numbers existed, not which integer it is. The pool is sorted before
+# it is shuffled, so the draw depends on this value and on nothing else -- not on split order, not
+# on parquet row order, not on the hash seed of the process.
+#
+# Deliberately NOT the spike's `SELECTION_SEED`. That constant draws a different sample for a
+# different question (OQ2, before any corpus existed) and says so in its own docstring; sharing an
+# integer between the two would invite a reader to think one draw reproduces the other.
+seed = 1618033
 
 [attack_dataset.provenance]
 # What this dataset's OWN card says it was built from. It is pinned here because the one-hop

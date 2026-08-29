@@ -24,19 +24,37 @@ and never validity, and the per-source counts published beside the table make an
 visible. What replaces the column declaration as a check is `texts_loaded > 0` per source, in
 `exclusion.verify_observations`.
 
-    python -m nbc.corpus.build --exclusion-report
+**The CLI is subcommands, and that is AD-1's requirement rather than a style choice.**
 
-probes and loads every declared exclusion source and prints the accounting as JSON, with no corpus
-to filter -- the corpus arrives in story 3.2. It touches the network, so it is not part of the
-offline unit suite.
+    python -m nbc.corpus.build exclusion-report   # probe and load every exclusion source
+    python -m nbc.corpus.build build-attack       # draw and write data/attack.jsonl
+    python -m nbc.corpus.build rebuild-attack     # the same, over a corpus that already exists
+
+Rebuilding an existing corpus is an **explicit subcommand and never a side effect**: `build-attack`
+aborts with `CorpusWriteRefused` rather than overwriting, so no run can replace the corpus a table
+was computed over while looking like it did something else. Every subcommand touches the network,
+so none of them is part of the offline unit suite.
+
+**This module is the only writer of `data/*.jsonl`** (AD-1). An AST scan over `src/` and `spikes/`
+in `tests/corpus/test_build.py` holds that: it collects every write primitive in the tree and
+refuses any file outside a declared allow-list, and the scan's own predicate is tested against a
+synthetic offender so it cannot pass by failing to look.
 """
 
 from __future__ import annotations
 
 import sys
 from collections.abc import Mapping
-from typing import Final, Iterator
+from pathlib import Path
+from typing import Final, Iterable, Iterator
 
+from nbc.corpus.attack import (
+    AttackDrawReport,
+    AttackDrawUnsatisfiable,
+    PoolRow,
+    draw_attack_items,
+    serialize,
+)
 from nbc.corpus.exclusion import (
     NO_ANSWER,
     NORMALIZATION,
@@ -52,16 +70,49 @@ from nbc.corpus.exclusion import (
     verify_observations,
 )
 from nbc.errors import NbcError, exit_code_for
-from nbc.pins import HTTP_OK, ExclusionSource, Pins, load_pins
+from nbc.schema import CorpusItem
+from nbc.pins import HTTP_OK, AttackDataset as AttackDatasetPin, ExclusionSource, Pins, load_pins
 
 __all__ = [
+    "ATTACK_CORPUS_FILENAME",
+    "CorpusWriteRefused",
+    "DATA_DIRNAME",
     "HTTP_TIMEOUT_SECONDS",
+    "build_attack_corpus",
+    "corpus_directory",
     "iter_exclusion_texts",
     "main",
     "observe_exclusion_sources",
     "probe",
+    "read_attack_pool",
     "read_exclusion_index",
+    "write_corpus",
 ]
+
+class CorpusWriteRefused(NbcError, exit_code=18):
+    """A corpus file already exists and this call was not the explicit rebuild.
+
+    Code 18. AD-1 requires that rebuilding an existing corpus be an explicit subcommand and never
+    a side effect of anything else, and a refusal that has its own exit code is what lets a caller
+    tell "you meant `rebuild-attack`" apart from "the data is contradictory".
+    """
+
+
+ATTACK_CORPUS_FILENAME: Final[str] = "attack.jsonl"
+"""The attack corpus' filename under `data/`. Named once, here."""
+
+DATA_DIRNAME: Final[str] = "data"
+"""Where the committed corpus lives, relative to the repository root. Named once, here."""
+
+
+def corpus_directory(root: str | None = None) -> Path:
+    """The directory `data/*.jsonl` is written to.
+
+    Takes a root so a test can build into `tmp_path`: CI refuses a dirty tree, and a builder that
+    could only ever write into the checkout would make every end-to-end test of it a violation.
+    """
+    base = Path(root) if root is not None else Path(__file__).resolve().parents[3]
+    return base / DATA_DIRNAME
 
 HTTP_TIMEOUT_SECONDS: Final[float] = 30.0
 """How long one hub probe may take. A timeout is `NO_ANSWER`, which fails the declared status.
@@ -211,8 +262,162 @@ def read_exclusion_index(
     return build_index(texts_by_source), planned, observations
 
 
+TEXT_COLUMN: Final[str] = "text"
+LABEL_COLUMN: Final[str] = "label"
+"""The two columns the pinned attack dataset publishes, read by name and checked before use.
+
+Named here rather than declared per source in `pins.toml`: one dataset is pinned, both columns are
+in its declared feature list at the pinned revision, and `read_attack_pool` aborts naming what it
+found if either is absent. A declaration in the pin file would be a second home for a fact the
+dataset itself carries, and the failure mode of a *wrong* declaration is the silent one -- zero
+rows read as a dataset with nothing in it.
+
+This is not the exclusion sources' problem, and the two are read differently on purpose: those are
+twelve heterogeneous sources whose text hides at arbitrary depth, so they are walked. This is the
+one dataset whose rows the corpus is made of, and a payload read out of the wrong column would be
+the corpus rather than a miscount in a filter.
+"""
+
+
+def read_attack_pool(
+    dataset: AttackDatasetPin,
+) -> tuple[tuple[PoolRow, ...], tuple[str, ...]]:
+    """Every row of the pinned attack dataset, over every split it ships, at the pinned revision.
+
+    Returns the rows and the splits **as observed**, never as declared: the caller compares the
+    two, in both directions. Handing back the declared list would make that comparison a check of
+    a value against itself, which is the pattern this project keeps finding in its own history.
+
+    `datasets.load_dataset` with no `split` argument returns every split, which is what makes the
+    observation an observation. Configs are enumerated for the same reason `iter_exclusion_texts`
+    enumerates them: a dataset read at one config is a fraction of a source silently treated as
+    the whole of it.
+    """
+    import datasets
+
+    configs = datasets.get_dataset_config_names(
+        dataset.repository, revision=dataset.revision
+    )
+    rows: list[PoolRow] = []
+    observed: list[str] = []
+    for config in sorted(configs):
+        loaded = datasets.load_dataset(
+            dataset.repository, config, revision=dataset.revision
+        )
+        for split in sorted(loaded):
+            table = loaded[split]
+            missing = [
+                column
+                for column in (TEXT_COLUMN, LABEL_COLUMN)
+                if column not in table.column_names
+            ]
+            if missing:
+                raise AttackDrawUnsatisfiable(
+                    f"{dataset.repository}@{dataset.revision} split {split!r} does not publish "
+                    f"column(s) {missing}; it publishes {sorted(table.column_names)}. A payload "
+                    f"read out of the wrong column would be the corpus, not a miscount"
+                )
+            # A split name is unique per config here because one config is pinned; a second
+            # config would collide, so the observed name carries the config when there is more
+            # than one rather than silently merging two splits under one label.
+            name = split if len(configs) == 1 else f"{config}/{split}"
+            observed.append(name)
+            texts = table[TEXT_COLUMN]
+            labels = table[LABEL_COLUMN]
+            rows.extend(
+                PoolRow(split=name, index=index, text=text, label=label)
+                for index, (text, label) in enumerate(zip(texts, labels))
+            )
+    return tuple(rows), tuple(observed)
+
+
+def build_attack_corpus(
+    pins: Pins, *, root: str | None = None, rebuild: bool = False
+) -> tuple[AttackDrawReport, ExclusionReport, Path, int]:
+    """The whole attack build: pool, exclusion index, gates, draw, write.
+
+    The exclusion index is read **before** the pool is drawn against it and after its own
+    verification, so a corpus is never filtered against a set the pins do not describe. Both
+    reports come back so the caller publishes the accounting for what it removed as well as for
+    what it kept.
+    """
+    if len(pins.attack_datasets) != 1:
+        # `load_pins` requires at least one. More than one is a real possibility FR1 leaves open,
+        # and it needs a declared rule for merging two label vocabularies and two draws. Nothing
+        # here invents one.
+        raise AttackDrawUnsatisfiable(
+            f"{len(pins.attack_datasets)} attack datasets are pinned and this build implements "
+            f"the draw for exactly one; merging two pools needs a declared rule for their label "
+            f"vocabularies and their sample sizes, and none is declared"
+        )
+    dataset = pins.attack_datasets[0]
+
+    rows, observed_splits = read_attack_pool(dataset)
+
+    # The exclusion index is the largest download this build makes, and it is built lazily so a
+    # pool that fails a cheap gate -- a text carried at both labels, a split nobody declared --
+    # aborts before any of it is fetched. `draw_attack_items` decides when; this closure only
+    # keeps what the report needs afterwards.
+    read: dict[str, object] = {}
+
+    def index_of() -> ExclusionIndex:
+        index, planned, observations = read_exclusion_index(pins)
+        read["planned"] = planned
+        read["observations"] = observations
+        return index
+
+    items, draw_report, matches = draw_attack_items(
+        rows, observed_splits, dataset, index_of
+    )
+    planned = read["planned"]
+    observations = read["observations"]
+
+    exclusion_report = ExclusionReport(
+        normalization=NORMALIZATION,
+        declaration_digest=declaration_digest(pins),
+        rows_in=draw_report.unique_positives,
+        rows_removed=draw_report.removed_by_exclusion,
+        outcomes=outcomes_of(planned, observations, matches),  # type: ignore[arg-type]
+    )
+
+    path = corpus_directory(root) / ATTACK_CORPUS_FILENAME
+    written = write_corpus(path, items, rebuild=rebuild)
+    return draw_report, exclusion_report, path, written
+
+
+
+def write_corpus(path: Path, items: Iterable[CorpusItem], *, rebuild: bool = False) -> int:
+    """Write the corpus, refusing to overwrite unless this was the explicit rebuild. Returns bytes.
+
+    **This is the only call in `src/` or `spikes/` that puts a corpus on disk**, which is AD-1's
+    rule rather than a preference, and `tests/corpus/test_build.py` holds it with an AST scan over
+    the whole tree. `corpus/attack.py` renders the bytes and does not write them: keeping the
+    serialization pure is what lets every ordering and encoding claim be tested offline, and
+    keeping the write here is what makes the writer countable.
+
+    UTF-8 with no BOM (`encoding="utf-8"`, never `utf-8-sig`) and `newline="\n"`, so the bytes are
+    the same on every platform the project runs on -- and `.gitattributes` marks `*.jsonl` as LF
+    text so a checkout cannot reintroduce the difference.
+    """
+    if path.exists() and not rebuild:
+        raise CorpusWriteRefused(
+            f"{path} already exists and this is not a rebuild. Rebuilding an existing corpus is "
+            f"an explicit subcommand and never a side effect of anything else, because a corpus "
+            f"silently replaced mid-run publishes a table computed over two different corpora"
+        )
+    payload = serialize(items)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload, encoding="utf-8", newline="\n")
+    return len(payload.encode("utf-8"))
+
+
 def main(argv: list[str] | None = None) -> int:
-    """`python -m nbc.corpus.build --exclusion-report` -- the accounting, over the network."""
+    """The corpus build's three subcommands. Every one of them touches the network.
+
+    Subcommands rather than flags because AD-1 requires that rebuilding an existing corpus be an
+    explicit act. `build-attack` refuses to overwrite; `rebuild-attack` is the same code path with
+    the refusal lifted, and nothing else in the project calls the writer.
+    """
     import argparse
     import json
 
@@ -220,42 +425,63 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="python -m nbc.corpus.build",
-        description="Build-time steps for the corpus. Touches the network.",
-    )
-    parser.add_argument(
-        "--exclusion-report",
-        action="store_true",
-        help=(
-            "probe and load every declared exclusion source and print the accounting; there is "
-            "no corpus to filter yet, so every removal count is zero by construction"
-        ),
+        description="Build-time steps for the corpus. Every subcommand touches the network.",
     )
     parser.add_argument(
         "--root",
         metavar="DIR",
         default=None,
-        help="directory holding pins.toml (default: the repository root)",
+        help="directory holding pins.toml and data/ (default: the repository root)",
+    )
+    subcommands = parser.add_subparsers(dest="subcommand", required=True)
+    subcommands.add_parser(
+        "exclusion-report",
+        help=(
+            "probe and load every declared exclusion source and print the accounting, without "
+            "drawing or writing a corpus"
+        ),
+    )
+    subcommands.add_parser(
+        "build-attack",
+        help=(
+            f"draw the declared attack positives and write data/{ATTACK_CORPUS_FILENAME}; "
+            f"refuses to overwrite an existing corpus"
+        ),
+    )
+    subcommands.add_parser(
+        "rebuild-attack",
+        help=(
+            "the same build, over a corpus that already exists. Explicit because a corpus "
+            "replaced as a side effect publishes a table computed over two different corpora"
+        ),
     )
     args = parser.parse_args(argv)
 
-    if not args.exclusion_report:
-        parser.error("nothing to do; --exclusion-report is the only step this story ships")
-
     try:
         pins = load_pins(args.root)
-        _index, planned, observations = read_exclusion_index(pins)
-        report = ExclusionReport(
-            normalization=NORMALIZATION,
-            declaration_digest=declaration_digest(pins),
-            rows_in=0,
-            rows_removed=0,
-            outcomes=outcomes_of(planned, observations, {}),
-        )
+        if args.subcommand == "exclusion-report":
+            _index, planned, observations = read_exclusion_index(pins)
+            report: dict[str, object] = ExclusionReport(
+                normalization=NORMALIZATION,
+                declaration_digest=declaration_digest(pins),
+                rows_in=0,
+                rows_removed=0,
+                outcomes=outcomes_of(planned, observations, {}),
+            ).as_run_fields()
+        else:
+            draw_report, exclusion_report, path, written = build_attack_corpus(
+                pins, root=args.root, rebuild=args.subcommand == "rebuild-attack"
+            )
+            report = {
+                **draw_report.as_run_fields(),
+                **exclusion_report.as_run_fields(),
+                "written": {"path": str(path), "bytes": written},
+            }
     except NbcError as abort:
         print(abort, file=sys.stderr)
         return exit_code_for(abort)
 
-    json.dump(report.as_run_fields(), sys.stdout, indent=2, sort_keys=True)
+    json.dump(report, sys.stdout, indent=2, sort_keys=True)
     print()
     return EXIT_OK
 

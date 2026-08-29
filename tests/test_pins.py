@@ -25,6 +25,10 @@ import pytest
 import nbc
 from nbc import pins as pins_module
 from nbc.pins import (
+    DRAW_HEAD,
+    DRAW_METHODS,
+    DRAW_SEEDED_RANDOM,
+    DRAW_SORT_KEYS,
     EXCLUSION_AVAILABLE,
     EXCLUSION_UNREACHABLE,
     EXCLUSION_UNREADABLE,
@@ -136,6 +140,15 @@ def _dataset(**overrides: Any) -> dict[str, Any]:
         "revision": SHA_D,
         "splits": ["train", "test"],
         "attack_label": 1,
+        # The draw the fixture declares is deliberately tiny and deliberately not the committed
+        # one: every value here is compared against `pins.toml`'s by the no-literals scans, and a
+        # fixture that copied the real draw would be the second home those scans exist to forbid.
+        "draw": {
+            "declared_on": "2026-08-29",
+            "sample_size_positives": 3,
+            "method": DRAW_SEEDED_RANDOM,
+            "seed": 7,
+        },
         "licence": {
             "identifier": NOT_DECLARED,
             "source": "nothing on the card",
@@ -1298,7 +1311,10 @@ def _pinned_identifiers(document: dict[str, Any]) -> set[str]:
             if key in {"repository", "revision", "card_revision"} or key.endswith("_path"):
                 identifiers.add(value)
         elif isinstance(value, int) and not isinstance(value, bool):
-            if "sample_size" in key:
+            # Sizes and seeds both. A seed is a draw parameter exactly as a sample size is, and a
+            # second copy of one reproduces a different sample while looking like the declared
+            # draw -- which is the same defect, one field over.
+            if "sample_size" in key or key == "seed":
                 identifiers.add(str(value))
 
     walk(document, "")
@@ -2127,3 +2143,130 @@ def test_the_run_fields_publish_both_exclusion_sets(committed_pins: Any) -> None
     assert set(fields["required_exclusion_sources"]) <= set(
         fields["derived_exclusion_sources"]
     )
+
+
+# --- the attack draw ---------------------------------------------------------------------
+
+
+def _with_draw(**overrides: Any) -> list[dict[str, Any]]:
+    """The fixture dataset with its `draw` sub-table amended.
+
+    `None` removes a key, which is how the "declares no seed" and "declares no sort_key" cases
+    are expressed without a second fixture builder.
+    """
+    dataset = _dataset()
+    draw = dict(dataset["draw"])
+    for key, value in overrides.items():
+        if value is None:
+            draw.pop(key, None)
+        else:
+            draw[key] = value
+    dataset["draw"] = draw
+    return [dataset]
+
+
+def test_the_committed_draw_is_declared_in_positives_with_a_known_method(
+    repo_root: Path,
+) -> None:
+    """The AC's list, read off the file rather than off a comment about it.
+
+    No value is asserted here: `pins.toml` is the only home for the size and the seed, and this
+    file may not hold a second copy of either. What is asserted is that each field is present, is
+    the right kind of thing, and that the method's own companion field is the one that is set.
+    """
+    pins = load_pins(repo_root)
+    assert pins.attack_datasets, "the scan found no attack dataset, which would pass vacuously"
+    for dataset in pins.attack_datasets:
+        draw = dataset.draw
+        assert draw.sample_size_positives > 0
+        assert draw.method in DRAW_METHODS
+        assert draw.declared_on
+        # Exactly one companion, decided by the method. Both set, or neither, is the state the
+        # reader refuses.
+        assert (draw.seed is None) != (draw.sort_key is None)
+        if draw.method == DRAW_SEEDED_RANDOM:
+            assert isinstance(draw.seed, int) and draw.sort_key is None
+        else:
+            assert draw.sort_key in DRAW_SORT_KEYS and draw.seed is None
+        # Counts are over every split, so more than one must be declared for this pool.
+        assert len(dataset.splits) > 1
+
+
+def test_a_draw_declaring_an_unknown_method_is_refused(tmp_path: Path) -> None:
+    write_pins(tmp_path, _document(datasets=_with_draw(method="first_n", seed=None)))
+    with pytest.raises(PinsFileInvalid, match="method"):
+        load_pins(tmp_path)
+
+
+def test_a_head_draw_with_no_sort_key_is_refused(tmp_path: Path) -> None:
+    """The first N of an undeclared order is whatever the reader yielded first."""
+    write_pins(tmp_path, _document(datasets=_with_draw(method=DRAW_HEAD, seed=None)))
+    with pytest.raises(PinsFileInvalid, match="sort_key"):
+        load_pins(tmp_path)
+
+
+def test_a_head_draw_carrying_a_seed_is_refused(tmp_path: Path) -> None:
+    """Refused rather than ignored: an ignored seed reads as a declared draw and is not one."""
+    write_pins(
+        tmp_path, _document(datasets=_with_draw(method=DRAW_HEAD, sort_key="text"))
+    )
+    with pytest.raises(PinsFileInvalid, match="seed"):
+        load_pins(tmp_path)
+
+
+def test_a_head_draw_with_an_unknown_sort_key_is_refused(tmp_path: Path) -> None:
+    write_pins(
+        tmp_path,
+        _document(datasets=_with_draw(method=DRAW_HEAD, seed=None, sort_key="row_order")),
+    )
+    with pytest.raises(PinsFileInvalid, match="sort_key"):
+        load_pins(tmp_path)
+
+
+def test_a_seeded_draw_with_no_seed_is_refused(tmp_path: Path) -> None:
+    write_pins(tmp_path, _document(datasets=_with_draw(seed=None)))
+    with pytest.raises(PinsFileInvalid, match="seed"):
+        load_pins(tmp_path)
+
+
+def test_a_seeded_draw_carrying_a_sort_key_is_refused(tmp_path: Path) -> None:
+    write_pins(tmp_path, _document(datasets=_with_draw(sort_key="text")))
+    with pytest.raises(PinsFileInvalid, match="sort_key"):
+        load_pins(tmp_path)
+
+
+@pytest.mark.parametrize("size", [0, -1])
+def test_a_draw_of_no_positives_is_refused(tmp_path: Path, size: int) -> None:
+    """A draw of none publishes a rate over nothing."""
+    write_pins(tmp_path, _document(datasets=_with_draw(sample_size_positives=size)))
+    with pytest.raises(PinsFileInvalid, match="sample_size_positives"):
+        load_pins(tmp_path)
+
+
+def test_a_draw_dated_off_the_calendar_is_refused(tmp_path: Path) -> None:
+    write_pins(tmp_path, _document(datasets=_with_draw(declared_on="2026-13-45")))
+    with pytest.raises(PinsFileInvalid, match="declared_on"):
+        load_pins(tmp_path)
+
+
+def test_a_dataset_with_no_draw_at_all_is_refused(tmp_path: Path) -> None:
+    """Absent rather than defaulted: a default draw is a draw nobody declared."""
+    dataset = _dataset()
+    del dataset["draw"]
+    write_pins(tmp_path, _document(datasets=[dataset]))
+    with pytest.raises(PinsFileInvalid, match="draw"):
+        load_pins(tmp_path)
+
+
+def test_the_draw_reaches_the_run_fields(repo_root: Path) -> None:
+    """A declaration nothing publishes is a declaration a reader of the results cannot check."""
+    fields = load_pins(repo_root).as_run_fields()["pins"]
+    assert fields["attack_datasets"]
+    for dataset in fields["attack_datasets"]:
+        assert set(dataset["draw"]) == {
+            "declared_on",
+            "sample_size_positives",
+            "method",
+            "seed",
+            "sort_key",
+        }
