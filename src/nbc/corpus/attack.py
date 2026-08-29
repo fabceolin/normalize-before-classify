@@ -35,13 +35,22 @@ iteration order or a process hash seed. `tests/corpus/test_attack.py` asserts th
 the same pool twice under different `PYTHONHASHSEED` values in a subprocess, from a shuffled row
 order, and comparing bytes.
 
-**Every declared chain, once per drawn payload.** The chains come from
-`corpus/matrix.py::CHAINS`, keyed on the attack family, and the text from `dressings.dress`, which
-is AD-3's `reduce(apply, chain, payload)`. So one drawn payload becomes as many corpus rows as
-there are attack chains, each with its own item id, and the dressing axis of the headline table is
-that constant rather than a list any caller assembled. `matrix.validate()` runs before the first
-row is rendered, so a chain naming a dressing nothing implements aborts instead of producing a
-column that silently does not exist.
+**Every declared chain, once per drawn payload, over both registries.** The chains come from
+`corpus/matrix.py::CHAINS` and `corpus/matrix.py::HELDOUT_CHAINS`, keyed on the attack family, and
+the text from `dressings.dress_declared`, which is AD-3's `reduce(apply, chain, payload)` over the
+union of the two dressing registries. So one drawn payload becomes as many corpus rows as there are
+bound chains plus held-out chains, each with its own item id, and the dressing axis of the headline
+table is those constants rather than a list any caller assembled.
+
+The held-out half is **built here rather than only declared**: AD-28's abort list names an empty
+held-out block as the specific failure it exists to prevent, and a registry nothing renders from
+leaves that block empty while satisfying every word about registries. The two axes travel
+separately on the report (`chains`, `held_out_chains`) because `chain_class` is part of the cell key
+(AD-2) and no function aggregates across it (AD-11).
+
+`matrix.validate(CHAINS, DRESSINGS)` and `heldout.validate_heldout()` both run before the first row
+is rendered, so a chain naming a dressing nothing implements aborts instead of producing a column
+that silently does not exist.
 """
 
 from __future__ import annotations
@@ -52,12 +61,14 @@ import random
 from dataclasses import dataclass
 from typing import Callable, Final, Iterable, Mapping, Sequence
 
-from nbc.corpus.dressings import dress
+from nbc.corpus.dressings import DRESSINGS, dress_declared
 from nbc.corpus.exclusion import ExclusionIndex, filter_rows
+from nbc.corpus.heldout import validate_heldout
 from nbc.corpus.roundtrip import payloads_below_decode_floor
 from nbc.corpus.matrix import (
     CHAINS,
     CLEAN_CHAIN,
+    HELDOUT_CHAINS,
     render_chain,
     validate as validate_matrix,
 )
@@ -313,10 +324,17 @@ def render_attack_item(
 ) -> CorpusItem:
     """One corpus row: the rendered text and the gold label, produced by one constructor call.
 
-    The text is `dressings.dress(payload, chain)`, which is AD-3's `reduce(apply, chain, payload)`
-    -- so `("base64", "homoglyph")` produces `homoglyph(to_base64(payload))`, the later link
-    wrapping the earlier. The empty chain returns the payload itself, which is what makes `clean`
-    the identity element of the fold rather than a dressing that happens to change nothing.
+    The text is `dressings.dress_declared(payload, chain)`, which is AD-3's
+    `reduce(apply, chain, payload)` over **both** registries -- so `("base64", "homoglyph")`
+    produces `homoglyph(to_base64(payload))`, the later link wrapping the earlier, and
+    `("base32",)` produces a held-out row. The empty chain returns the payload itself, which is
+    what makes `clean` the identity element of the fold rather than a dressing that happens to
+    change nothing.
+
+    The union rather than `DRESSINGS`, because AD-28 requires the held-out block to be **built**:
+    a registry nothing renders from leaves the held-out column of the table empty, which is the
+    specific failure AD-28's abort list names. `chain_class` (AD-2) tells the two halves apart
+    downstream, and it reads the registries rather than this call.
 
     The **payload id is the id of the payload**, never of the dressed text: the whole point of
     AD-3's `<payload_id>::<chain>` is that one payload's ten rows share a stem, so the harness can
@@ -332,7 +350,7 @@ def render_attack_item(
         family=FAMILY_ATTACK,
         benign_class=None,
         dressing=tuple(chain),
-        text=dress(payload, chain),
+        text=dress_declared(payload, chain),
         label=ATTACK,
     )
 
@@ -345,15 +363,21 @@ class AttackDrawReport:
     in rows and are named so. Both units are published because the pair is the error this project
     keeps making: the pool holds three times as many rows as positives, and a size read in the
     wrong unit is off by that much. A third unit now sits under those two -- one drawn positive
-    becomes one row **per chain** -- so `chains` travels beside the counts and
-    `items_written == drawn_positives * len(chains)` is checkable by a reader of the report rather
-    than only by a reader of the code.
+    becomes one row **per chain**, over both registries -- so `chains` and `held_out_chains` travel
+    beside the counts and `items_written == drawn_positives * (len(chains) + len(held_out_chains))`
+    is checkable by a reader of the report rather than only by a reader of the code.
+
+    The two chain lists are **separate fields rather than one concatenation**, which is AD-2 and
+    AD-11: `chain_class` is part of the cell key and no function aggregates across it, so a report
+    that published one merged axis would have handed Epic 4 a list it could only split by looking
+    the names up again somewhere else.
     """
 
     repository: str
     revision: str
     declared_splits: tuple[str, ...]
     chains: tuple[str, ...]
+    held_out_chains: tuple[str, ...]
     rows_by_split: Mapping[str, int]
     positives_by_split: Mapping[str, int]
     blank_positive_rows: int
@@ -375,6 +399,10 @@ class AttackDrawReport:
                 # it: `results.json` reports per chain, and a chain in the results that is not in
                 # this list is a cell computed over rows this build did not write.
                 "chains": list(self.chains),
+                # AD-28's block, published as its own axis: `report/` renders it under its own
+                # heading and N4 quantifies over it, so a held-out chain that reached the results
+                # without appearing here would be a cell computed over rows nobody declared.
+                "held_out_chains": list(self.held_out_chains),
                 "rows_by_split": dict(sorted(self.rows_by_split.items())),
                 "positives_by_split": dict(sorted(self.positives_by_split.items())),
                 # Counted and published rather than dropped in silence. The 3071-versus-3073
@@ -420,8 +448,13 @@ def draw_attack_items(
     # Before anything is rendered, and before the pool is even read for contradictions: a chain
     # naming a dressing nothing implements is a defect in a constant, and finding it after a
     # gigabyte of downloads would be finding it late for no reason.
-    validate_matrix()
-    chains = CHAINS[FAMILY_ATTACK]
+    validate_matrix(CHAINS, DRESSINGS)
+    validate_heldout()
+    chains = tuple(tuple(chain) for chain in CHAINS[FAMILY_ATTACK])
+    held_out = tuple(tuple(chain) for chain in HELDOUT_CHAINS[FAMILY_ATTACK])
+    # Both registries, in a declared order: bound first, held out after, so the file's row order
+    # stays a property of the sort in `serialize` rather than of this concatenation.
+    every_chain = chains + held_out
 
     split_problems = verify_splits(dataset.splits, observed_splits)
     if split_problems:
@@ -463,7 +496,7 @@ def draw_attack_items(
     rendered = tuple(
         (render_attack_item(payload, source=dataset.repository, chain=chain), payload)
         for payload in drawn
-        for chain in chains
+        for chain in every_chain
     )
     items = tuple(item for item, _payload in rendered)
     collisions = id_collisions((item.id, payload) for item, payload in rendered)
@@ -475,12 +508,15 @@ def draw_attack_items(
         revision=dataset.revision,
         declared_splits=tuple(dataset.splits),
         chains=tuple(render_chain(chain) for chain in chains),
+        held_out_chains=tuple(render_chain(chain) for chain in held_out),
         rows_by_split=_count_by_split(rows),
         positives_by_split=_count_by_split(positive_rows),
         blank_positive_rows=blank,
-        payloads_below_decode_floor=len(
-            payloads_below_decode_floor(drawn, [tuple(chain) for chain in chains])
-        ),
+        # Over the **bound** chains only, and deliberately: the exemption is story 3.4's, whose
+        # contract is scoped to the bound registry. A held-out chain is not exempt from the round
+        # trip -- it is outside it -- so counting it here would inflate a number whose whole job
+        # is to size how much of the *bound* encoded columns is structurally unrecoverable.
+        payloads_below_decode_floor=len(payloads_below_decode_floor(drawn, list(chains))),
         unique_positives=len(unique_positives),
         removed_by_exclusion=len(filtered.removed),
         surviving_positives=len(survivors),

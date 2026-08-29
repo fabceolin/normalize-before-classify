@@ -75,7 +75,7 @@ def test_the_benign_classes_carry_the_same_chain_set_as_the_attacks() -> None:
 
 def test_the_declared_chains_are_buildable() -> None:
     """The real constant through the real registry -- what the builder calls before it renders."""
-    validate()
+    validate(CHAINS, DRESSINGS)
     assert chain_problems(CHAINS, DRESSINGS) == ()
 
 

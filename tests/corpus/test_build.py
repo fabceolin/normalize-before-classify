@@ -27,7 +27,7 @@ import pytest
 import nbc
 from nbc.corpus import attack, build
 from nbc.corpus.exclusion import Observation, normalized_texts, plan, verify_observations
-from nbc.corpus.matrix import CHAINS, render_chain
+from nbc.corpus.matrix import CHAINS, HELDOUT_CHAINS, render_chain
 from nbc.errors import exit_code_for
 from nbc.pins import EXCLUSION_UNREACHABLE, HTTP_OK, load_pins
 from nbc.schema import FAMILY_ATTACK
@@ -478,10 +478,19 @@ def test_the_build_writes_the_corpus_and_reports_what_it_drew(
     # the pool, positives drawn from it, and one corpus row per drawn positive per declared
     # chain. `chains` is the dressing axis of the headline table, published beside the corpus.
     assert fields["chains"] == [render_chain(chain) for chain in CHAINS[FAMILY_ATTACK]]
-    assert fields["items_written"] == 4 * len(CHAINS[FAMILY_ATTACK])
+    # AD-28's block travels as its own axis and is never merged into the bound one: `chain_class`
+    # is part of the cell key (AD-2) and no function aggregates across it (AD-11).
+    assert fields["held_out_chains"] == [
+        render_chain(chain) for chain in HELDOUT_CHAINS[FAMILY_ATTACK]
+    ]
+    assert fields["items_written"] == 4 * (
+        len(CHAINS[FAMILY_ATTACK]) + len(HELDOUT_CHAINS[FAMILY_ATTACK])
+    )
     # And the report is self-consistent read on its own terms, which is how a reader of
     # `results.json` will read it -- without the constant in front of them.
-    assert fields["items_written"] == fields["drawn_positives"] * len(fields["chains"])
+    assert fields["items_written"] == fields["drawn_positives"] * (
+        len(fields["chains"]) + len(fields["held_out_chains"])
+    )
     assert len(path.read_text(encoding="utf-8").splitlines()) == fields["items_written"]
     # The exclusion accounting travels with the draw: FR3.3's counts are published beside the
     # corpus they shaped, not in a separate run.

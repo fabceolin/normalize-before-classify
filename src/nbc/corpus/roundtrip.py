@@ -18,15 +18,16 @@ test, and this module is the contract it runs.
 answer "what is this pair" rather than "who put it on the list".
 
 1. **The registry filter.** A chain is in scope when every one of its links is in the bound
-   dressing registry `corpus/dressings.py::DRESSINGS`. Story 3.5's held-out encodings will live in
+   dressing registry `corpus/dressings.py::DRESSINGS`. Story 3.5's held-out encodings live in
    their own module with their own registry, so they fall out of scope *because of what they are*
    -- a held-out chain names links this registry does not hold -- rather than because anyone
-   remembered to exempt them. That is testable today, before that module exists: `in_scope` refuses
-   a chain naming `rot13`, the name the held-out registry will carry. Nothing can exempt a bound
-   chain by adding it to something, and the complementary gate is in the test: the union of the
-   links of the in-scope chains must equal `set(DRESSINGS)`, so narrowing the scope until the
-   contract passes fails a different test than the one it was narrowed for. AD-28 exists because
-   that is the tempting repair.
+   remembered to exempt them. `in_scope` refuses a chain naming `rot13`; that assertion was
+   written before `rot13` existed and now refuses the real encoding for the same structural
+   reason, over every declared held-out chain in `tests/corpus/test_heldout.py`. Nothing can
+   exempt a bound chain by adding it to something, and the complementary gate is in the test: the
+   union of the links of the in-scope chains must equal `set(DRESSINGS)`, so narrowing the scope
+   until the contract passes fails a different test than the one it was narrowed for. AD-28
+   exists because that is the tempting repair.
 
 2. **The layer's own published candidate floor.** `decode.py` declines to decode a run below
    `min_encoded_chars` or below `min_entropy_bits_per_char`, and both floors are declared,
@@ -188,9 +189,10 @@ def min_payload_bytes(link: str) -> int:
 def in_scope(chain: Sequence[str], registry: Mapping[str, Dressing] = DRESSINGS) -> bool:
     """Whether the contract covers `chain`: every link is a **bound** dressing.
 
-    The filter over the registries. A held-out chain names links that live in story 3.5's own
-    module and are not in this registry, so it falls out because of what it is. The failing input
-    is a chain naming `rot13`, which is exactly the name the held-out registry will carry.
+    The filter over the registries. A held-out chain names links that live in
+    `corpus/heldout.py`'s own registry and are not in this one, so it falls out because of what it
+    is. The failing input is a chain naming `rot13`, which is exactly the name the held-out
+    registry carries.
     """
     return all(link in registry for link in chain)
 

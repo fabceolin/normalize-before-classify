@@ -24,6 +24,7 @@ import pytest
 
 import nbc
 from nbc import pins as pins_module
+from nbc.corpus.heldout import HELD_OUT_FROM
 from nbc.pins import (
     DRAW_HEAD,
     DRAW_METHODS,
@@ -1349,15 +1350,56 @@ def test_no_pinned_identifier_appears_as_a_literal_in_the_source_tree(
     )
 
 
+OWN_REVISIONS = frozenset({HELD_OUT_FROM.revision})
+"""The commit shas that name **this** repository rather than a remote artifact.
+
+The gate below is about a *pin*: a revision of somebody else's repository that was written into the
+source instead of into `pins.toml`, where it would be verified against the hub before anything ran.
+`heldout.HELD_OUT_FROM.revision` is not one of those. It is this repository's own commit, recorded
+because AD-28 makes the held-out set a one-way door and requires the layer revision it was held out
+from to travel with it, and the architecture's configuration table puts an AD-28 constant in the
+module that owns the algorithm rather than in `pins.toml`. There is no hub to verify it against and
+nothing to resolve it to; `pins.toml` could not check it.
+
+So the allowance is granted to **one declared constant and no other value**, which is what keeps it
+from becoming a hole: a second sha in `heldout.py`, or this sha copied into a second module, is
+still an offender, because the membership test is equality with the constant rather than a filename
+or a pattern. That the sha names a commit in this repository is checked separately, by
+`tests/corpus/test_heldout.py`, against git.
+"""
+
+
 def test_no_commit_sha_appears_as_a_literal_in_the_source_tree() -> None:
     """Catches a revision that was hard-coded without ever being pinned."""
     offenders: list[str] = []
     for path in _source_files():
         for lineno, value in _literal_constants(path):
             if len(value) == 40 and all(char in "0123456789abcdef" for char in value):
+                if value in OWN_REVISIONS:
+                    continue
                 offenders.append(f"{path.name}:{lineno} {value!r}")
 
     assert not offenders, "a commit sha is a pin: " + "; ".join(offenders)
+
+
+def test_the_own_revision_allowance_still_catches_a_second_sha(tmp_path: Path) -> None:
+    """The allowance's own failing input: a different sha, in the same file, is still an offender.
+
+    Written against the scan rather than against the assertion above, because the assertion runs
+    over the real tree and would pass vacuously the day the allowance swallowed everything.
+    """
+    module = tmp_path / "probe.py"
+    module.write_text(
+        f'A = "{HELD_OUT_FROM.revision}"\nB = "{"f" * 40}"\n', encoding="utf-8"
+    )
+    found = [
+        value
+        for _lineno, value in _literal_constants(module)
+        if len(value) == 40
+        and all(char in "0123456789abcdef" for char in value)
+        and value not in OWN_REVISIONS
+    ]
+    assert found == ["f" * 40]
 
 
 def test_only_one_module_names_the_pins_file() -> None:

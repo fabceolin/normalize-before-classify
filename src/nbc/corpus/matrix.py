@@ -14,9 +14,10 @@ and forgotten on another, and the test names it.
 **Why this module imports nothing under `nbc.canon`.** `DECODED_LINKS` names the two encodings the
 layer decodes, and it would be tempting to read them off `canon.stages.decode.ORDER`. It is
 declared here instead and **compared** against the layer in `tests/corpus/test_matrix.py`. Story
-3.5 puts `HELDOUT_CHAINS` beside this constant under an acceptance criterion that forbids
-`corpus/heldout.py` from importing anything under `nbc.canon`, and a transitive import is still an
-import. The opposite rule governs `corpus/dressings.py`, which must share the layer's character
+3.5 put `HELDOUT_CHAINS` beside this constant, and `corpus/heldout.py` -- which holds the encodings
+those chains name -- may not import anything under `nbc.canon`, transitively. It imports this
+module, so this module's import surface is part of that rule and a transitive import here would
+break it. The opposite rule governs `corpus/dressings.py`, which must share the layer's character
 source; the two rules are what keep the bound and held-out halves of the table from collapsing
 into each other.
 
@@ -36,13 +37,19 @@ from nbc.schema import BENIGN_CLASSES, FAMILY_ATTACK
 
 __all__ = [
     "CHAINS",
+    "CHAIN_CLASSES",
+    "CHAIN_CLASS_BOUND",
+    "CHAIN_CLASS_HELD_OUT",
     "CHAIN_SEPARATOR",
     "CLEAN_CHAIN",
     "CLEAN_CHAIN_NAME",
     "CORPUS_CLASSES",
     "DECODED_LINKS",
+    "HELDOUT_CHAINS",
     "CorpusMatrixInvalid",
+    "chain_class",
     "chain_problems",
+    "declared_links",
     "encoding_depth",
     "render_chain",
     "validate",
@@ -171,6 +178,52 @@ declarations rather than an identity. Naturally encoded benign material — JWTs
 constant's.
 """
 
+HELDOUT_CHAINS: Final[Mapping[str, tuple[tuple[str, ...], ...]]] = MappingProxyType(
+    {
+        FAMILY_ATTACK: (
+            ("base32",),
+            ("url_percent",),
+            ("rot13",),
+        ),
+        "b_code": (
+            ("base32",),
+            ("url_percent",),
+            ("rot13",),
+        ),
+        "b_chat": (
+            ("base32",),
+            ("url_percent",),
+            ("rot13",),
+        ),
+    }
+)
+"""AD-28's second registry: the chains built from encodings the layer was never written against.
+
+**Beside `CHAINS`, and disjoint from it.** `tests/corpus/test_heldout.py` asserts the two chain
+sets are disjoint and that every dressing name appears in exactly one registry, so an encoding
+cannot be bound and held out at once. Put one of these into `CHAINS` and story 3.4's round-trip
+contract goes red, and the tempting repair -- delete the chain -- is the failure AD-28 exists to
+prevent, which is why the separation is executable rather than conventional.
+
+**The links are declared in `corpus/heldout.py`**, which imports nothing under `nbc.canon`. This
+constant holds only their names, so it stays as canon-free as the rest of this module and can be
+read by anything that needs the dressing axis without acquiring the layer.
+
+**Three encodings, three mechanisms.** `base32`'s alphabet is a subset of base64's, so the layer is
+offered the whole document and must refuse it. `url_percent` emits hex digits behind a character
+the layer does not scan, so a decoding step can grip a fragment and never the document. `rot13`
+carries no marker at all. Each declares `probes` in `heldout.py`, and the classification is
+measured against the layer rather than asserted.
+
+**Written out per class three times**, exactly as `CHAINS` is: benign items are dressed in the
+held-out chains too, and that agreement is checked as a comparison between three declarations
+rather than as an object compared with itself. A held-out block carrying recall and no counter
+metric invites the answer that non-recovery does not matter because its cost is unknown.
+
+The floor of two is `heldout.MIN_HELDOUT_CHAINS` and is enforced there, over the distinct chains
+this constant declares.
+"""
+
 DECODED_LINKS: Final[frozenset[str]] = frozenset({"base64", "hex"})
 """The links that produce a segment the canonicalization layer must **decode**.
 
@@ -182,6 +235,58 @@ Declared here and **compared** against `canon.stages.decode.ORDER` by
 `tests/corpus/test_matrix.py`, which is the only place the two meet. A third encoding taught to
 the layer fails that comparison rather than silently making some chain's `encoding_depth` wrong.
 """
+
+
+CHAIN_CLASS_BOUND: Final[str] = "bound"
+CHAIN_CLASS_HELD_OUT: Final[str] = "held_out"
+CHAIN_CLASSES: Final[tuple[str, ...]] = (CHAIN_CLASS_BOUND, CHAIN_CLASS_HELD_OUT)
+"""AD-2's `chain_class`: which half of the table a cell belongs to.
+
+Part of the cell key rather than a label, because AD-11 forbids any function from aggregating
+across it: a held-out result averaged into bound ones destroys the only evidence of generalization
+the artifact has, and it destroys it by producing a number that looks fine.
+"""
+
+
+def declared_links(chains: Mapping[str, Sequence[Sequence[str]]]) -> frozenset[str]:
+    """Every dressing name `chains` mentions, across every corpus class.
+
+    The two registries' link sets are compared with this in `tests/corpus/test_heldout.py`: they
+    must be disjoint, and their union must be the union of the two dressing registries. A name in
+    both would be a dressing that is bound and held out at once, which is a contradiction the round
+    trip contract would resolve by going red on a chain nobody could safely delete.
+    """
+    return frozenset(link for declared in chains.values() for chain in declared for link in chain)
+
+
+def chain_class(
+    chain: Sequence[str],
+    chains: Mapping[str, Sequence[Sequence[str]]] = CHAINS,
+    heldout: Mapping[str, Sequence[Sequence[str]]] = HELDOUT_CHAINS,
+) -> str:
+    """Which half of the table `chain` belongs to, decided by which registry declares its links.
+
+    Structural, not a lookup in a list of names: a chain is held out because every link it names is
+    declared held out, so the classification cannot be changed by adding a chain to a set of
+    exceptions. A chain mixing a bound link with a held-out one belongs to neither half and is
+    refused -- there is no cell for it, and silently filing it under one class would put a row into
+    a column that does not describe it.
+    """
+    links = tuple(chain)
+    bound = declared_links(chains)
+    held = declared_links(heldout)
+    if not links or set(links) <= bound:
+        # The empty chain is `clean`, which is a bound chain: AD-3 makes it the identity element of
+        # the fold, and `CHAINS` declares it.
+        return CHAIN_CLASS_BOUND
+    if set(links) <= held:
+        return CHAIN_CLASS_HELD_OUT
+    raise CorpusMatrixInvalid(
+        f"the chain {render_chain(links)!r} mixes links from both registries or names one neither "
+        f"declares: bound links are {sorted(bound)} and held-out links are {sorted(held)}. "
+        f"chain_class is part of the cell key (AD-2) and no function aggregates across it "
+        f"(AD-11), so a chain belonging to neither half has no cell to be reported in"
+    )
 
 
 def encoding_depth(chain: Sequence[str]) -> int:
@@ -287,20 +392,19 @@ def chain_problems(
 
 
 def validate(
-    chains: Mapping[str, Sequence[Sequence[str]]] = CHAINS,
-    registry: Mapping[str, Callable[[str], str]] | None = None,
+    chains: Mapping[str, Sequence[Sequence[str]]],
+    registry: Mapping[str, Callable[[str], str]],
 ) -> None:
     """Abort unless every declared chain can be built. Called by the builder before it renders.
 
-    `registry` defaults to `dressings.DRESSINGS`, imported inside the call so this module keeps
-    its own import surface -- `dressings.py` imports `nbc.canon` by story 3.4's rule, and the
-    matrix must not acquire that import on behalf of `corpus/heldout.py`, which story 3.5
-    forbids from having it.
+    **Both arguments are required, and `registry` in particular has no default.** It defaulted to
+    `dressings.DRESSINGS` through an import inside the call until story 3.5, which is a deferred
+    import and still an import: `corpus/heldout.py` imports this module, and AD-28 forbids it from
+    reaching `nbc.canon` **transitively**, which is what an AST walk over this file's import
+    statements sees whether or not the statement sits inside a function. Making the caller name the
+    registry keeps this module a leaf over `nbc.errors` and `nbc.schema`, which is what its
+    docstring has always claimed, and `tests/corpus/test_heldout.py` walks the closure to check it.
     """
-    if registry is None:
-        from nbc.corpus.dressings import DRESSINGS
-
-        registry = DRESSINGS
     problems = chain_problems(chains, registry)
     if problems:
         raise CorpusMatrixInvalid(*problems)

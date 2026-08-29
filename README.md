@@ -266,10 +266,22 @@ the layer was implemented as specified. It is not evidence that canonicalization
 columns that could have gone differently are the recall **lost** without the layer, the false-positive cost
 of adding it, the behaviour on nested chains past the recursion ceiling, and the **held-out encodings** —
 a separate block of the table built from encodings the layer was deliberately never written against, kept
-in their own registry and exempt from the binding above precisely so that something here could come out
-badly. Read those. One held-out encoding, `rot13`, is included knowing the layer cannot touch it: it is
-there to mark the boundary of what normalization can reach, not to be recovered, and it is reported and
-excluded from the pass/fail condition for that reason.
+in their own registry (`src/nbc/corpus/heldout.py`, under the opposite import rule: it may not import
+anything under `nbc.canon`, which `tests/corpus/test_heldout.py` asserts transitively and in a subprocess)
+and exempt from the binding above precisely so that something here could come out
+badly. Read those. Three encodings are held out, chosen for three different ways of interacting with the
+layer rather than for variety: `base32`, whose alphabet is a subset of base64's so the layer is offered the
+whole document and must refuse it; `url_percent`, whose hex digits let a decoding step grip a fragment and
+never the document; and `rot13`, which is included knowing the layer cannot touch it. Each declares what the
+layer can engage it with, and the declaration is **measured against the layer** rather than asserted.
+`rot13` is there to mark the boundary of what normalization can reach, not to be recovered, and it is
+reported with its delta and excluded from the pass/fail condition for that reason.
+
+Holding an encoding out is a **one-way door for this publication**. Teaching the layer to decode one of
+them after measuring converts a genuine test into another bound chain and spends the evidence; doing it
+requires a *new* held-out encoding and a complete re-run. The set is recorded with the layer revision it was
+held out from, and a test compares the layer's decoder set against the recorded one, so that swap fails CI
+rather than showing up only as a larger number.
 
 Two things the binding does **not** cover, named here rather than left for a reader to find. A chain is
 exempt only by being held out — the scope is a filter over the registries, so a bound chain cannot be

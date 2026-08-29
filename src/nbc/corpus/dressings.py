@@ -39,11 +39,15 @@ from typing import Callable, Final, Mapping, Sequence
 
 from nbc.canon import confusables_table
 from nbc.canon.stages import invisible
+from nbc.corpus.heldout import HELDOUT_DRESSINGS, HeldOutEncoding, HeldOutRegistryInvalid
 from nbc.corpus.matrix import CLEAN_CHAIN, CorpusMatrixInvalid
 
 __all__ = [
+    "ALL_DRESSINGS",
     "DRESSINGS",
     "Dressing",
+    "all_dressings",
+    "dress_declared",
     "ZERO_WIDTH_NAME",
     "apply",
     "dress",
@@ -219,29 +223,92 @@ helper function whose name happened to match a pattern.
 """
 
 
-def apply(text: str, name: str) -> str:
+def apply(text: str, name: str, registry: Mapping[str, Dressing] = DRESSINGS) -> str:
     """One link of the fold: the dressing `name`, applied to `text`.
 
     The argument order is `reduce`'s, accumulator first, which is why this is a named function
     rather than a lambda: `reduce(apply, chain, payload)` reads as the rule AD-3 states, and a
     reader can check the direction by reading the two lines rather than by remembering which
     argument `functools.reduce` passes first.
+
+    `registry` defaults to the **bound** registry, and that default is load-bearing:
+    `roundtrip.in_scope` filters the round-trip contract on `DRESSINGS`, so a default that quietly
+    admitted a held-out encoding would put a held-out chain inside a contract it must fail.
     """
-    dressing = DRESSINGS.get(name)
+    dressing = registry.get(name)
     if dressing is None:
         raise CorpusMatrixInvalid(
             f"the chain names the dressing {name!r}, which is not in the registry "
-            f"({sorted(DRESSINGS)}); a new dressing is a new named function in dressings.py and "
+            f"({sorted(registry)}); a new dressing is a new named function in dressings.py and "
             f"nothing else"
         )
     return dressing(text)
 
 
-def dress(payload: str, chain: Sequence[str] = CLEAN_CHAIN) -> str:
+def dress(
+    payload: str,
+    chain: Sequence[str] = CLEAN_CHAIN,
+    registry: Mapping[str, Dressing] = DRESSINGS,
+) -> str:
     """AD-3's fold: `reduce(apply, chain, payload)`. The later link wraps the earlier.
 
     `dress(p, ["base64", "homoglyph"])` is `homoglyph(to_base64(p))`. The empty chain returns
     `payload` itself, unchanged and `is`-equal, which is what makes `clean` the identity element
     rather than a dressing that happens to be a no-op.
     """
-    return functools.reduce(apply, chain, payload)
+    return functools.reduce(lambda text, name: apply(text, name, registry), chain, payload)
+
+
+# --- the union the builder folds with -------------------------------------------------------------
+
+
+def all_dressings(
+    bound: Mapping[str, Dressing] = DRESSINGS,
+    heldout: Mapping[str, HeldOutEncoding] | None = None,
+) -> Mapping[str, Dressing]:
+    """Both registries as one mapping, refusing any name declared in both.
+
+    The builder has to render a row from either half of the matrix and the fold takes one registry,
+    so the union has to exist somewhere. It is built here, in the module that already imports the
+    layer, rather than in `corpus/heldout.py`, which may not: `dressings.py -> heldout.py` is the
+    safe direction and the reverse would carry `nbc.canon` into the held-out module through the
+    back door.
+
+    **The overlap is an abort rather than a merge.** `{**bound, **heldout}` would let a held-out
+    name silently shadow a bound one, and the symptom would be a bound chain rendered by a held-out
+    encoding while story 3.4's contract still claimed it round-trips. `HeldOutRegistryInvalid`
+    names the colliding name; `tests/corpus/test_heldout.py` supplies a synthetic overlapping pair,
+    which is the input that makes this fail.
+    """
+    if heldout is None:
+        heldout = HELDOUT_DRESSINGS
+    both = sorted(set(bound) & set(heldout))
+    if both:
+        raise HeldOutRegistryInvalid(
+            f"{both} appear in both the bound and the held-out dressing registries. A dressing "
+            f"cannot be bound and held out at once: the round-trip contract would require it to "
+            f"be recovered and AD-28 would require it not to be, and the union would resolve that "
+            f"by silently letting one shadow the other"
+        )
+    merged: dict[str, Dressing] = dict(bound)
+    merged.update({name: entry.encode for name, entry in heldout.items()})
+    return MappingProxyType(merged)
+
+
+ALL_DRESSINGS: Final[Mapping[str, Dressing]] = all_dressings()
+"""Every dressing the corpus can be built from, bound and held out, under one lookup.
+
+`DRESSINGS` stays the bound registry and nothing else, because that is what scopes the round-trip
+contract. This is the union the *builder* folds with, and a test asserts its key set is exactly the
+disjoint union of the two.
+"""
+
+
+def dress_declared(payload: str, chain: Sequence[str] = CLEAN_CHAIN) -> str:
+    """AD-3's fold over either registry: what the corpus builder renders a row with.
+
+    Identical to `dress` on a bound chain -- the union agrees with `DRESSINGS` on every bound name,
+    which a test asserts over the whole battery rather than by inspection -- and the only thing that
+    can render a held-out chain.
+    """
+    return dress(payload, chain, ALL_DRESSINGS)
