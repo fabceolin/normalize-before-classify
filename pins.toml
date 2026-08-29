@@ -81,21 +81,42 @@ revision 90c9989b1a342275dd0d1a95aad283c04e075671\
 redistributed = false
 
 [baseline.lineage]
-# What the baseline declares about every pinned attack dataset. The date and the card revision
-# are recorded so a check never re-run after a pin changed is visible, not assumed to hold.
+# What the baseline's card declares, read once and recorded as data so a rule can read it back.
+# The date and the card revision are recorded so a check never re-run after a pin changed is
+# visible, not assumed to hold: the file is refused when card_revision is not the pinned one.
 checked_on = "2026-08-28"
 card_revision = "90c9989b1a342275dd0d1a95aad283c04e075671"
 
 [baseline.lineage.attack_datasets]
-# The card's `datasets:` block names natolambert/xstest-v2-copy, VMware/open-instruct,
-# alespalla/chatbot_instruction_prompts, HuggingFaceH4/grok-conversation-harmless,
-# Harelix/Prompt-Injection-Mixed-Techniques-2024, OpenSafetyLab/Salad-Data and
-# jackhhao/jailbreak-classification. The pinned attack dataset is not among them.
-# One hop is a different question and it does not come out clean: the dataset's own card names
-# VMware/open-instruct and jackhhao/jailbreak-classification among its seeds, and this baseline
-# declares both. That is what the build-time overlap filter is for; it is not a lineage
-# declaration and it is not recorded as one.
-"xTRam1/safe-guard-prompt-injection" = "not-declared"
+# The card names no pinned attack dataset among its training data, so tooth 1 passes.
+# One hop does not come out clean, and this is the value that says so. The dataset's own card
+# names VMware/open-instruct and jackhhao/jailbreak-classification among the four seeds it was
+# built from, and this baseline declares training on both -- a reach no model card can show,
+# because nothing on a model's card mentions a dataset built downstream of it. Measured on
+# 2026-08-24, that reach was 3424 of 7066 unique benign rows and 515 of 3071 unique attacks.
+# The benign figure is the serious one: half the counter-metric would have been text the primary
+# baseline was taught to call safe.
+# Declaring it here is not a way of excusing it. It is the statement that those rows are removed
+# from the corpus before anything is measured, and it obliges the build to do so: every seed the
+# reach runs through becomes a required exclusion source, derived from this file rather than
+# restated beside it. Undeclared, the same reach aborts the run.
+"xTRam1/safe-guard-prompt-injection" = "seeded-from-declared-training-source"
+
+[baseline.lineage.training_sources]
+# The card's `datasets:` block, verbatim, plus an explicit answer for every seed a pinned attack
+# dataset names that the card does not. Silence is not admitted here: a source nobody answered
+# for would read as "no reach" while meaning "nobody looked", which is precisely how the one-hop
+# failure got through two rounds of card-reading.
+"natolambert/xstest-v2-copy" = "trained-on"
+"VMware/open-instruct" = "trained-on"
+"alespalla/chatbot_instruction_prompts" = "trained-on"
+"HuggingFaceH4/grok-conversation-harmless" = "trained-on"
+"Harelix/Prompt-Injection-Mixed-Techniques-2024" = "trained-on"
+"OpenSafetyLab/Salad-Data" = "trained-on"
+"jackhhao/jailbreak-classification" = "trained-on"
+# Named as seeds by the pinned dataset, absent from this card.
+"HuggingFaceH4/helpful_instructions" = "not-declared"
+"fka/awesome-chatgpt-prompts" = "not-declared"
 
 [[baseline]]
 key = "testsavantai-bert-small"
@@ -145,12 +166,23 @@ checked_on = "2026-08-28"
 card_revision = "5bfc06f0b54950e6653f253eb7df1e3c9811b5cb"
 
 [baseline.lineage.attack_datasets]
-# The card's `datasets:` block names rubend18/ChatGPT-Jailbreak-Prompts,
-# deepset/prompt-injections, Harelix/Prompt-Injection-Mixed-Techniques-2024 and
-# JasperLS/prompt-injections. The pinned attack dataset is not among them.
+# The card names no pinned attack dataset, and this baseline declares training on none of the
+# four seeds that dataset was built from either, so it clears both teeth outright.
 # `deepset/prompt-injections` is why that dataset is not an attack pool: dropping it is what
 # returned this baseline to eligibility.
 "xTRam1/safe-guard-prompt-injection" = "not-declared"
+
+[baseline.lineage.training_sources]
+# The card's `datasets:` block, verbatim.
+"rubend18/ChatGPT-Jailbreak-Prompts" = "trained-on"
+"deepset/prompt-injections" = "trained-on"
+"Harelix/Prompt-Injection-Mixed-Techniques-2024" = "trained-on"
+"JasperLS/prompt-injections" = "trained-on"
+# The four seeds of the pinned attack dataset, none of which this card names.
+"VMware/open-instruct" = "not-declared"
+"HuggingFaceH4/helpful_instructions" = "not-declared"
+"fka/awesome-chatgpt-prompts" = "not-declared"
+"jackhhao/jailbreak-classification" = "not-declared"
 
 # --- attack datasets -------------------------------------------------------------------------
 #
@@ -168,6 +200,27 @@ revision = "a3a877d608f37b7d20d9945671902df895ecdb46"
 splits = ["train", "test"]
 # Verified against the pinned revision's rows rather than assumed from the field's name.
 attack_label = 1
+
+[attack_dataset.provenance]
+# What this dataset's OWN card says it was built from. It is pinned here because the one-hop
+# check reads it: a dataset seeded from a model's training data is that training data at one
+# remove, and no model card reveals it.
+# Read at the pinned revision on 2026-08-28, together with everything else in this file. The
+# card_revision is the gate rather than the date -- a pin can move on the same day, and a date
+# alone would let this declaration keep looking fresh while describing a different card.
+checked_on = "2026-08-28"
+card_revision = "a3a877d608f37b7d20d9945671902df895ecdb46"
+# Four, as the card names them. Two of the four are declared training sources of the primary
+# baseline, which is the reach recorded in that baseline's lineage block above.
+# One property of this dataset a reader will find: its card presents the attack rows as
+# synthetic, and roughly one in six is a literal row from a seed. That is an omission rather
+# than a falsehood, and it is what reading a card for what a dataset is *for* misses.
+seeds = [
+    "VMware/open-instruct",
+    "HuggingFaceH4/helpful_instructions",
+    "fka/awesome-chatgpt-prompts",
+    "jackhhao/jailbreak-classification",
+]
 
 [attack_dataset.licence]
 # Also absent, and this one matters more: these rows are redistributed into `data/*.jsonl` in a

@@ -24,11 +24,16 @@ import pytest
 import nbc
 from nbc import pins as pins_module
 from nbc.pins import (
+    LINEAGE_RELATIONSHIPS,
     MINIMUM_BASELINES,
     NOT_DECLARED,
     PINNED_PRECISION,
     PINS_FILENAME,
     SCHEMA_VERSION,
+    SEEDED_FROM_TRAINING_SOURCE,
+    TRAINED_ON,
+    TRAINING_SOURCE_RELATIONSHIPS,
+    BaselineIneligible,
     BaselineSetInvalid,
     PinMismatch,
     PinsFileInvalid,
@@ -46,6 +51,12 @@ from nbc.pins import (
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_D = "d" * 40
+
+# The pinned dataset's card names four seeds and one baseline declares training on two of them.
+# The fixtures keep that shape -- two seeds, neither declared by default -- so a test that wants
+# the one-hop reach has to say so, and a test that does not is not silently sitting on one.
+SEED_ONE = "example/seed-one"
+SEED_TWO = "example/seed-two"
 
 
 def _baseline(
@@ -84,6 +95,7 @@ def _baseline(
             "checked_on": "2026-08-28",
             "card_revision": revision,
             "attack_datasets": {"example/attacks": NOT_DECLARED},
+            "training_sources": {SEED_ONE: NOT_DECLARED, SEED_TWO: NOT_DECLARED},
         },
     }
     entry.update(overrides)
@@ -102,6 +114,11 @@ def _dataset(**overrides: Any) -> dict[str, Any]:
             "source": "nothing on the card",
             "attribution": "example/attacks",
             "redistributed": True,
+        },
+        "provenance": {
+            "checked_on": "2026-08-28",
+            "card_revision": SHA_D,
+            "seeds": [SEED_ONE, SEED_TWO],
         },
     }
     entry.update(overrides)
@@ -450,13 +467,11 @@ def test_a_relationship_to_an_unpinned_dataset_is_refused(tmp_path: Path) -> Non
         load_pins(tmp_path)
 
 
-def test_a_declared_training_relationship_loads_and_is_left_to_the_lineage_gate(
-    tmp_path: Path,
-) -> None:
-    """Recording the relationship is this module's job; refusing the baseline is the gate's.
+def test_a_relationship_outside_the_declared_vocabulary_is_refused(tmp_path: Path) -> None:
+    """The eligibility rule reads this value, so free text here is a rule nobody enforces.
 
-    Splitting them keeps `load_pins` a reader of what is declared, so the eligibility rule has
-    exactly one home instead of a half-implementation here and the real one elsewhere.
+    Story 1.3 recorded the relationship and left refusing the baseline to the gate. The gate
+    exists now, and closing the vocabulary is what lets it read a value instead of a sentence.
     """
     document = _document()
     document["baseline"][0]["lineage"]["attack_datasets"]["example/attacks"] = (
@@ -464,11 +479,25 @@ def test_a_declared_training_relationship_loads_and_is_left_to_the_lineage_gate(
     )
     write_pins(tmp_path, document)
 
-    pins = load_pins(tmp_path)
-    assert (
-        pins.baselines[0].lineage.relationship_to("example/attacks")
-        == "declared-training-source"
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+    assert "declared-training-source" in str(abort.value)
+    for admitted in LINEAGE_RELATIONSHIPS:
+        assert admitted in str(abort.value)
+
+
+def test_a_training_source_may_not_claim_the_one_hop_relationship(tmp_path: Path) -> None:
+    """`seeded-from-...` describes a reach to a dataset, not a card's own declaration."""
+    document = _document()
+    document["baseline"][0]["lineage"]["training_sources"][SEED_ONE] = (
+        SEEDED_FROM_TRAINING_SOURCE
     )
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+    assert SEEDED_FROM_TRAINING_SOURCE not in TRAINING_SOURCE_RELATIONSHIPS
+    assert "training_sources" in str(abort.value)
 
 
 def test_a_foreign_schema_version_is_refused(tmp_path: Path) -> None:
@@ -491,6 +520,304 @@ def test_every_problem_in_a_bad_file_is_reported_at_once(tmp_path: Path) -> None
     with pytest.raises(PinsFileInvalid) as abort:
         load_pins(tmp_path)
     assert len(abort.value.problems) >= 3
+
+
+# --- AD-26 teeth 1 and 2: no baseline is scored over its own training text ---------------------
+#
+# Two teeth, one rule reaching two distances. Tooth 1 is what a model card says about the pinned
+# pool. Tooth 2 is what the pool's own card says it was built from, which is the half no model
+# card can show and the half that got through two rounds of reading.
+
+
+def test_a_baseline_trained_on_a_pinned_attack_dataset_is_ineligible(tmp_path: Path) -> None:
+    document = _document()
+    document["baseline"][0]["lineage"]["attack_datasets"]["example/attacks"] = TRAINED_ON
+    write_pins(tmp_path, document)
+
+    with pytest.raises(BaselineIneligible) as abort:
+        load_pins(tmp_path)
+    message = str(abort.value)
+    assert "example/first-model" in message
+    assert "example/attacks" in message
+
+
+def test_the_ineligibility_message_names_the_card_revision_and_the_date(tmp_path: Path) -> None:
+    """A reader has to be able to tell which reading of which card produced the refusal."""
+    document = _document()
+    document["baseline"][0]["lineage"]["attack_datasets"]["example/attacks"] = TRAINED_ON
+    write_pins(tmp_path, document)
+
+    with pytest.raises(BaselineIneligible) as abort:
+        load_pins(tmp_path)
+    message = str(abort.value)
+    assert SHA_A in message
+    assert "2026-08-28" in message
+
+
+def test_an_ineligible_baseline_is_told_to_be_replaced_rather_than_removed(
+    tmp_path: Path,
+) -> None:
+    """SC5 sits exactly on its floor of two, so a removal breaks the claim outright.
+
+    The replacement bar travels with the abort because the next person to read it is deciding
+    what to do, and the four other conditions a replacement has to clear live nowhere else.
+    """
+    document = _document()
+    document["baseline"][0]["lineage"]["attack_datasets"]["example/attacks"] = TRAINED_ON
+    write_pins(tmp_path, document)
+
+    with pytest.raises(BaselineIneligible) as abort:
+        load_pins(tmp_path)
+    message = str(abort.value)
+    assert "replacement is required, not a removal" in message
+    for bar in ("ONNX graph", "tokenizer artifact", "id2label", "tokenizer family"):
+        assert bar in message
+
+
+def test_an_undeclared_one_hop_reach_is_caught_by_the_same_rule(tmp_path: Path) -> None:
+    """The dataset's card names a seed; the baseline declares training on it; nothing else does.
+
+    No model card mentions a dataset built downstream of it, so tooth 1 sees nothing here. This
+    is the failure that reached a published measurement twice.
+    """
+    document = _document()
+    document["baseline"][0]["lineage"]["training_sources"][SEED_ONE] = TRAINED_ON
+    write_pins(tmp_path, document)
+
+    with pytest.raises(BaselineIneligible) as abort:
+        load_pins(tmp_path)
+    message = str(abort.value)
+    assert SEED_ONE in message
+    assert "example/attacks" in message
+    assert "one hop" in message
+
+
+def test_a_seed_no_baseline_declares_produces_no_hop(tmp_path: Path) -> None:
+    """A seed is only a reach when a baseline declares training on it."""
+    write_pins(tmp_path, _document())
+
+    pins = load_pins(tmp_path)
+    assert pins.one_hop_reaches() == {}
+    assert pins.required_exclusion_sources() == ()
+
+
+def test_a_declared_one_hop_reach_loads_and_obliges_an_exclusion_source(
+    tmp_path: Path,
+) -> None:
+    """The only way past the hop, and it is not free.
+
+    Declaring it says the coincident rows are removed before anything is measured, and it turns
+    every seed the reach runs through into a source the build has to remove the overlap with.
+    """
+    document = _document()
+    document["baseline"][0]["lineage"]["training_sources"][SEED_ONE] = TRAINED_ON
+    document["baseline"][0]["lineage"]["attack_datasets"]["example/attacks"] = (
+        SEEDED_FROM_TRAINING_SOURCE
+    )
+    write_pins(tmp_path, document)
+
+    pins = load_pins(tmp_path)
+    assert pins.one_hop_reaches() == {("example/first-model", "example/attacks"): (SEED_ONE,)}
+    assert pins.required_exclusion_sources() == (SEED_ONE,)
+
+
+def test_a_declared_hop_the_seeds_do_not_carry_is_refused(tmp_path: Path) -> None:
+    """A claim about nothing is how an exclusion source gets pinned for a reason that expired."""
+    document = _document()
+    document["baseline"][0]["lineage"]["attack_datasets"]["example/attacks"] = (
+        SEEDED_FROM_TRAINING_SOURCE
+    )
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid, match="training on none of the seeds"):
+        load_pins(tmp_path)
+
+
+def test_a_baseline_silent_about_a_seed_is_refused(tmp_path: Path) -> None:
+    """Silence would read as `no reach` while meaning `nobody looked`."""
+    document = _document()
+    del document["baseline"][0]["lineage"]["training_sources"][SEED_TWO]
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+    assert SEED_TWO in str(abort.value)
+    assert "declares nothing about" in str(abort.value)
+
+
+def test_a_baseline_with_no_training_sources_table_is_refused(tmp_path: Path) -> None:
+    """The table is mandatory even when it would be empty: silence is not an answer."""
+    document = _document()
+    del document["baseline"][0]["lineage"]["training_sources"]
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid, match="training_sources is missing"):
+        load_pins(tmp_path)
+
+
+def test_a_training_source_that_is_nobody_s_seed_is_admitted(tmp_path: Path) -> None:
+    """The block records the card's `datasets:` list, not only the part a seed check needs.
+
+    The measured-overlap filter draws its exclusion set from declared training sources, so
+    refusing the ones that are nobody's seed today would mean deleting a read fact to satisfy
+    a check -- the opposite of what recording lineage is for.
+    """
+    document = _document()
+    document["baseline"][0]["lineage"]["training_sources"]["example/some-other-corpus"] = (
+        TRAINED_ON
+    )
+    write_pins(tmp_path, document)
+
+    pins = load_pins(tmp_path)
+    assert pins.baselines[0].lineage.trains_on("example/some-other-corpus")
+    assert pins.required_exclusion_sources() == ()
+
+
+def test_a_dataset_with_no_provenance_block_is_refused(tmp_path: Path) -> None:
+    """One hop is unmeasurable against a seed list nobody wrote down."""
+    document = _document(datasets=[_dataset()])
+    del document["attack_dataset"][0]["provenance"]
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid, match="provenance"):
+        load_pins(tmp_path)
+
+
+def test_a_card_that_names_no_seed_is_a_fact_not_a_missing_declaration(
+    tmp_path: Path,
+) -> None:
+    document = _document(
+        datasets=[
+            _dataset(
+                provenance={"checked_on": "2026-08-28", "card_revision": SHA_D, "seeds": []}
+            )
+        ]
+    )
+    for entry in document["baseline"]:
+        entry["lineage"]["training_sources"] = {}
+    write_pins(tmp_path, document)
+
+    pins = load_pins(tmp_path)
+    assert pins.attack_datasets[0].provenance.seeds == ()
+    assert pins.required_exclusion_sources() == ()
+
+
+def test_a_dataset_naming_itself_as_its_own_seed_is_refused(tmp_path: Path) -> None:
+    document = _document(
+        datasets=[
+            _dataset(
+                provenance={
+                    "checked_on": "2026-08-28",
+                    "card_revision": SHA_D,
+                    "seeds": ["example/attacks"],
+                }
+            )
+        ]
+    )
+    for entry in document["baseline"]:
+        entry["lineage"]["training_sources"] = {"example/attacks": NOT_DECLARED}
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid, match="which is the dataset itself"):
+        load_pins(tmp_path)
+
+
+def test_a_lineage_check_run_against_another_card_revision_is_refused(tmp_path: Path) -> None:
+    """A check never re-run after a pin moved is visible, not assumed to still hold."""
+    document = _document()
+    document["baseline"][0]["lineage"]["card_revision"] = SHA_B
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+    message = str(abort.value)
+    assert SHA_B in message and SHA_A in message
+    assert "no longer pins" in message
+
+
+def test_a_provenance_check_run_against_another_card_revision_is_refused(
+    tmp_path: Path,
+) -> None:
+    document = _document(
+        datasets=[
+            _dataset(
+                provenance={
+                    "checked_on": "2026-08-28",
+                    "card_revision": SHA_B,
+                    "seeds": [SEED_ONE, SEED_TWO],
+                }
+            )
+        ]
+    )
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid) as abort:
+        load_pins(tmp_path)
+    assert SHA_B in str(abort.value) and SHA_D in str(abort.value)
+
+
+def test_the_date_alone_does_not_keep_a_declaration_fresh(tmp_path: Path) -> None:
+    """The revision is the gate. A pin can move on the same day the check was recorded."""
+    document = _document()
+    document["baseline"][0]["lineage"]["checked_on"] = "2026-08-28"
+    document["baseline"][0]["lineage"]["card_revision"] = SHA_B
+    write_pins(tmp_path, document)
+
+    with pytest.raises(PinsFileInvalid, match="no longer pins"):
+        load_pins(tmp_path)
+
+
+def test_the_committed_pins_clear_both_teeth(committed_pins: Any) -> None:
+    """The file that actually ships, read through the rule rather than through its comments."""
+    for baseline in committed_pins.baselines:
+        for dataset in committed_pins.attack_datasets:
+            assert baseline.lineage.relationship_to(dataset.repository) != TRAINED_ON
+            for seed in dataset.provenance.seeds:
+                assert seed in baseline.lineage.training_sources
+
+
+def test_the_committed_one_hop_reach_is_the_one_the_architecture_records(
+    committed_pins: Any,
+) -> None:
+    """Exactly one baseline reaches the pinned pool through its seeds, and it says so.
+
+    The seeds it reaches through are the two the exclusion filter owes the corpus. The other
+    baseline declares training on none of them, which is why it clears the gate outright.
+    """
+    reaches = committed_pins.one_hop_reaches()
+    assert len(reaches) == 1
+    (reaching_baseline, reached_dataset), seeds = next(iter(reaches.items()))
+    assert len(seeds) == 2
+    assert set(seeds) <= set(committed_pins.required_exclusion_sources())
+
+    declaring = [b for b in committed_pins.baselines if b.repository == reaching_baseline]
+    assert declaring[0].lineage.relationship_to(reached_dataset) == SEEDED_FROM_TRAINING_SOURCE
+    for other in committed_pins.baselines:
+        if other.repository != reaching_baseline:
+            assert other.lineage.relationship_to(reached_dataset) == NOT_DECLARED
+
+
+def test_the_committed_checks_were_run_against_the_pinned_revisions(
+    committed_pins: Any,
+) -> None:
+    for baseline in committed_pins.baselines:
+        assert baseline.lineage.card_revision == baseline.revision
+        assert baseline.lineage.checked_on
+    for dataset in committed_pins.attack_datasets:
+        assert dataset.provenance.card_revision == dataset.revision
+        assert dataset.provenance.checked_on
+
+
+def test_the_run_fields_carry_the_lineage_the_gate_read(committed_pins: Any) -> None:
+    """`results.json` has to show what was declared, not only that something was."""
+    fields = committed_pins.as_run_fields()["pins"]
+    assert fields["required_exclusion_sources"]
+    for baseline in fields["baselines"]:
+        assert baseline["lineage"]["training_sources"]
+        assert baseline["lineage"]["card_revision"]
+    for dataset in fields["attack_datasets"]:
+        assert dataset["provenance"]["seeds"]
+        assert dataset["provenance"]["card_revision"]
 
 
 # --- the baseline set -------------------------------------------------------------------------
@@ -681,7 +1008,11 @@ def _pinned_identifiers(document: dict[str, Any]) -> set[str]:
 
     walk(document, "")
     for entry in document.get("baseline", []):
-        identifiers.update(entry.get("lineage", {}).get("attack_datasets", {}))
+        lineage = entry.get("lineage", {})
+        identifiers.update(lineage.get("attack_datasets", {}))
+        identifiers.update(lineage.get("training_sources", {}))
+    for entry in document.get("attack_dataset", []):
+        identifiers.update(entry.get("provenance", {}).get("seeds", []))
     return {identifier for identifier in identifiers if identifier}
 
 
@@ -811,16 +1142,30 @@ def test_the_module_exits_with_the_declared_code_on_a_thin_baseline_set(tmp_path
     assert completed.returncode == BaselineSetInvalid.exit_code
 
 
-def test_the_three_aborts_have_three_distinct_codes() -> None:
+def test_the_four_aborts_have_four_distinct_codes() -> None:
+    """CI has to tell a malformed pin from a moved world from a baseline it may not score."""
     codes = {
         PinsFileInvalid.exit_code,
         BaselineSetInvalid.exit_code,
         PinMismatch.exit_code,
+        BaselineIneligible.exit_code,
     }
-    assert len(codes) == 3
+    assert len(codes) == 4
     from nbc.platform import UnsupportedPlatform
 
     assert UnsupportedPlatform.exit_code not in codes
+
+
+def test_the_module_exits_with_the_declared_code_on_an_ineligible_baseline(
+    tmp_path: Path,
+) -> None:
+    document = _document()
+    document["baseline"][0]["lineage"]["attack_datasets"]["example/attacks"] = TRAINED_ON
+    write_pins(tmp_path, document)
+
+    completed = _run_module("--root", str(tmp_path))
+    assert completed.returncode == BaselineIneligible.exit_code
+    assert "example/attacks" in completed.stderr
 
 
 # --- the world, once, over the network ----------------------------------------------------

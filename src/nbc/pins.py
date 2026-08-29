@@ -12,7 +12,7 @@ loader convention the code happens to follow, and two strangers reproducing the 
 same document differently. The pin therefore names the *path*: graph, tokenizer and config, per
 baseline.
 
-Three aborts, three codes, because the remedies differ:
+Four aborts, four codes, because the remedies differ:
 
 - `PinsFileInvalid` (4) -- the file is missing, unparseable, or says something it may not say.
   The author has to fix the repository.
@@ -21,10 +21,39 @@ Three aborts, three codes, because the remedies differ:
   have to change, and a baseline is *replaced*, never removed.
 - `PinMismatch` (6) -- the file is right and the world moved. Nothing in the repository is
   wrong; the run must not proceed.
+- `BaselineIneligible` (7) -- the file is well formed and honest, and what it honestly declares
+  disqualifies one baseline from being scored over the pinned corpus at all.
 
-Structure and the baseline set are checked by `load_pins()`, so every consumer gets them for
-free and the entrypoint cannot forget. `verify_revisions()` is the separate step that asks the
-world, and it is the one that touches a network.
+**No baseline is scored over its own training text, and reading model cards was twice not
+enough.** A classifier scored on its own training data reports memory rather than detection, and
+it cuts both ways: recall looks better on attacks it has seen, and the false-positive rate looks
+better on benign text it was taught to call safe. The second half is the dangerous one, because
+the false-positive rate is the counter-metric the whole artifact rests on. Two of the three teeth
+that guard it live here, and both are *declaration* teeth -- what the cards say, recorded as data
+so a rule can read it instead of a person:
+
+1. **Declared lineage.** Every baseline declares its relationship to every pinned attack dataset,
+   from a closed vocabulary, with the date the card was read and the revision it was read at. A
+   baseline declaring `trained-on` a pinned dataset is ineligible and the run aborts naming both.
+2. **One hop of declared provenance.** Every pinned dataset declares the sources its *own card*
+   names as seeds it was built from. A baseline declaring `trained-on` one of those seeds reaches
+   the dataset at one remove, which no model card can show -- nothing on a baseline's card
+   mentions a dataset built downstream of it. That hop is ineligible too, unless the pins declare
+   the reach and its remedy: `seeded-from-declared-training-source` says the coincident rows are
+   removed from the corpus before anything is measured, and it turns every seed it covers into a
+   **required exclusion source** (`Pins.required_exclusion_sources()`). An *undeclared* hop
+   aborts, which is the failure that got through twice.
+
+The third tooth -- measured text overlap, computed and removed at build time -- is the corpus
+builder's, not this module's. This module states the obligation; `corpus/` discharges it.
+
+**A check that was never re-run after a pin moved is visible rather than assumed.** Every lineage
+and provenance declaration records the card revision it was performed against, and the file is
+refused when that revision is not the one pinned. The date is metadata; the revision is the gate.
+
+Structure, the baseline set and the lineage gate are all checked by `load_pins()`, so every
+consumer gets them for free and the entrypoint cannot forget. `verify_revisions()` is the
+separate step that asks the world, and it is the one that touches a network.
 
 **Offline after first fetch (and the resolver is a parameter).** AD-9 wants the resolved commit
 compared against the pin; NFR3 wants no network once the models are cached. Both hold because
@@ -48,13 +77,15 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Final, Mapping, Sequence
+from typing import Any, Callable, ClassVar, Final, Mapping, Sequence
 
 from nbc.errors import NbcError
 
 __all__ = [
     "AttackDataset",
     "Baseline",
+    "BaselineIneligible",
+    "LINEAGE_RELATIONSHIPS",
     "Lineage",
     "Licence",
     "MINIMUM_BASELINES",
@@ -65,9 +96,13 @@ __all__ = [
     "Pins",
     "PinsFileInvalid",
     "BaselineSetInvalid",
+    "Provenance",
     "RemoteArtifact",
     "Resolver",
     "SCHEMA_VERSION",
+    "SEEDED_FROM_TRAINING_SOURCE",
+    "TRAINED_ON",
+    "TRAINING_SOURCE_RELATIONSHIPS",
     "hf_cache_root",
     "load_pins",
     "main",
@@ -97,10 +132,44 @@ turns that into a class flip on exactly the borderline encoded items this experi
 """
 
 NOT_DECLARED: Final[str] = "not-declared"
-"""What a licence field says when the publisher declares none.
+"""What a licence or a lineage field says when the publisher declares nothing.
 
-Not `None` and not an empty string: an absent licence is a *finding*, and it has to survive into
-`results.json` as one rather than as a missing key a reader can mistake for an oversight.
+Not `None` and not an empty string: an absent declaration is a *finding*, and it has to survive
+into `results.json` as one rather than as a missing key a reader can mistake for an oversight.
+"""
+
+TRAINED_ON: Final[str] = "trained-on"
+"""The card or the config declares this source among the data the baseline was trained on."""
+
+SEEDED_FROM_TRAINING_SOURCE: Final[str] = "seeded-from-declared-training-source"
+"""The baseline reaches this pinned attack dataset at one hop, and the overlap is removed.
+
+Declared per (baseline, dataset) pair, never inferred. It says: this baseline declares training
+on at least one source the dataset's own card names as a seed it was built from, so scoring the
+dataset unfiltered would score the baseline over its own training text at one remove -- and the
+coincident rows are therefore removed at build time before anything is measured.
+
+It is the only way past the one-hop gate, and it is not free: every seed it covers becomes a
+**required exclusion source**, derivable from the pins by `Pins.required_exclusion_sources()`
+with no prose in between. An undeclared hop aborts.
+"""
+
+LINEAGE_RELATIONSHIPS: Final[frozenset[str]] = frozenset(
+    {NOT_DECLARED, TRAINED_ON, SEEDED_FROM_TRAINING_SOURCE}
+)
+"""What a baseline may declare about a pinned attack dataset.
+
+The set is closed because the eligibility rule *reads this value*. A free-text relationship is a
+sentence a human interprets, and the two rounds of card-reading this rule exists to replace were
+exactly that.
+"""
+
+TRAINING_SOURCE_RELATIONSHIPS: Final[frozenset[str]] = frozenset({NOT_DECLARED, TRAINED_ON})
+"""What a baseline may declare about a source a pinned dataset names as a seed.
+
+`SEEDED_FROM_TRAINING_SOURCE` is absent on purpose: it describes a baseline's relationship to a
+*dataset*, reached through a seed. A relationship to the seed itself is only ever read from the
+baseline's own card, so it is declared or it is not.
 """
 
 _REDUCED_PRECISION: Final[re.Pattern[str]] = re.compile(
@@ -146,6 +215,33 @@ class BaselineSetInvalid(NbcError, exit_code=5):
         super().__init__(
             "the pinned baseline set cannot support the independence claim:\n"
             + "\n".join(f"  - {problem}" for problem in problems)
+        )
+        self.problems: tuple[str, ...] = problems
+
+
+class BaselineIneligible(NbcError, exit_code=7):
+    """A pinned baseline may not be scored over the pinned corpus at all.
+
+    Distinct from `BaselineSetInvalid` (5) because the remedy is different in kind. A thin or
+    non-independent set is fixed by editing the set; an ineligible baseline is fixed by finding
+    another model, and that replacement has its own bar to clear.
+
+    **Replaced, never removed.** SC5's floor is two baselines and the run sits exactly on it, so
+    dropping one does not restore eligibility -- it breaks the independence claim outright.
+    """
+
+    REPLACEMENT_BAR: ClassVar[str] = (
+        "a replacement is required, not a removal: two baselines is SC5's floor and the run "
+        "sits exactly on it. Any replacement clears the same bar -- an ONNX graph inside the "
+        "repository, a fast tokenizer artifact, a resolvable id2label, an architecture and "
+        "tokenizer family not already pinned, and this lineage check"
+    )
+
+    def __init__(self, *problems: str) -> None:
+        super().__init__(
+            "a pinned baseline is ineligible to be scored over the pinned corpus:\n"
+            + "\n".join(f"  - {problem}" for problem in problems)
+            + f"\n{self.REPLACEMENT_BAR}"
         )
         self.problems: tuple[str, ...] = problems
 
@@ -214,7 +310,18 @@ class WindowPin:
 
 @dataclass(frozen=True, slots=True)
 class Lineage:
-    """A baseline's declared relationship to every pinned attack dataset, and when it was read.
+    """What a baseline's card declares, read once by a human and recorded as data.
+
+    Two maps, because they answer two different questions. `attack_datasets` is the baseline's
+    relationship to each pinned attack dataset -- the thing that will actually be scored.
+    `training_sources` is its relationship to each source a pinned dataset's own card names as a
+    seed, which is how the one-hop reach is computed: nothing on a model card mentions a dataset
+    built downstream of it, so the hop is only visible from the two declarations together.
+
+    Every seed must be answered for; sources beyond them are admitted rather than refused. A
+    card's full `datasets:` block is what the measured-overlap filter will draw its exclusion
+    set from, and refusing the ones that are nobody's seed today would mean deleting a read
+    fact to satisfy a check.
 
     The date and the card revision are part of the record: a lineage check that was never re-run
     after a pin changed has to be *visible*, not silently assumed to still hold.
@@ -223,15 +330,45 @@ class Lineage:
     checked_on: str
     card_revision: str
     attack_datasets: Mapping[str, str]
+    training_sources: Mapping[str, str]
 
     def relationship_to(self, repository: str) -> str | None:
         return self.attack_datasets.get(repository)
+
+    def trains_on(self, repository: str) -> bool:
+        """Whether the card declares this source among the baseline's training data."""
+        return self.training_sources.get(repository) == TRAINED_ON
 
     def as_run_fields(self) -> dict[str, object]:
         return {
             "checked_on": self.checked_on,
             "card_revision": self.card_revision,
             "attack_datasets": dict(self.attack_datasets),
+            "training_sources": dict(self.training_sources),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Provenance:
+    """What a pinned dataset's *own card* says it was built from, and when that was read.
+
+    A dataset seeded from a model's training data is that training data at one remove. The model
+    cards cannot show it and the dataset card can, so the seeds are pinned here as data and the
+    one-hop check reads them rather than a person re-reading a card every time a pin moves.
+
+    An empty `seeds` tuple is a fact -- a card that names no seed -- not a missing declaration.
+    The block itself is mandatory; what it contains is whatever the card says.
+    """
+
+    checked_on: str
+    card_revision: str
+    seeds: tuple[str, ...]
+
+    def as_run_fields(self) -> dict[str, object]:
+        return {
+            "checked_on": self.checked_on,
+            "card_revision": self.card_revision,
+            "seeds": list(self.seeds),
         }
 
 
@@ -328,6 +465,7 @@ class AttackDataset:
     splits: tuple[str, ...]
     attack_label: int
     licence: Licence
+    provenance: Provenance
 
     @property
     def artifact(self) -> RemoteArtifact:
@@ -341,6 +479,7 @@ class AttackDataset:
             "splits": list(self.splits),
             "attack_label": self.attack_label,
             "licence": self.licence.as_run_fields(),
+            "provenance": self.provenance.as_run_fields(),
         }
 
 
@@ -361,6 +500,37 @@ class Pins:
             + [dataset.artifact for dataset in self.attack_datasets]
         )
 
+    def one_hop_reaches(self) -> dict[tuple[str, str], tuple[str, ...]]:
+        """Every (baseline, dataset) pair the seeds connect, and the seeds that connect it.
+
+        A pair appears only when the baseline declares training on at least one source the
+        dataset's own card names as a seed. This is the computation the gate refuses to leave
+        to a reader, and it is also what the corpus build consumes.
+        """
+        reaches: dict[tuple[str, str], tuple[str, ...]] = {}
+        for baseline in self.baselines:
+            for dataset in self.attack_datasets:
+                seeds = tuple(
+                    seed
+                    for seed in dataset.provenance.seeds
+                    if baseline.lineage.trains_on(seed)
+                )
+                if seeds:
+                    reaches[(baseline.repository, dataset.repository)] = seeds
+        return reaches
+
+    def required_exclusion_sources(self) -> tuple[str, ...]:
+        """The seeds a declared hop obliges the build to remove the corpus' overlap with.
+
+        The obligation is derived from the pins rather than restated beside them, so the corpus
+        builder and this gate cannot disagree about which sources the declaration bought. This
+        module names them and stops there: downloading them, intersecting them against the
+        corpus and dropping the matching rows is the corpus builder's work, not a pin file's.
+        """
+        return tuple(
+            sorted({seed for seeds in self.one_hop_reaches().values() for seed in seeds})
+        )
+
     def as_run_fields(self) -> dict[str, object]:
         """The `pins` block of `results.json`: what was pinned, and when it was verified."""
         return {
@@ -372,6 +542,9 @@ class Pins:
                 "attack_datasets": [
                     dataset.as_run_fields() for dataset in self.attack_datasets
                 ],
+                # Derived, not declared: a reader can recompute it from the two blocks above,
+                # and the corpus build reads it rather than a second copy of the same list.
+                "required_exclusion_sources": list(self.required_exclusion_sources()),
             }
         }
 
@@ -454,6 +627,34 @@ class _Reader:
         if not value:
             self.note(f"{where}.{key} is empty")
         return tuple(value)
+
+    def string_table(
+        self, parent: Mapping[str, Any], key: str, where: str, admitted: frozenset[str]
+    ) -> dict[str, str]:
+        """A `repository -> relationship` table, with the vocabulary checked as it is read.
+
+        The vocabulary is closed because a rule reads these values. A relationship spelled in
+        free text is a sentence a human interprets, and interpreting sentences is what this
+        whole declaration exists to stop doing.
+        """
+        value = parent.get(key)
+        if value is None:
+            self.note(f"{where}.{key} is missing")
+            return {}
+        if not isinstance(value, dict) or not all(
+            isinstance(name, str) and isinstance(item, str) for name, item in value.items()
+        ):
+            self.note(f"{where}.{key} must be a table of strings")
+            return {}
+        for name, relationship in sorted(value.items()):
+            if relationship not in admitted:
+                self.note(
+                    f"{where}.{key}[{name!r}] is {relationship!r}, which is not a relationship "
+                    f"this file may declare; it must be one of "
+                    f"{', '.join(sorted(admitted))}, because the eligibility rule reads this "
+                    f"value rather than the prose around it"
+                )
+        return dict(value)
 
     def matching(
         self, value: str, pattern: re.Pattern[str], where: str, expected: str
@@ -538,15 +739,6 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
         )
 
     lineage_table = reader.table(table, "lineage", where)
-    declared = lineage_table.get("attack_datasets")
-    if declared is None:
-        reader.note(f"{where}.lineage.attack_datasets is missing")
-        declared = {}
-    elif not isinstance(declared, dict) or not all(
-        isinstance(k, str) and isinstance(v, str) for k, v in declared.items()
-    ):
-        reader.note(f"{where}.lineage.attack_datasets must be a table of strings")
-        declared = {}
     lineage = Lineage(
         checked_on=reader.matching(
             reader.string(lineage_table, "checked_on", f"{where}.lineage"),
@@ -560,7 +752,20 @@ def _read_baseline(reader: _Reader, table: Mapping[str, Any], index: int) -> Bas
             f"{where}.lineage.card_revision",
             "a 40-character lowercase hex commit sha",
         ),
-        attack_datasets=dict(declared),
+        attack_datasets=reader.string_table(
+            lineage_table, "attack_datasets", f"{where}.lineage", LINEAGE_RELATIONSHIPS
+        ),
+        training_sources=reader.string_table(
+            lineage_table, "training_sources", f"{where}.lineage", TRAINING_SOURCE_RELATIONSHIPS
+        ),
+    )
+    _note_stale_check(
+        reader,
+        f"{where}.lineage",
+        recorded=lineage.card_revision,
+        pinned=revision,
+        checked_on=lineage.checked_on,
+        what="the baseline's card",
     )
 
     return Baseline(
@@ -590,23 +795,95 @@ def _read_attack_dataset(
     if key:
         where = f"attack_dataset[{index}] ({key})"
 
-    return AttackDataset(
-        key=key,
-        repository=reader.matching(
-            reader.string(table, "repository", where),
-            _REPOSITORY,
-            f"{where}.repository",
-            "a `namespace/name` repository id",
+    repository = reader.matching(
+        reader.string(table, "repository", where),
+        _REPOSITORY,
+        f"{where}.repository",
+        "a `namespace/name` repository id",
+    )
+    revision = reader.matching(
+        reader.string(table, "revision", where),
+        _SHA,
+        f"{where}.revision",
+        "a 40-character lowercase hex commit sha",
+    )
+
+    provenance_table = reader.table(table, "provenance", where)
+    seeds = provenance_table.get("seeds")
+    if seeds is None:
+        reader.note(f"{where}.provenance.seeds is missing")
+        seeds = []
+    elif not isinstance(seeds, list) or not all(isinstance(seed, str) for seed in seeds):
+        reader.note(f"{where}.provenance.seeds must be a list of strings")
+        seeds = []
+    for seed in seeds:
+        reader.matching(
+            seed, _REPOSITORY, f"{where}.provenance.seeds", "a `namespace/name` repository id"
+        )
+    provenance = Provenance(
+        checked_on=reader.matching(
+            reader.string(provenance_table, "checked_on", f"{where}.provenance"),
+            _DATE,
+            f"{where}.provenance.checked_on",
+            "an ISO date (YYYY-MM-DD)",
         ),
-        revision=reader.matching(
-            reader.string(table, "revision", where),
+        card_revision=reader.matching(
+            reader.string(provenance_table, "card_revision", f"{where}.provenance"),
             _SHA,
-            f"{where}.revision",
+            f"{where}.provenance.card_revision",
             "a 40-character lowercase hex commit sha",
         ),
+        seeds=tuple(seeds),
+    )
+    for seed in sorted({seed for seed in provenance.seeds if provenance.seeds.count(seed) > 1}):
+        reader.note(f"{where}.provenance.seeds names {seed} twice")
+    if repository and repository in provenance.seeds:
+        reader.note(
+            f"{where}.provenance.seeds names {repository}, which is the dataset itself; a seed "
+            f"is a source the dataset was built from, not the dataset"
+        )
+    _note_stale_check(
+        reader,
+        f"{where}.provenance",
+        recorded=provenance.card_revision,
+        pinned=revision,
+        checked_on=provenance.checked_on,
+        what="the dataset's own card",
+    )
+
+    return AttackDataset(
+        key=key,
+        repository=repository,
+        revision=revision,
         splits=reader.strings(table, "splits", where),
         attack_label=reader.integer(table, "attack_label", where),
         licence=_read_licence(reader, table, where),
+        provenance=provenance,
+    )
+
+
+def _note_stale_check(
+    reader: _Reader,
+    where: str,
+    *,
+    recorded: str,
+    pinned: str,
+    checked_on: str,
+    what: str,
+) -> None:
+    """A check performed against a revision this file no longer pins is a check nobody re-ran.
+
+    The date is metadata and the revision is the gate: a pin can move on the same day, and a
+    date alone would let the declaration keep looking fresh while describing a different card.
+    """
+    if not recorded or not pinned or recorded == pinned:
+        return
+    reader.note(
+        f"{where}.card_revision is {recorded} and the pinned revision is {pinned}: the check "
+        f"recorded here was performed on {checked_on or 'an unrecorded date'} against a "
+        f"revision of {what} that this file no longer pins. Re-read the card at the pinned "
+        f"revision and record what it says, rather than carrying an answer to a question about "
+        f"a different artifact"
     )
 
 
@@ -644,11 +921,63 @@ def _check_baseline_set(baselines: Sequence[Baseline]) -> None:
         raise BaselineSetInvalid(*problems)
 
 
+def _check_lineage(
+    baselines: Sequence[Baseline], attack_datasets: Sequence[AttackDataset]
+) -> None:
+    """No baseline is scored over its own training text, declared and at one hop.
+
+    The two teeth are one loop because they are one rule reaching two distances: a baseline
+    trained on the pinned pool, and a baseline trained on what the pinned pool was built from.
+    The second is the one the cards cannot show, and it is the one that got through.
+    """
+    problems: list[str] = []
+
+    for baseline in baselines:
+        lineage = baseline.lineage
+        read_at = (
+            f"card revision {lineage.card_revision}, read {lineage.checked_on}"
+            if lineage.card_revision and lineage.checked_on
+            else "an unrecorded reading"
+        )
+        for dataset in attack_datasets:
+            declared = lineage.relationship_to(dataset.repository)
+
+            if declared == TRAINED_ON:
+                problems.append(
+                    f"{baseline.repository} declares training on the pinned attack dataset "
+                    f"{dataset.repository} ({read_at}); scored over it, the baseline reports "
+                    f"memory rather than detection, and its false-positive rate is measured "
+                    f"over benign text it was taught to call safe"
+                )
+                continue
+
+            reached = tuple(
+                seed for seed in dataset.provenance.seeds if lineage.trains_on(seed)
+            )
+            if reached and declared != SEEDED_FROM_TRAINING_SOURCE:
+                problems.append(
+                    f"{baseline.repository} declares training on "
+                    f"{', '.join(reached)}, which {dataset.repository}'s own card names among "
+                    f"the seeds it was built from (provenance read "
+                    f"{dataset.provenance.checked_on} at card revision "
+                    f"{dataset.provenance.card_revision}); the baseline reaches the pinned "
+                    f"attack dataset at one hop that no model card mentions, while declaring "
+                    f"{declared!r} against it. Either the reach is removed from the corpus "
+                    f"before anything is measured -- declared here as "
+                    f"{SEEDED_FROM_TRAINING_SOURCE!r}, which makes every seed above a required "
+                    f"exclusion source -- or this baseline is ineligible"
+                )
+
+    if problems:
+        raise BaselineIneligible(*problems)
+
+
 def load_pins(root: Path | str | None = None) -> Pins:
     """Read, validate and return the pins. Step 1 of the entrypoint's sequence.
 
-    Structure and the baseline set are both checked here, so no consumer can load the pins and
-    forget to ask whether the set they describe is one SC5 admits.
+    Structure, the baseline set and the lineage gate are all checked here, so no consumer can
+    load the pins and forget to ask whether the set they describe is one SC5 admits, or whether
+    a baseline in it would be scored over its own training text.
     """
     root_path = Path(root) if root is not None else _repository_root()
     path = root_path / PINS_FILENAME
@@ -730,10 +1059,38 @@ def load_pins(root: Path | str | None = None) -> Pins:
                 f"which is not a pinned attack dataset"
             )
 
+    # One hop is only mechanical if every baseline answers for every seed. A baseline silent
+    # about a source a pinned dataset says it was built from is the exact gap this tooth exists
+    # to close, and silence there would read as "no reach" while meaning "nobody looked".
+    seeds = {seed for dataset in attack_datasets for seed in dataset.provenance.seeds}
+    for baseline in baselines:
+        for missing in sorted(seeds - set(baseline.lineage.training_sources)):
+            reader.note(
+                f"baseline {baseline.repository or '?'} declares nothing about {missing}, named "
+                f"on a pinned attack dataset's own card as a seed it was built from; one hop of "
+                f"provenance is a check only if every baseline answers for every seed"
+            )
+        # The declaration and the seeds have to agree in both directions. A hop the seeds do not
+        # carry is a claim about nothing, and a claim about nothing is how an exclusion source
+        # gets pinned for a reason that stopped being true.
+        for dataset in attack_datasets:
+            if baseline.lineage.relationship_to(dataset.repository) != (
+                SEEDED_FROM_TRAINING_SOURCE
+            ):
+                continue
+            if not any(baseline.lineage.trains_on(seed) for seed in dataset.provenance.seeds):
+                reader.note(
+                    f"baseline {baseline.repository or '?'} declares "
+                    f"{SEEDED_FROM_TRAINING_SOURCE!r} against {dataset.repository}, but declares "
+                    f"training on none of the seeds that dataset's card names; there is no hop "
+                    f"to remove and no exclusion source the declaration would buy"
+                )
+
     if problems:
         raise PinsFileInvalid(*problems)
 
     _check_baseline_set(baselines)
+    _check_lineage(baselines, attack_datasets)
 
     return Pins(
         schema_version=schema_version,
