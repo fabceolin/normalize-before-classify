@@ -59,7 +59,7 @@ from nbc.canon.stages import confusables, decode, invisible, nfkc
 from nbc.errors import NbcError
 from nbc.schema import CanonContext, CanonResult, Edit, StageResult
 
-__all__ = [
+__all__ = (
     "DEFAULT_CEILING",
     "PIPELINE",
     "PipelineStage",
@@ -67,7 +67,7 @@ __all__ = [
     "StageContractViolated",
     "canonicalize",
     "default_context",
-]
+)
 
 DEFAULT_CEILING: Final[int] = 3
 """How many levels of nested decoding the layer opens, unless a run declares otherwise.

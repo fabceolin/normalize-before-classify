@@ -73,7 +73,7 @@ from typing import Final
 from nbc.canon.edits import Report, build_reported_edits
 from nbc.schema import CanonContext, StageResult
 
-__all__ = [
+__all__ = (
     "BASE64",
     "CEILING_NAME",
     "CONSTANTS",
@@ -87,7 +87,7 @@ __all__ = [
     "run",
     "run_at_ceiling",
     "shannon_bits_per_char",
-]
+)
 
 NAME: Final[str] = "decode"
 

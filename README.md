@@ -109,6 +109,39 @@ separately from inference time. No figure for it is claimed here — that is wha
 - [x] "what this does not show" — the eleven caveats that do not depend on the result, written
       before the first run; slot 8 waits for what the run reveals
 
+## How big the layer is
+
+The whole argument here is that a small, readable canonicalization layer buys most of what another
+fine-tuning round would. "Small" and "readable" are adjectives, and a repository that pins a Unicode
+revision and a glibc minor should not be asking anyone to take an adjective on trust. So the layer
+carries a stated budget, in lines, over the modules that actually run in front of a classifier:
+
+<!-- SIZE-BUDGET:START -->
+- `total_physical_lines`: 2000
+- `total_code_lines`: 1000
+- `module_physical_lines`: 550
+<!-- SIZE-BUDGET:END -->
+
+`total_physical_lines` is every line a reviewer scrolls. `total_code_lines` counts only the lines
+that are neither blank, nor comments, nor docstrings — the part that has to be reasoned about. The
+third is a ceiling on any single module, because "read it end to end" degrades far faster with one
+1500-line file than with five 300-line ones. The build-time script that derives the vendored
+confusables table is excluded and the exclusion is checked, not asserted: it must be exactly the set
+of files a real import of the layer never reaches.
+
+    python -m nbc.report.size_budget
+
+prints the measurement, the budget and the headroom, and aborts with its own exit code if the layer
+outgrew the budget or if the numbers above stopped matching the ones the code declares. Editing any
+one of the three without the other two fails.
+
+**What the budget does not prove.** It is a ceiling on growth, not evidence that the layer reads in
+one sitting: a ceiling in the low thousands of lines is a couple of hours of careful reading, not
+twenty minutes. No measurement is transcribed into this paragraph on purpose — a number written here
+would go stale the next time a docstring changes, and a stale number beside a checked one is worse
+than no number. Run the command above for where the layer actually stands. The point is that this is
+now a budget to disagree with rather than a claim the repository makes about itself.
+
 ## What this does not show
 
 These eleven do not depend on the result, so they were written before the first measurement rather than

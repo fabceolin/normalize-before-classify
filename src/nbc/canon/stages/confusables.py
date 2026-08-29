@@ -22,7 +22,7 @@ from typing import Final
 from nbc.canon.edits import build_edits, map_code_points
 from nbc.schema import CanonContext, StageResult
 
-__all__ = ["NAME", "run"]
+__all__ = ("NAME", "run")
 
 NAME: Final[str] = "confusables"
 

@@ -62,7 +62,7 @@ from nbc.canon.confusables_table import (
 )
 from nbc.errors import EXIT_OK, exit_code_for
 
-__all__ = [
+__all__ = (
     "RULE_VERSION",
     "UPSTREAM_URL_TEMPLATE",
     "Upstream",
@@ -72,7 +72,7 @@ __all__ = [
     "parse_upstream",
     "render",
     "upstream_url",
-]
+)
 
 UPSTREAM_URL_TEMPLATE: Final[str] = (
     "https://www.unicode.org/Public/security/{revision}/confusables.txt"

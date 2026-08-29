@@ -31,14 +31,14 @@ from typing import Final
 from nbc.canon.edits import build_edits, map_code_points
 from nbc.schema import CanonContext, StageResult
 
-__all__ = [
+__all__ = (
     "BIDI_CONTROL",
     "BIDI_CONTROL_CLASSES",
     "NAME",
     "REMOVED",
     "ZERO_WIDTH",
     "run",
-]
+)
 
 NAME: Final[str] = "invisible"
 

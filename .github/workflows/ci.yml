@@ -93,6 +93,39 @@ jobs:
         # off a cache directory name, and those are different guarantees.
         run: uv run python -m nbc.pins --verify
 
+      - name: Verify the layer is inside its declared size budget
+        # NFR5, made falsifiable. Checks three things against each other in one pass: the budget
+        # the README states, the budget `SizeBudget` declares, and the layer as measured. Editing
+        # any one of the three without the other two fails here.
+        run: uv run python -m nbc.report.size_budget
+
+      - name: Prove the size-budget abort fires
+        # The EXIT CODE, not non-zero-ness: 14 is SizeBudgetViolated and 2 is a usage error, which
+        # is what a typo in this very step produces. A budget nobody has seen refuse anything is a
+        # number in a file.
+        run: |
+          set +e
+          uv run python -m nbc.report.size_budget --max-total-code-lines 1
+          status=$?
+          set -e
+          if [ "$status" -ne 14 ]; then
+            echo "::error::expected exit 14 (SizeBudgetViolated), got $status"
+            exit 1
+          fi
+
+      - name: Prove the size-budget flag cannot loosen the budget
+        # The same shape as `--require-glibc`: a flag that could raise the ceiling would pass on
+        # every layer the real ceiling passes on, silently. Refusing that is argparse's exit 2.
+        run: |
+          set +e
+          uv run python -m nbc.report.size_budget --max-total-code-lines 1000000
+          status=$?
+          set -e
+          if [ "$status" -ne 2 ]; then
+            echo "::error::--max-total-code-lines accepted a budget above the declared one"
+            exit 1
+          fi
+
       - name: Refuse a dirty tree
         # The suite must not write into the working tree. A test that leaves a file behind is a
         # test that could have left a *different* file behind -- and `git diff --exit-code` is

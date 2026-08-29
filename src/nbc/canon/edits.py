@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterable
 
 from nbc.schema import Edit
 
-__all__ = ["Report", "Segment", "build_edits", "build_reported_edits", "map_code_points"]
+__all__ = ("Report", "Segment", "build_edits", "build_reported_edits", "map_code_points")
 
 Segment = tuple[int, int, str]
 """`(start, end, replacement)`: the half-open span `text[start:end]` becomes `replacement`."""

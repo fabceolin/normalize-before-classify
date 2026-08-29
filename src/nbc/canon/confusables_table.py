@@ -39,7 +39,7 @@ from typing import Any, Final, Mapping, Sequence
 
 from nbc.errors import NbcError
 
-__all__ = [
+__all__ = (
     "ARTIFACT_PREFIX",
     "ARTIFACT_SUFFIX",
     "ASCII_LAST",
@@ -56,7 +56,7 @@ __all__ = [
     "in_scope",
     "load",
     "revision_pattern",
-]
+)
 
 
 class ConfusablesTableInvalid(NbcError, exit_code=12):

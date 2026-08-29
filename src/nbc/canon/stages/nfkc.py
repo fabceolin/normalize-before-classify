@@ -30,7 +30,7 @@ from typing import Final
 from nbc.canon.edits import Segment, build_edits
 from nbc.schema import MAX_ASCII, CanonContext, StageResult
 
-__all__ = ["NAME", "run"]
+__all__ = ("NAME", "run")
 
 NAME: Final[str] = "nfkc"
 
