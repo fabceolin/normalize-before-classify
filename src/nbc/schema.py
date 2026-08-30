@@ -29,6 +29,7 @@ from typing import Final
 
 __all__ = [
     "ATTACK",
+    "AUC_STRUCTURAL",
     "BENIGN",
     "BENIGN_CLASSES",
     "CANONICAL",
@@ -36,15 +37,21 @@ __all__ = [
     "CanonContext",
     "CanonResult",
     "CorpusItem",
+    "DELTA_AUC_STRUCTURAL",
     "Edit",
     "FAMILIES",
     "FAMILY_ATTACK",
     "FAMILY_BENIGN",
+    "INTERVAL_METHODS",
+    "Interval",
     "ItemScore",
     "LABELS",
+    "NEWCOMBE_PAIRED",
+    "PairedCount",
     "RAW",
     "Score",
     "StageResult",
+    "WILSON_SCORE",
 ]
 
 
@@ -563,3 +570,141 @@ class CanonContext:
 
         if not isinstance(self.trace_enabled, bool):
             raise ValueError(f"trace_enabled must be a bool, got {self.trace_enabled!r}")
+
+
+# --- the intervals every published number carries ------------------------------------------------
+
+WILSON_SCORE: Final[str] = "wilson-score"
+"""The plain Wilson score interval, not continuity-corrected. Every single-proportion rate."""
+
+NEWCOMBE_PAIRED: Final[str] = "newcombe-paired-score"
+"""Newcombe's method 10 for the difference of two proportions measured on the same items."""
+
+AUC_STRUCTURAL: Final[str] = "auc-structural-components"
+"""The empirical (Sen/DeLong) structural-component variance for one ROC AUC."""
+
+DELTA_AUC_STRUCTURAL: Final[str] = "delta-auc-structural-components"
+"""The same structural components for two conditions over one item set, with their covariance."""
+
+INTERVAL_METHODS: Final[tuple[str, ...]] = (
+    WILSON_SCORE,
+    NEWCOMBE_PAIRED,
+    AUC_STRUCTURAL,
+    DELTA_AUC_STRUCTURAL,
+)
+"""The whole of the methods this project publishes an interval under.
+
+Closed rather than free, and validated at construction, for the reason `CONDITIONS` is closed. An
+interval is a credibility claim, and which method produced it is the difference between two claims
+that print identically. A free string lets `"wilson"`, `"Wilson"` and `"wilson-score-cc"` all reach
+the results file, where a reader comparing two runs cannot tell a rename from a method change.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class Interval:
+    """A confidence interval and the name of the method that produced it.
+
+    The name rides on the value rather than sitting in a `methods` block beside it. The epic asks
+    that a reader know which interval they are reading; a side mapping discharges that only while
+    somebody keeps it in step, and when it drifts, nothing fails -- which is defect pattern 1 in
+    its exact shape, evidence recorded beside a value and never compared to it. Here the two are
+    inseparable: an interval cannot be constructed without a method from the closed vocabulary, so
+    no number can reach a serializer with its method unstated, and swapping Wilson for its
+    continuity-corrected variant changes a string a golden test reads.
+
+    `lo` and `hi` are fractions, never percentages. Formatting is a rendering decision and a record
+    that is sometimes 0.83 and sometimes 83.0 is a record with two units.
+    """
+
+    lo: float
+    hi: float
+    method: str
+
+    def __post_init__(self) -> None:
+        for name in ("lo", "hi"):
+            value = getattr(self, name)
+            # A bool is a float's subtype's sibling here only by accident of `int`; reject it
+            # explicitly so `Interval(True, ...)` is not silently 1.0.
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name} must be a real number, got {value!r}")
+            value = float(value)
+            if value != value or value in (float("inf"), float("-inf")):
+                raise ValueError(f"{name} is not finite: {value!r}")
+            object.__setattr__(self, name, value)
+
+        if self.lo > self.hi:
+            raise ValueError(f"interval is inverted: lo={self.lo!r} exceeds hi={self.hi!r}")
+
+        if self.method not in INTERVAL_METHODS:
+            raise ValueError(
+                f"method must be one of {INTERVAL_METHODS}, got {self.method!r}"
+            )
+
+    @property
+    def width(self) -> float:
+        """`hi - lo`. Named because three tests compare widths and each spelling it itself is one
+        more place the subtraction can be written backwards."""
+        return self.hi - self.lo
+
+    def as_json_object(self) -> dict[str, object]:
+        """The serialized form. The method travels with the numbers or neither travels."""
+        return {"lo": self.lo, "hi": self.hi, "method": self.method}
+
+
+@dataclass(frozen=True, slots=True)
+class PairedCount:
+    """The full 2x2 table of two binary conditions measured on the same items.
+
+    Laid out as the pairing reads it: `a` items positive under both, `b` positive under the first
+    only, `c` positive under the second only, `d` negative under both.
+
+    **All four cells, and not the discordant pair alone.** `b` and `c` are everything McNemar's
+    test needs and everything Tango's score interval needs. Newcombe's method builds a Wilson
+    interval for *each marginal* and joins them with a correlation term that reads `a` and `d`, so
+    a record shaped `(b, c, n)` does not make a Newcombe implementation fail -- it makes one
+    impossible to write, and the natural repair is to reach for the method whose inputs happen to
+    be present. That is how a repository publishes Tango's interval under Newcombe's name, and the
+    record shape is the only place to stop it.
+    """
+
+    a: int
+    b: int
+    c: int
+    d: int
+
+    def __post_init__(self) -> None:
+        for name in ("a", "b", "c", "d"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} counts items and must be an int, got {value!r}")
+            if value < 0:
+                raise ValueError(f"{name} must not be negative, got {value!r}")
+
+    @property
+    def n(self) -> int:
+        """The items the pair was measured on. Every cell is one of them, counted once."""
+        return self.a + self.b + self.c + self.d
+
+    @property
+    def first_positive(self) -> int:
+        """The first condition's marginal: `a + b`."""
+        return self.a + self.b
+
+    @property
+    def second_positive(self) -> int:
+        """The second condition's marginal: `a + c`."""
+        return self.a + self.c
+
+    @property
+    def theta(self) -> float:
+        """The paired difference `(b - c) / n`, which is also `p1 - p2`.
+
+        One definition with three callers. Written twice it is written backwards once.
+        """
+        if self.n == 0:
+            raise ValueError("a paired difference over no items is undefined")
+        return (self.b - self.c) / self.n
+
+    def as_json_object(self) -> dict[str, object]:
+        return {"a": self.a, "b": self.b, "c": self.c, "d": self.d}

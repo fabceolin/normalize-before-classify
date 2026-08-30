@@ -113,6 +113,7 @@ def test_schema_declares_only_the_types_this_epic_uses() -> None:
     """
     assert schema.__all__ == [
         "ATTACK",
+        "AUC_STRUCTURAL",
         "BENIGN",
         "BENIGN_CLASSES",
         "CANONICAL",
@@ -120,15 +121,21 @@ def test_schema_declares_only_the_types_this_epic_uses() -> None:
         "CanonContext",
         "CanonResult",
         "CorpusItem",
+        "DELTA_AUC_STRUCTURAL",
         "Edit",
         "FAMILIES",
         "FAMILY_ATTACK",
         "FAMILY_BENIGN",
+        "INTERVAL_METHODS",
+        "Interval",
         "ItemScore",
         "LABELS",
+        "NEWCOMBE_PAIRED",
+        "PairedCount",
         "RAW",
         "Score",
         "StageResult",
+        "WILSON_SCORE",
     ]
 
 
