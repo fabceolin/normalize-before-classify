@@ -207,13 +207,14 @@ def declared_path(pins: Pins) -> DeclaredPath:
     Two sides, two sources. Building this from the same values a shard header was built from in
     this process would produce a check that agrees with itself whatever the shard files say.
     """
-    from nbc.baselines.onnx_adapter import BATCH_SIZE, INTRA_OP_NUM_THREADS, PROVIDERS
+    from nbc.baselines.onnx_adapter import BATCH_SIZE, DEVICE, INTRA_OP_NUM_THREADS, PROVIDERS
 
     return DeclaredPath(
         providers=tuple(PROVIDERS),
         intra_op_num_threads=INTRA_OP_NUM_THREADS,
         batch_size=BATCH_SIZE,
         revisions={baseline.key: baseline.revision for baseline in pins.baselines},
+        device=DEVICE,
     )
 
 
@@ -248,6 +249,10 @@ def _execution_paths(
                 providers=tuple(str(name) for name in fields["providers"]),  # type: ignore[union-attr]
                 intra_op_num_threads=int(fields["intra_op_num_threads"]),  # type: ignore[arg-type]
                 batch_size=int(fields["batch_size"]),  # type: ignore[arg-type]
+                # Observed like `providers` and for the same reason: the adapter asked the driver
+                # which card it is on, and that answer -- not the module constant -- is what this
+                # shard file has to carry, because `path_problems` compares the two.
+                device=(None if fields.get("device") is None else str(fields["device"])),
             )
         )
     return tuple(paths)

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from nbc.baselines.onnx_adapter import BATCH_SIZE, INTRA_OP_NUM_THREADS, PROVIDERS
+from nbc.baselines.onnx_adapter import BATCH_SIZE, DEVICE, INTRA_OP_NUM_THREADS, PROVIDERS
 from nbc.corpus.attack import serialize as serialize_corpus
 from nbc.corpus.manifest import (
     ATTACK_CORPUS_FILENAME,
@@ -139,6 +139,7 @@ class StubBaseline:
     key: str
     revision: str
     providers: tuple[str, ...] = PROVIDERS
+    device: str | None = DEVICE
     intra_op_num_threads: int = INTRA_OP_NUM_THREADS
     batch_size: int = BATCH_SIZE
     calls: int = 0
@@ -159,6 +160,7 @@ class StubBaseline:
         return {
             "key": self.key,
             "providers": list(self.providers),
+            "device": self.device,
             "batch_size": self.batch_size,
             "intra_op_num_threads": self.intra_op_num_threads,
         }

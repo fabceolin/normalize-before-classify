@@ -8,6 +8,8 @@ the feed is built from would be the one the test wrote at both ends.
 
 from __future__ import annotations
 
+import ast
+
 import json
 import re
 from pathlib import Path
@@ -23,7 +25,9 @@ from nbc.baselines.onnx_adapter import (
     FEEDABLE_INPUTS,
     INTRA_OP_NUM_THREADS,
     PROVIDERS,
+    DEVICE,
     InferenceSessionInvalid,
+    observed_device,
     OnnxBaseline,
     open_baseline,
     read_id2label,
@@ -54,6 +58,18 @@ def windows_of(*documents: Sequence[Sequence[int]], strict: bool = True) -> port
     return windower
 
 
+SRC = Path(__file__).resolve().parents[2] / "src"
+"""The package tree the scan below walks. One spelling, so a moved test does not silently
+scan nothing."""
+
+CPU_ONLY: tuple[str, ...] = ("CPUExecutionProvider",)
+"""The path every fixture session in this module runs on. Not the published one, and named so.
+
+`PROVIDERS` is CUDA since 2026-08-30. These sessions exist to exercise the adapter's contract on
+whatever machine a reviewer has, so they declare CPU explicitly instead of inheriting a constant
+that would make the whole module unrunnable off a GPU.
+"""
+
 def adapter(
     *,
     inputs: Sequence[str] = DEBERTA_INPUTS,
@@ -65,7 +81,19 @@ def adapter(
     rank: int = 2,
     key: str = "fixture",
     batch_size: int = BATCH_SIZE,
+    providers: tuple[str, ...] = CPU_ONLY,
+    device: str | None = None,
 ) -> OnnxBaseline:
+    """Every fixture session runs on CPU, declared here rather than inherited from the constants.
+
+    The published path moved to CUDA on 2026-08-30 and these tests are about the ADAPTER'S
+    CONTRACT -- which inputs it can feed, which dtypes it refuses, which axis carries the labels,
+    whether a document's score depends on its batch neighbours. None of that is a claim about
+    hardware, and a contract test that could only run on a GPU is a contract nobody can check: the
+    CI runners are `ubuntu-latest`. What protects the published table is not this default, it is
+    `harness/score.py::path_problems` comparing what each shard RECORDED against `DeclaredPath`,
+    plus the scan below that refuses any module under `src/` naming these two parameters.
+    """
     return OnnxBaseline(
         key=key,
         graph=onnx_fixtures.classifier_graph(
@@ -78,14 +106,37 @@ def adapter(
         id2label=id2label,
         windower=windower if windower is not None else windows_of([[1, 2, 3]]),
         batch_size=batch_size,
+        providers=providers,
+        device=device,
     )
 
 
 # -- the device is named, not defaulted ------------------------------------------------------
 
 
-def test_the_session_names_the_cpu_provider_explicitly() -> None:
-    assert PROVIDERS == ("CPUExecutionProvider",)
+def test_the_published_path_names_cuda_first_and_cpu_as_the_declared_fallback() -> None:
+    """AD-24's constant, re-pointed on 2026-08-30 and asserted rather than assumed.
+
+    Two entries and this order. The CUDA provider does not implement every operator in the pinned
+    graphs, so the session reports both as active; a single-entry tuple would make the observed
+    value disagree with the declared one on the first real run, and `path_problems` would abort a
+    correct pass. CPU-first would silently publish a CPU table from a GPU box.
+    """
+    assert PROVIDERS == ("CUDAExecutionProvider", "CPUExecutionProvider")
+
+
+def test_the_published_device_is_named_with_its_compute_capability() -> None:
+    """`providers` cannot separate two CUDA cards; this is the field that does.
+
+    The capability is in the string because it is what selects the kernels: a Tesla P40 (6.1) and
+    an RTX 3060 (8.6) both answer `CUDAExecutionProvider`, and the machine this table is computed
+    on carries both.
+    """
+    assert DEVICE.endswith(")")
+    name, _, capability = DEVICE.rpartition(" ")
+    assert name
+    major, _, minor = capability.strip("()").partition(".")
+    assert major.isdigit() and minor.isdigit()
 
 
 def test_the_active_provider_of_every_session_is_the_cpu_one() -> None:
@@ -374,6 +425,7 @@ def test_the_resolved_mapping_and_the_parameters_travel_into_the_run_block() -> 
         "id2label": {"0": "SAFE", "1": "INJECTION"},
         "positive_index": 1,
         "providers": ["CPUExecutionProvider"],
+        "device": None,
         "batch_size": BATCH_SIZE,
         "intra_op_num_threads": INTRA_OP_NUM_THREADS,
         "graph_inputs": list(BERT_INPUTS),
@@ -411,7 +463,11 @@ def test_a_pinned_baseline_opens_from_the_paths_the_pin_names(
     pinned: pins.Baseline, tmp_path: Path
 ) -> None:
     root = _cache(tmp_path, pinned)
-    built = open_baseline(pinned, windows_of([[1, 2]]), cache_root=root)
+    # The CPU path, named here for the reason `adapter` names it: this test is about which files
+    # the pin resolves to, not about which device the published table comes from.
+    built = open_baseline(
+        pinned, windows_of([[1, 2]]), cache_root=root, providers=CPU_ONLY, device=None
+    )
     assert built.key == pinned.key
     assert built.positive_index == 1
     assert built.providers == ("CPUExecutionProvider",)
@@ -591,3 +647,102 @@ def test_the_invariance_test_can_fail() -> None:
     ).score(["doc", "long"])
 
     assert together[0].p_injection != alone[0].p_injection
+
+
+# -- the device, and who is allowed to choose one --------------------------------------------
+
+
+def session_choices(path: Path) -> list[str]:
+    """Every `providers=`/`device=` keyword handed to a call that BUILDS a session, from the tree.
+
+    Keyed on the callee and not on the keyword, and that distinction is the whole check:
+    `ExecutionPath(device=...)` and `DeclaredPath(device=...)` record a path and appear all over
+    `harness/`, while `OnnxBaseline(...)` and `open_baseline(...)` choose one. A scan that saw only
+    the keyword flagged the recorders too, which is a scan somebody switches off.
+    """
+    builders = {"OnnxBaseline", "open_baseline"}
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        # Both spellings, so an import style is not a way around the rule.
+        name = (
+            func.id
+            if isinstance(func, ast.Name)
+            else func.attr if isinstance(func, ast.Attribute) else None
+        )
+        if name in builders:
+            found.extend(k.arg for k in node.keywords if k.arg in ("providers", "device"))
+    return found
+
+
+def test_a_process_that_cannot_reach_cuda_says_so_instead_of_naming_a_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`observed_device` aborts rather than returning something every comparison would accept.
+
+    Driven through `ctypes.CDLL` so the input is the same on a GPU box and on a CI runner: a
+    test that only turned red on machines without CUDA would be green on the one machine where
+    the published table is produced, which is where it matters.
+    """
+    import ctypes
+
+    def refuse(_name: str, *args: object, **kwargs: object) -> object:
+        raise OSError("libcudart.so: cannot open shared object file")
+
+    monkeypatch.setattr(ctypes, "CDLL", refuse)
+    with pytest.raises(InferenceSessionInvalid, match="CUDA runtime could not be loaded"):
+        observed_device()
+
+
+def test_no_module_under_src_chooses_its_own_provider_list_or_device() -> None:
+    """The override exists for the tests. A second caller would be a second published path.
+
+    `providers` and `device` are parameters with the declared constants as defaults, which is what
+    lets this module exercise the adapter's contract on a CPU-only runner. That freedom has to stop
+    at `src/`: a module that passed either keyword would be choosing the execution path of the
+    published table somewhere other than where it is declared, and `DeclaredPath` would go on
+    reading the constants and agreeing with itself.
+
+    `open_baseline` is the one exception and it is exempt by NAME, not by pattern: it forwards the
+    parameters it was given and adds nothing. The scan reads the syntax tree, so a keyword split
+    across lines or hidden behind an alias is still a keyword.
+    """
+    allowed = {"nbc/baselines/onnx_adapter.py"}
+    offenders: dict[str, list[str]] = {}
+    for path in sorted(SRC.rglob("*.py")):
+        relative = path.relative_to(SRC).as_posix()
+        named = session_choices(path)
+        if named and relative not in allowed:
+            offenders[relative] = named
+    assert offenders == {}
+    # And the exemption is verified rather than asserted: the one allowed module really does
+    # forward them, so `allowed` is not a name nobody would have flagged anyway.
+    assert session_choices(SRC / "nbc/baselines/onnx_adapter.py")
+
+
+def test_the_scan_above_reports_a_second_chooser(tmp_path: Path) -> None:
+    """The scan, shown catching one, so it is not a check that passes by matching nothing."""
+    module = tmp_path / "sneaky.py"
+    module.write_text(
+        "from nbc.baselines.onnx_adapter import open_baseline\n"
+        "def go(b, w):\n"
+        "    return open_baseline(b, w, providers=('CPUExecutionProvider',), device=None)\n",
+        encoding="utf-8",
+    )
+    assert sorted(session_choices(module)) == ["device", "providers"]
+
+    # The distractor, in the same shape: `ExecutionPath(device=...)` RECORDS a device, it does not
+    # choose one, and `run.py` and `score.py` are full of it. A scan that keyed on the keyword
+    # alone flagged both of them and would have been switched off within a day.
+    recorder = tmp_path / "recorder.py"
+    recorder.write_text(
+        "from nbc.harness.score import ExecutionPath\n"
+        "def record(observed):\n"
+        "    return ExecutionPath(baseline_key='k', revision='r', providers=('CPUExecutionProvider',),\n"
+        "                         intra_op_num_threads=1, batch_size=8, device=observed)\n",
+        encoding="utf-8",
+    )
+    assert session_choices(recorder) == []

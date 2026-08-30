@@ -51,19 +51,116 @@ __all__ = [
     "InferenceSessionInvalid",
     "OnnxBaseline",
     "PAD_TOKEN_ID",
+    "DEVICE",
     "PROVIDERS",
     "REQUIRED_INPUT_TYPE",
+    "observed_device",
     "open_baseline",
     "read_id2label",
 ]
 
 
-PROVIDERS: Final[tuple[str, ...]] = ("CPUExecutionProvider",)
+PROVIDERS: Final[tuple[str, ...]] = ("CUDAExecutionProvider", "CPUExecutionProvider")
 """The execution path of the published artifact. Named, not defaulted, and then verified.
 
-Exploring on GPU hardware is unconstrained; a published table always comes from here, because a
-score computed on another device diverges in the last decimals.
+**This was CPU-only until 2026-08-30, and the reason it changed is wall-clock, not principle.**
+The full matrix is 114,400 scored keys over a corpus whose benign half averages 7,663 characters
+an item. Measured on a 16-thread CPU: one process scores 18 keys a minute, ten processes score
+about 47 -- the pass is memory-bandwidth bound, so processes stop helping long before the cores
+run out, and the run lands near 20 hours. The same pass on one RTX 3060 is roughly an hour.
+
+**What was given up, stated rather than glossed.** The previous docstring said a score computed on
+another device "diverges in the last decimals" and left it qualitative. It is now measured: over a
+fixed 15-item sample scored on both, **all 30 probabilities differ, by up to 3.61e-4**, with
+`n_windows` identical -- the windowing is unchanged, the arithmetic is not. So this table cannot be
+reproduced on a CPU-only machine, and the README says so instead of promising otherwise.
+
+**What was NOT given up: determinism.** Measured 2026-08-30 on the pinned graphs -- two processes
+on one RTX 3060 give bit-identical scores, and two different RTX 3060s give bit-identical scores.
+That is what makes sharding across cards legitimate rather than a source of quiet divergence.
+`tests/baselines/test_onnx_adapter.py` pins the constant; the smoke suite is what exercises it on
+hardware, and it now needs a GPU to run.
+
+**Two entries, not one.** The CUDA provider does not implement every operator in these graphs;
+the CPU provider is the declared fallback for the rest, which is what the session reports as
+active and therefore what `ExecutionPath.providers` records. A single-entry tuple would have made
+the recorded value disagree with the declared one on the first run.
 """
+
+DEVICE: Final[str] = "NVIDIA GeForce RTX 3060 (8.6)"
+"""The CUDA device the published table is computed on, as `observed_device` spells it.
+
+**`PROVIDERS` alone stopped being enough the moment the artifact moved to GPU.** A Tesla P40 and
+an RTX 3060 both report `CUDAExecutionProvider`, and they are different architectures running
+different kernels -- so the field that was written to make "somebody ran one shard on the GPU box"
+an abort would no longer notice "somebody ran one shard on the *other* GPU". The machine this ran
+on has both, so that hole was reachable on the first day rather than hypothetically.
+
+Declared here beside `PROVIDERS`, `BATCH_SIZE` and `INTRA_OP_NUM_THREADS`, because `DeclaredPath`
+already gathers the published path from this module and the shard files record what each process
+observed. Two sides, two sources -- which is the only shape in which the comparison means anything.
+
+The compute capability is in the string on purpose. Two cards can carry one marketing name across
+a silicon revision; the capability is what selects the kernels.
+"""
+
+
+def observed_device() -> str:
+    """The CUDA device this process will actually run on, asked of the driver.
+
+    Observed, never declared: this is the value `ExecutionPath` records and `DEVICE` is compared
+    against, and a function that returned the constant would be a comparison with itself.
+
+    `onnxruntime` reports only `"GPU"` from `get_device()`, which cannot separate the two
+    architectures this machine carries, so the identity comes from the CUDA runtime through
+    `ctypes` -- the name and the compute capability of the current device, which is the device
+    `CUDA_VISIBLE_DEVICES` has already narrowed to.
+
+    Raises `InferenceSessionInvalid` rather than returning a placeholder when CUDA cannot be
+    reached. A run that could not identify its device would otherwise record a string that agrees
+    with every other string, and the check above it would pass by being unable to fail.
+    """
+    import ctypes
+
+    class _Properties(ctypes.Structure):
+        # The first field of `cudaDeviceProp` is `char name[256]`, and `cudaGetDeviceProperties`
+        # writes the whole struct. Over-allocating the tail is what lets this read the name and
+        # the capability without vendoring a header whose layout changes between CUDA releases.
+        _fields_ = [("name", ctypes.c_char * 256), ("tail", ctypes.c_byte * 8192)]
+
+    try:
+        runtime = ctypes.CDLL("libcudart.so")
+    except OSError as failure:
+        raise InferenceSessionInvalid(
+            f"the CUDA runtime could not be loaded ({failure}); the published execution path is "
+            f"{list(PROVIDERS)} and a process that cannot reach CUDA cannot produce it"
+        ) from failure
+
+    index = ctypes.c_int(0)
+    if runtime.cudaGetDevice(ctypes.byref(index)) != 0:
+        raise InferenceSessionInvalid(
+            "the CUDA runtime reported no current device; every scored row has to name the "
+            "device that produced it"
+        )
+    major, minor = ctypes.c_int(0), ctypes.c_int(0)
+    # 75 and 76 are cudaDevAttrComputeCapabilityMajor and ...Minor, stable across CUDA releases.
+    for value, attribute in ((major, 75), (minor, 76)):
+        if runtime.cudaDeviceGetAttribute(ctypes.byref(value), attribute, index) != 0:
+            raise InferenceSessionInvalid(
+                f"the CUDA runtime refused attribute {attribute} for device {index.value}; the "
+                f"compute capability is what selects the kernels and it cannot be assumed"
+            )
+    properties = _Properties()
+    if runtime.cudaGetDeviceProperties(ctypes.byref(properties), index) != 0:
+        raise InferenceSessionInvalid(
+            f"the CUDA runtime refused the properties of device {index.value}"
+        )
+    name = properties.name.decode("utf-8", errors="replace").strip()
+    if not name:
+        raise InferenceSessionInvalid(
+            f"the CUDA runtime named device {index.value} with an empty string"
+        )
+    return f"{name} ({major.value}.{minor.value})"
 
 BATCH_SIZE: Final[int] = 8
 """Windows per `session.run`. Declared, fixed for the run, and written into `results.json`.
@@ -148,6 +245,8 @@ class OnnxBaseline:
         windower: Windower,
         batch_size: int = BATCH_SIZE,
         intra_op_num_threads: int = INTRA_OP_NUM_THREADS,
+        providers: tuple[str, ...] = PROVIDERS,
+        device: str | None = DEVICE,
     ) -> None:
         if batch_size < 1:
             raise ValueError(f"batch_size must be at least 1, got {batch_size!r}")
@@ -155,10 +254,23 @@ class OnnxBaseline:
             raise ValueError(
                 f"intra_op_num_threads must be at least 1, got {intra_op_num_threads!r}"
             )
+        if not providers or not all(isinstance(name, str) and name for name in providers):
+            raise ValueError(f"providers must hold non-empty names, got {providers!r}")
 
         self.key = key
         self.batch_size = batch_size
         self.intra_op_num_threads = intra_op_num_threads
+        # Parameters with the declared constants as defaults, for the reason `batch_size` and
+        # `intra_op_num_threads` already are: the adapter's contract -- input names, dtypes, the
+        # label axis -- is not a claim about hardware, and a test of that contract that could only
+        # run on a GPU would be a contract nobody could check. The published table comes from the
+        # defaults; `harness/score.py::path_problems` is what compares what each shard RECORDED
+        # against `DeclaredPath`, and that comparison is where a shard produced on another device
+        # is caught. `tests/baselines/test_onnx_adapter.py` scans `src/` and requires that no
+        # module but `open_baseline` names these two parameters, so the override cannot become a
+        # second way to set the published path.
+        self.declared_providers: tuple[str, ...] = tuple(providers)
+        self.declared_device: str | None = device
         self.id2label: Mapping[int, str] = _normalized_labels(id2label)
         # Resolved before the session is built: a baseline whose positive class cannot be
         # resolved is ineligible, and paying for a session first would only delay saying so.
@@ -169,7 +281,9 @@ class OnnxBaseline:
         options.intra_op_num_threads = intra_op_num_threads
         model: Any = str(graph) if isinstance(graph, (Path, str)) else graph
         try:
-            self._session = ort.InferenceSession(model, options, providers=list(PROVIDERS))
+            self._session = ort.InferenceSession(
+                model, options, providers=list(self.declared_providers)
+            )
         except Exception as failure:  # noqa: BLE001 - the runtime's own class means nothing here
             raise InferenceSessionInvalid(
                 f"baseline {key!r}: onnxruntime refused the pinned graph ({failure})"
@@ -184,12 +298,27 @@ class OnnxBaseline:
         problems: list[str] = []
 
         active = tuple(self._session.get_providers())
-        if active != PROVIDERS:
+        if active != self.declared_providers:
             problems.append(
-                f"baseline {self.key!r}: the session names providers {list(PROVIDERS)} and the "
-                f"runtime made {list(active)} active; a score from another device diverges in "
-                f"the last decimals and the decision threshold turns that into a class flip"
+                f"baseline {self.key!r}: the session names providers "
+                f"{list(self.declared_providers)} and the runtime made {list(active)} active; a "
+                f"score from another device diverges in the last decimals and the decision "
+                f"threshold turns that into a class flip"
             )
+        elif self.declared_device is not None:
+            # Only once the providers agree, and only when a device was declared. Two different
+            # CUDA cards both report `CUDAExecutionProvider`, so this is the half `providers`
+            # cannot see; and asking the driver on a run that already failed the check above would
+            # report a second symptom of one fault. Measured 2026-08-30: the pinned graphs give
+            # bit-identical scores across two RTX 3060s, and differ from CPU by up to 3.61e-4.
+            self._device = observed_device()
+            if self._device != self.declared_device:
+                problems.append(
+                    f"baseline {self.key!r}: the published table is computed on "
+                    f"{self.declared_device!r} and this process is on {self._device!r}. Two CUDA "
+                    f"cards of different architectures run different kernels, and both answer "
+                    f"`CUDAExecutionProvider` -- so this is the divergence `providers` cannot see"
+                )
 
         names: list[str] = []
         for declared in self._session.get_inputs():
@@ -259,6 +388,16 @@ class OnnxBaseline:
     def providers(self) -> tuple[str, ...]:
         """The providers the runtime actually made active for this session."""
         return tuple(self._session.get_providers())
+
+    @property
+    def device(self) -> str | None:
+        """The CUDA device this session runs on, as the driver named it, or `None` off CUDA.
+
+        Observed at construction and held, rather than asked again per call: the value cannot
+        change under a live session, and a property that re-queried the driver would make every
+        recorded row depend on a syscall that could start failing halfway through a shard.
+        """
+        return getattr(self, "_device", None)
 
     @property
     def graph_inputs(self) -> tuple[str, ...]:
@@ -349,6 +488,7 @@ class OnnxBaseline:
             "id2label": {str(index): self.id2label[index] for index in sorted(self.id2label)},
             "positive_index": self.positive_index,
             "providers": list(self.providers),
+            "device": self.device,
             "batch_size": self.batch_size,
             "intra_op_num_threads": self.intra_op_num_threads,
             "graph_inputs": list(self.graph_inputs),
@@ -407,6 +547,8 @@ def open_baseline(
     cache_root: Path | None = None,
     batch_size: int = BATCH_SIZE,
     intra_op_num_threads: int = INTRA_OP_NUM_THREADS,
+    providers: tuple[str, ...] = PROVIDERS,
+    device: str | None = DEVICE,
 ) -> OnnxBaseline:
     """Build the adapter for one pinned baseline from the files the pin names, and no others.
 
@@ -451,4 +593,6 @@ def open_baseline(
         windower=windower,
         batch_size=batch_size,
         intra_op_num_threads=intra_op_num_threads,
+        providers=providers,
+        device=device,
     )

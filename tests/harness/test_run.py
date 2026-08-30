@@ -725,3 +725,38 @@ def test_cross_process_scoring_of_the_same_items_agrees_to_the_last_bit() -> Non
     probabilities = {float.fromhex(row[0]) for rows in first.values() for row in rows}
     assert len(probabilities) > 1
     assert all(0.0 <= value <= 1.0 and not math.isnan(value) for value in probabilities)
+
+
+def test_a_shard_from_the_other_cuda_card_is_refused_by_name(pins, tmp_path: Path) -> None:
+    """The input that turns story-3.9-era `providers` blind and the device field red.
+
+    A Tesla P40 and an RTX 3060 both answer `CUDAExecutionProvider`, so every field the shard
+    header carried before 2026-08-30 agrees across the two, while the kernels differ and so do the
+    last decimals of every borderline row. This is the shard file the other card would have left.
+    """
+    write_corpus(pins, tmp_path, small_corpus())
+    run.score_shard(
+        pins,
+        shards=1,
+        shard=0,
+        root=tmp_path,
+        opener=stub_opener(pins, device="Tesla P40 (6.1)"),
+    )
+    with pytest.raises(ScoreSetIncomplete) as raised:
+        run.merge_shards(pins, shards=1, root=tmp_path)
+    problems = raised.value.problems
+    assert any("Tesla P40 (6.1)" in problem for problem in problems)
+    # Named as a device disagreement, not as a provider one: both sides say CUDA.
+    assert not any("published execution path is ['CPUExecutionProvider']" in p for p in problems)
+
+
+def test_the_device_check_is_not_satisfied_by_the_providers_agreeing(pins, tmp_path: Path) -> None:
+    """The negative half: with the device put back, the same pass merges.
+
+    Without this the test above would pass if `merge_shards` refused every run, which is the
+    failure mode a gate with one input cannot tell apart from working.
+    """
+    write_corpus(pins, tmp_path, small_corpus())
+    run.score_shard(pins, shards=1, shard=0, root=tmp_path, opener=stub_opener(pins))
+    report = run.merge_shards(pins, shards=1, root=tmp_path)
+    assert report

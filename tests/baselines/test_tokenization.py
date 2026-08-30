@@ -556,6 +556,10 @@ def test_an_adapter_scores_a_long_document_through_the_shared_policy(tmp_path: P
         graph=onnx_fixtures.classifier_graph(),
         id2label={"0": "SAFE", "1": "INJECTION"},
         windower=policy,
+        # CPU, named: the subject here is the window policy reaching the adapter, not the device
+        # the published table is computed on. See `tests/baselines/test_onnx_adapter.py::adapter`.
+        providers=("CPUExecutionProvider",),
+        device=None,
     )
 
     scores = baseline.score([fixtures.document(2 * CONTENT + 1), fixtures.document(1)])

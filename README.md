@@ -124,6 +124,25 @@ uv run python -m nbc.corpus.build build-corpus   # draws data/*.jsonl and data/m
 uv run python -m nbc.corpus.build verify-corpus  # the guarded read; touches no network
 ```
 
+**The scoring pass is the exception, and it needs a CUDA device.** Everything in the block above —
+the platform floor, the pins, the offline unit suite, the corpus build and its guarded read — runs
+on a CPU-only machine and is checked that way on every push. The table itself is not: as of
+2026-08-30 the published execution path is `CUDAExecutionProvider` on an `NVIDIA GeForce RTX 3060
+(8.6)`, declared in `baselines/onnx_adapter.py` and recorded per shard, and a reviewer without that
+card cannot reproduce the numbers by re-running the pass.
+
+Why it moved, since a reader is owed the reason: measured on a 16-thread CPU, one process scores 18
+of the 114,400 keys a minute and ten processes score about 47 — the pass is memory-bandwidth bound,
+so the parallelism runs out well before the cores do, and the full matrix lands near twenty hours.
+The same pass on one RTX 3060 is roughly an hour.
+
+What it cost, measured rather than waved at: over a fixed fifteen-item sample scored on both
+devices, **all thirty probabilities differ, by up to 3.61e-4**, with `n_windows` identical. What it
+did not cost is determinism — two processes on one RTX 3060 and two different RTX 3060s give
+bit-identical scores, which is what makes splitting the pass across cards legitimate. A shard
+produced on a different device is refused by name at merge, and the check has a test that fires it
+with a Tesla P40.
+
 `build-corpus` reaches the network and is the only way to produce a corpus anything can measure over:
 it writes `data/manifest.json`, and `verify-corpus` — the same guarded read every consumer goes
 through — refuses without one.

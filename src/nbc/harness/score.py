@@ -123,7 +123,7 @@ class ScoreSetIncomplete(NbcError, exit_code=27):
         )
 
 
-SHARD_SCHEMA_VERSION: Final[int] = 1
+SHARD_SCHEMA_VERSION: Final[int] = 2
 """The shape of a shard file's header line. Part of the header, so a reader can refuse a shape.
 
 A shard file written by one checkout is merged by another -- that is the point of sharding -- so
@@ -254,8 +254,11 @@ class ExecutionPath:
     providers: tuple[str, ...]
     intra_op_num_threads: int
     batch_size: int
+    device: str | None = None
 
     def __post_init__(self) -> None:
+        if self.device is not None and (not isinstance(self.device, str) or not self.device):
+            raise ValueError(f"device is a non-empty string or None, got {self.device!r}")
         for name in ("baseline_key", "revision"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
@@ -279,6 +282,7 @@ class ExecutionPath:
             "baseline_key": self.baseline_key,
             "revision": self.revision,
             "providers": list(self.providers),
+            "device": self.device,
             "intra_op_num_threads": self.intra_op_num_threads,
             "batch_size": self.batch_size,
         }
@@ -287,6 +291,7 @@ class ExecutionPath:
         """The path as one line, for a message that has to name two of them side by side."""
         return (
             f"{self.baseline_key}@{self.revision} on {list(self.providers)} "
+            f"device={self.device!r} "
             f"intra_op_num_threads={self.intra_op_num_threads} batch_size={self.batch_size}"
         )
 
@@ -307,6 +312,7 @@ class DeclaredPath:
     intra_op_num_threads: int
     batch_size: int
     revisions: Mapping[str, str]
+    device: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -625,6 +631,18 @@ def path_problems(
                     f"{name} scored baseline {baseline_key!r} on {list(path.providers)} and the "
                     f"published execution path is {list(declared.providers)}"
                 )
+            if path.device != declared.device:
+                # The half `providers` cannot see. Two CUDA cards of different architectures both
+                # report `CUDAExecutionProvider`, so without this a pass split across a Tesla P40
+                # and an RTX 3060 agrees on every field it records and disagrees in the last
+                # decimals of every borderline row. Measured 2026-08-30: identical cards give
+                # bit-identical scores, and CPU differs from CUDA by up to 3.61e-4.
+                problems.append(
+                    f"{name} scored baseline {baseline_key!r} on device {path.device!r} and the "
+                    f"published execution path is {declared.device!r}; two CUDA devices of "
+                    f"different architectures run different kernels and both answer "
+                    f"`CUDAExecutionProvider`"
+                )
             if path.intra_op_num_threads != declared.intra_op_num_threads:
                 problems.append(
                     f"{name} scored baseline {baseline_key!r} with intra_op_num_threads="
@@ -732,6 +750,12 @@ def _parse_header(name: str, line: str) -> ShardHeader:
                 providers=tuple(entry["providers"]),
                 intra_op_num_threads=entry["intra_op_num_threads"],
                 batch_size=entry["batch_size"],
+                # Read by name and required, not `.get(...)`: a header written before the device
+                # was recorded would otherwise parse into `device=None`, compare unequal to the
+                # declared path, and be reported as "scored on device None" -- a message about a
+                # field, for a file whose real problem is that it predates the field. The schema
+                # version is what says so, and it was bumped to 2 for exactly this.
+                device=entry["device"],
             )
             for entry in paths
         ),
