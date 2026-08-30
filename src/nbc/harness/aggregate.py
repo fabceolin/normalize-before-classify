@@ -56,6 +56,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
+from nbc.canon.pipeline import trace_stage_labels
 from nbc.corpus.matrix import chain_class, parse_item_id, render_chain
 from nbc.errors import NbcError
 from nbc.harness.stats import (
@@ -251,7 +252,12 @@ def read_traces(path: Path) -> dict[str, tuple[str, ...]]:
         stages = payload.get("stages", [])
         if not isinstance(stages, list) or not all(isinstance(s, str) for s in stages):
             raise CellsInvalid(f"{path}:{number} carries a malformed stage list: {stages!r}")
-        unknown = [s for s in stages if s not in PIPELINE_STAGES]
+        # `trace_stage_labels()` and not `PIPELINE_STAGES`: the census axis is the four stage
+        # names, and the trace vocabulary is those plus the ceiling label a stage stamps on the
+        # candidate it would have decoded but for the depth. Two sets, two questions -- and the
+        # first real run aborted here because this line conflated them, on a corpus that carries a
+        # chain past the ceiling by requirement.
+        unknown = [s for s in stages if s not in trace_stage_labels()]
         if unknown:
             raise CellsInvalid(
                 f"{path}:{number} names stages {unknown!r}, which the canonicalization pipeline "

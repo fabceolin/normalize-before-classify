@@ -17,7 +17,7 @@ from typing import Final
 
 import pytest
 
-from nbc.canon.pipeline import PIPELINE
+from nbc.canon.pipeline import PIPELINE, trace_stage_labels
 from nbc.corpus.matrix import CHAIN_CLASS_BOUND, CHAIN_CLASS_HELD_OUT, CLEAN_CHAIN_NAME
 from nbc.errors import declared_exit_codes
 from nbc.harness.results import (
@@ -378,6 +378,57 @@ def test_the_two_spellings_of_the_pipeline_stages_agree() -> None:
     comparison that makes a second spelling safe rather than a second source of truth, and its two
     sides come from two modules."""
     assert PIPELINE_STAGES == tuple(stage.name for stage in PIPELINE)
+
+
+def test_the_census_axis_is_narrower_than_what_a_trace_can_carry() -> None:
+    """The half of the declaration the agreement above does not read, and what it cost.
+
+    A `PipelineStage` carries a `name` AND, where it has a ceiling entry point, a `ceiling_name`.
+    The trace stamps edits with both. Comparing only the names agreed with half the declaration and
+    passed for the whole of epic 4; the first real run then aborted in `aggregate.read_traces`,
+    which had validated the trace against `PIPELINE_STAGES` and refused `decode-ceiling` as "a stage
+    nobody ran" -- on a corpus that carries a chain nested past the ceiling BY REQUIREMENT (AD-20),
+    so the abort was certain the first time anything real was measured.
+
+    Asserted as a strict containment rather than as an equality of two lists, because the point is
+    that these are two different sets: `PIPELINE_STAGES` is the census axis, `trace_stage_labels()`
+    is the trace vocabulary, and a change that collapsed them would pass an equality.
+    """
+    labels = trace_stage_labels()
+    assert set(PIPELINE_STAGES) < set(labels), "the trace vocabulary must be the wider set"
+    ceilings = {stage.ceiling_name for stage in PIPELINE if stage.ceiling_name}
+    assert ceilings, "no stage declares a ceiling entry point; this test would be vacuous"
+    assert set(labels) == set(PIPELINE_STAGES) | ceilings
+    # And it is generated from the stages that HAVE one, not from all four: a label no stage can
+    # stamp stays refusable. This is the distractor -- a wider rule would accept it.
+    assert "invisible-ceiling" not in labels
+
+
+def test_a_trace_carrying_a_ceiling_label_is_read_and_a_fabricated_one_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The two inputs the abort turned on, through the reader that aborted.
+
+    The first is the line the real run produced. The second is a label shaped like a ceiling label
+    for a stage that declares no ceiling entry point, which must still be refused -- otherwise the
+    fix would have been "accept anything ending in -ceiling", which is a check that stopped
+    checking.
+    """
+    from nbc.harness.aggregate import CellsInvalid, read_traces
+
+    path = tmp_path / "traces.jsonl"
+    path.write_text(
+        json.dumps({"item_id": "a::clean", "stages": ["decode", "decode-ceiling"]}) + "\n",
+        encoding="utf-8",
+    )
+    assert read_traces(path)["a::clean"] == ("decode", "decode-ceiling")
+
+    path.write_text(
+        json.dumps({"item_id": "a::clean", "stages": ["invisible-ceiling"]}) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(CellsInvalid, match="invisible-ceiling"):
+        read_traces(path)
 
 
 def test_every_stage_has_a_census_and_the_vocabulary_is_built_from_them() -> None:

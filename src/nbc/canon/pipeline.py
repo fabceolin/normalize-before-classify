@@ -67,6 +67,7 @@ __all__ = (
     "StageContractViolated",
     "canonicalize",
     "default_context",
+    "trace_stage_labels",
 )
 
 DEFAULT_CEILING: Final[int] = 3
@@ -163,6 +164,31 @@ PIPELINE: Final[tuple[PipelineStage, ...]] = (
     ),
 )
 """The canonical order, and the only place it exists."""
+
+
+def trace_stage_labels() -> tuple[str, ...]:
+    """Every label an edit in a trace can carry, derived from `PIPELINE` and not spelled twice.
+
+    **Wider than `schema.PIPELINE_STAGES`, and the difference is the point.** A stage that runs at
+    the ceiling decides exactly as it would below it and then replaces nothing, reporting the
+    candidate it WOULD have decoded under its `ceiling_name`. That is not a fifth stage: it is a
+    reason on a decode-stage report, and it is the fact `ceiling_hit` is derived from, which already
+    has its own census. So the census axis is the four stage names and the trace vocabulary is those
+    four plus whichever stages declare a ceiling entry point -- two sets, two questions.
+
+    Read off `PIPELINE` rather than listed, because listing it is what broke. The first real run
+    aborted here: `aggregate.read_traces` validated a trace against `PIPELINE_STAGES` and refused
+    `decode-ceiling` as "a stage nobody ran", on a corpus that carries a chain nested past the
+    ceiling BY REQUIREMENT (AD-20) -- so the abort was certain the first time anything real was
+    measured. The agreement test that was meant to make the second spelling safe compared
+    `stage.name` and never `stage.ceiling_name`: it agreed with half the declaration and passed.
+
+    Generated from the stages that actually declare one, not from all four, so a label no stage can
+    stamp is still refused. `invisible-ceiling` is not a name this returns.
+    """
+    labels = [stage.name for stage in PIPELINE]
+    labels.extend(stage.ceiling_name for stage in PIPELINE if stage.ceiling_name)
+    return tuple(labels)
 
 
 def default_context(
