@@ -83,6 +83,7 @@ from typing import Final
 from nbc.errors import NbcError
 from nbc.schema import (
     AUC_STRUCTURAL,
+    MOVER_DIFFERENCE,
     DELTA_AUC_STRUCTURAL,
     NEWCOMBE_PAIRED,
     WILSON_SCORE,
@@ -99,6 +100,7 @@ __all__ = [
     "StatisticUndefined",
     "Z_95",
     "delta_auc",
+    "mover_difference_interval",
     "nearest_rank_percentile",
     "newcombe_paired_interval",
     "rejected_hanley_mcneil_variance",
@@ -339,6 +341,52 @@ def unpaired_square_and_add_interval(counts: PairedCount, z: float = Z_95) -> In
     delta = math.hypot(p1 - first.lo, second.hi - p2)
     epsilon = math.hypot(first.hi - p1, p2 - second.lo)
     return Interval(counts.theta - delta, counts.theta + epsilon, NEWCOMBE_PAIRED)
+
+
+def mover_difference_interval(
+    first: float,
+    first_interval: Interval,
+    second: float,
+    second_interval: Interval,
+) -> Interval:
+    """The difference `first - second` of two **independent** estimates that arrive with intervals.
+
+        lo = (a - b) - sqrt((a - l_a)^2 + (u_b - b)^2)
+        hi = (a - b) + sqrt((u_a - a)^2 + (b - l_b)^2)
+
+    **Why this and not a variance sum.** N1's criterion writes `Var(D) = Var(A) + Var(B)`, which is
+    right for two independent estimates and assumes both come with variances. These do not: they
+    are Newcombe intervals, asymmetric by construction, and the asymmetry is why that method was
+    chosen -- it is what makes the interval behave near 0 and 1. There is no single variance to add.
+    MOVER-R is the interval-form of the same argument: it combines the distance from each estimate
+    to the bound that matters for each side of the difference, squared and added. It **reduces to
+    the variance sum exactly when both intervals are symmetric**, which the test asserts.
+
+    **Independence is the caller's to establish and is not checked here.** N1's two deltas are
+    computed over disjoint item sets -- benign items and attack items -- which is what makes the
+    combination valid. Handed two intervals over overlapping populations this would silently return
+    an interval that is too wide, and too wide is the direction that makes a negative result harder
+    to declare. The caller that uses it says why its inputs are disjoint.
+    """
+    for name, value in (("first", first), ("second", second)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise StatisticUndefined(f"{name} must be a real number, got {value!r}")
+    for name, value, interval in (
+        ("first", first, first_interval),
+        ("second", second, second_interval),
+    ):
+        if not isinstance(interval, Interval):
+            raise StatisticUndefined(f"{name}_interval must be an Interval, got {interval!r}")
+        if not interval.lo <= value <= interval.hi:
+            raise StatisticUndefined(
+                f"the {name} estimate {value!r} lies outside its own interval {interval!r}; a "
+                f"point estimate its interval does not cover is not an estimate this can combine"
+            )
+
+    down = math.hypot(first - first_interval.lo, second_interval.hi - second)
+    up = math.hypot(first_interval.hi - first, second - second_interval.lo)
+    difference = first - second
+    return Interval(difference - down, difference + up, MOVER_DIFFERENCE)
 
 
 # --- one AUC, and the difference of two ------------------------------------------------------------

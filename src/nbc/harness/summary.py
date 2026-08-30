@@ -64,6 +64,8 @@ from nbc.corpus.matrix import CHAIN_CLASS_BOUND
 from nbc.errors import NbcError
 from nbc.schema import (
     CONTRAST_CANON_ON_VS_OFF,
+    POPULATION_ALL,
+    POPULATION_SINGLE_WINDOW,
     DELTA_AUC_STRUCTURAL,
     FAMILY_ATTACK,
     NEWCOMBE_PAIRED,
@@ -75,6 +77,7 @@ from nbc.schema import (
 __all__ = [
     "ACCEPTED_JUSTIFICATION",
     "FINDING_BOUND_CHAIN",
+    "FINDING_WINDOWS_MATCHED",
     "FINDING_KINDS",
     "FINDING_RESOLUTION",
     "FINDING_SATURATION",
@@ -90,6 +93,7 @@ __all__ = [
     "resolution_findings",
     "saturation_findings",
     "sign_disagreement_findings",
+    "windows_matched_findings",
 ]
 
 SUMMARY_CHOICE: Final[str] = "roc_auc"
@@ -131,14 +135,16 @@ FINDING_SATURATION: Final[str] = "saturation"
 FINDING_RESOLUTION: Final[str] = "resolution"
 FINDING_SIGN_DISAGREEMENT: Final[str] = "sign_disagreement"
 FINDING_BOUND_CHAIN: Final[str] = "bound_chain_definitional"
+FINDING_WINDOWS_MATCHED: Final[str] = "windows_matched_divergence"
 
 FINDING_KINDS: Final[tuple[str, ...]] = (
     FINDING_SATURATION,
     FINDING_RESOLUTION,
     FINDING_SIGN_DISAGREEMENT,
     FINDING_BOUND_CHAIN,
+    FINDING_WINDOWS_MATCHED,
 )
-"""The four limits, closed. A fifth arriving as a free string is a caveat nobody declared."""
+"""The five limits, closed. A fifth arriving as a free string is a caveat nobody declared."""
 
 SATURATION_TIE_SHARE: Final[float] = 0.05
 """The tied share above which a cell carries a saturation finding.
@@ -320,6 +326,12 @@ def sign_disagreement_findings(cells: Sequence[object]) -> tuple[SummaryFinding,
             # more attacks at the operating point". A false-positive delta answers a different
             # question and pairing it here would compare two things that are allowed to disagree.
             continue
+        if delta.key.population != POPULATION_ALL:
+            # The windows-matched companion shares this column and is a DIFFERENT population. It
+            # was silently overwriting the published cell here, which turned a real sign
+            # disagreement into no finding at all -- the failure mode this check is most prone to,
+            # and the second time in this module that a pairing key was the bug.
+            continue
         recall_deltas[_column(delta.key)] = delta
 
     pairs: list[tuple[Delta, Delta]] = []
@@ -397,6 +409,73 @@ def bound_chain_findings(cells: Sequence[object]) -> tuple[SummaryFinding, ...]:
     return tuple(produced)
 
 
+def windows_matched_findings(cells: Sequence[object]) -> tuple[SummaryFinding, ...]:
+    """Where a cell and its windows-matched companion disagree by more than the companion's own
+    half-width.
+
+    A document over one window is scored as the maximum over its windows, so the layer can move a
+    cell by changing how many windows a document needs rather than by changing what the classifier
+    sees in any of them. The companion removes that channel by keeping only items that occupy one
+    window under both canon states; the gap between the two is how much of the effect ran through
+    it.
+
+    The comparison is against the **matched** cell's half-width, which the criterion names, and the
+    reason it is that one: the matched cell has the smaller `n` and therefore the wider interval,
+    so it is the conservative side to measure a divergence against.
+
+    Both cells are named on the finding, because a reader who cannot see the two numbers cannot
+    tell a windowing artifact from a real effect.
+    """
+    matched: dict[tuple[str, ...], Delta] = {}
+    unmatched: dict[tuple[str, ...], Delta] = {}
+    for cell in cells:
+        if not isinstance(cell, Delta):
+            continue
+        if cell.contrast.kind != CONTRAST_CANON_ON_VS_OFF:
+            continue
+        if cell.interval.method != NEWCOMBE_PAIRED:
+            continue  # the AUC delta is a different quantity and has no window companion
+        target = matched if cell.key.population == POPULATION_SINGLE_WINDOW else unmatched
+        target[_populationless(cell.key)] = cell
+
+    produced: list[SummaryFinding] = []
+    for identity, companion in sorted(matched.items()):
+        whole = unmatched.get(identity)
+        if whole is None:
+            continue
+        gap = abs(whole.value - companion.value)
+        half_width = companion.interval.width / 2
+        if gap <= half_width:
+            continue
+        produced.append(
+            SummaryFinding(
+                kind=FINDING_WINDOWS_MATCHED,
+                keys=(whole.key, companion.key),
+                statement=(
+                    f"This cell reads {whole.value:+.6f} over every item and "
+                    f"{companion.value:+.6f} over the items occupying one window under both canon "
+                    f"states -- a gap of {gap:.6f}, wider than the matched cell's interval "
+                    f"half-width of {half_width:.6f}. A document over one window is scored as the "
+                    f"maximum over its windows, so part of this difference is the layer changing "
+                    f"how many windows a document needs rather than what the classifier sees."
+                ),
+                computed={
+                    "value_all_items": whole.value,
+                    "value_single_window": companion.value,
+                    "gap": gap,
+                    "matched_half_width": half_width,
+                    "n_single_window_interval": companion.interval.as_json_object(),
+                },
+            )
+        )
+    return tuple(produced)
+
+
+def _populationless(key: CellKey) -> tuple[str, ...]:
+    """What identifies a cell apart from which items it was computed over."""
+    return (*_sortable(key), "" if key.contrast is None else key.contrast.name)
+
+
 def findings(cells: Sequence[object]) -> tuple[SummaryFinding, ...]:
     """Every limit the cell set carries, ordered by kind so two runs emit the same sequence."""
     if not _aucs(cells):
@@ -411,6 +490,7 @@ def findings(cells: Sequence[object]) -> tuple[SummaryFinding, ...]:
         *resolution_findings(cells),
         *sign_disagreement_findings(cells),
         *bound_chain_findings(cells),
+        *windows_matched_findings(cells),
     ]
     order = {kind: index for index, kind in enumerate(FINDING_KINDS)}
     return tuple(

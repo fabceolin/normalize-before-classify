@@ -62,6 +62,7 @@ from nbc.schema import (
     FAMILY_ATTACK,
     FAMILY_BENIGN,
     NEWCOMBE_PAIRED,
+    POPULATION_ALL,
     RAW,
     WILSON_SCORE,
     Auc,
@@ -616,6 +617,7 @@ def escaped_cell(**axes: object) -> object:
         "family": FAMILY_BENIGN,
         "benign_class": "b_code",
         "contrast": None,
+        "population": POPULATION_ALL,
     }
     fields.update(axes)
     fields["as_json_object"] = lambda self: {k: v for k, v in fields.items() if k != "as_json_object"}

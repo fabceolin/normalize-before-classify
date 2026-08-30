@@ -68,6 +68,10 @@ from nbc.harness.stats import (
 from nbc.pins import Baseline, Pins
 from nbc.schema import (
     AXIS_BENIGN_CLASS,
+    CENSUS_CEILING_HIT,
+    CENSUS_KINDS,
+    CENSUS_WINDOW_OVERFLOW,
+    POPULATION_SINGLE_WINDOW,
     AXIS_CANON_ON,
     AXIS_CHAIN_CLASS,
     AXIS_DRESSING_CHAIN,
@@ -108,19 +112,18 @@ __all__ = [
     "pooling_problems",
     "read_scores",
     "recall_cells",
+    "windows_matched_delta_cells",
 ]
 
 Cell = Rate | Count | Auc | Delta
 """The four kinds a published column may be, and the whole of them."""
 
-CENSUS_CEILING_HIT: Final[str] = "ceiling_hit"
-CENSUS_WINDOW_OVERFLOW: Final[str] = "window_overflow"
-CENSUS_KINDS: Final[tuple[str, ...]] = (CENSUS_CEILING_HIT, CENSUS_WINDOW_OVERFLOW)
-"""The census counts the scores file supports.
+"""The census counts the scores file supports are `schema.CENSUS_KINDS`, and they are named there
+rather than here because `Count` now carries which census it is -- a field, not a convention.
 
-Per-stage edit counts belong here too and are not: they are read off `results/traces.jsonl`, which
-story 4-7 writes. Emitting an approximation of them from this file would put a number in a census
-column that no trace produced.
+Per-stage edit counts belong in that vocabulary too and are not: they are read off
+`results/traces.jsonl`, which story 4-7 writes. Emitting an approximation of them from this file
+would put a number in a census column that no trace produced.
 """
 
 
@@ -330,7 +333,7 @@ def census_cells(scores: Sequence[ItemScore], pins: Pins, kind: str) -> tuple[Co
             hits = sum(1 for score in members if score.ceiling_hit)
         else:
             hits = sum(1 for score in members if score.n_windows > 1)
-        produced.append(Count(hits, len(members), key))
+        produced.append(Count(hits, len(members), key, census=kind))
     return tuple(produced)
 
 
@@ -551,6 +554,76 @@ def auc_delta_cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Delta, ...
     return tuple(produced)
 
 
+def windows_matched_delta_cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Delta, ...]:
+    """The canon-on-versus-off delta again, over items occupying **one window under both states**.
+
+    The windowing artifact is a confound with a specific shape: a document over one window is
+    scored as the maximum over its windows, so the layer can change a cell's number by changing how
+    many windows a document needs rather than by changing what the classifier sees in any of them.
+    Restricting to items that occupy exactly one window under *both* canon states removes that
+    channel, and the difference between the two cells is how much of the effect ran through it.
+
+    Under **both**, not under either: an item that needs one window raw and two canonical is
+    exactly the item the artifact acts through, so admitting it on the strength of one condition
+    would leave the confound in the companion that exists to remove it.
+
+    It is the same contrast over a different population, so it carries `population =
+    single_window` rather than a new contrast kind -- the two sides do not differ on any axis.
+    """
+    groups = _grouped(scores, pins)
+    produced: list[Delta] = []
+
+    for key, members in sorted(groups.items(), key=lambda pair: _sort_key(pair[0])):
+        if key.canon_on is not True:
+            continue
+        raw_members = groups.get(_with(key, canon_on=False))
+        if raw_members is None:
+            continue
+
+        threshold = _threshold_for(key, pins)
+        canonical_by_item = {score.item_id: score for score in members}
+        raw_by_item = {score.item_id: score for score in raw_members}
+        eligible = [
+            item_id
+            for item_id in canonical_by_item
+            if item_id in raw_by_item
+            and canonical_by_item[item_id].n_windows == 1
+            and raw_by_item[item_id].n_windows == 1
+        ]
+        if not eligible:
+            continue
+
+        a = b = c = d = 0
+        for item_id in eligible:
+            on = classify(canonical_by_item[item_id].p_injection, threshold)
+            off = classify(raw_by_item[item_id].p_injection, threshold)
+            if on and off:
+                a += 1
+            elif on:
+                b += 1
+            elif off:
+                c += 1
+            else:
+                d += 1
+
+        counts = PairedCount(a, b, c, d)
+        produced.append(
+            Delta(
+                value=counts.theta,
+                interval=newcombe_paired_interval(counts),
+                key=_with(
+                    key,
+                    canon_on=None,
+                    contrast=Contrast(
+                        CONTRAST_CANON_ON_VS_OFF, None, frozenset({AXIS_CANON_ON})
+                    ),
+                    population=POPULATION_SINGLE_WINDOW,
+                ),
+            )
+        )
+    return tuple(produced)
+
+
 def _with(key: CellKey, **overrides: object) -> CellKey:
     """The same key with some axes replaced. One place, because six call sites rebuilt it."""
     fields: dict[str, object] = {
@@ -562,6 +635,7 @@ def _with(key: CellKey, **overrides: object) -> CellKey:
         "family": key.family,
         "benign_class": key.benign_class,
         "contrast": key.contrast,
+        "population": key.population,
     }
     fields.update(overrides)
     return CellKey(**fields)  # type: ignore[arg-type]
@@ -674,6 +748,7 @@ def cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Cell, ...]:
         *canon_delta_cells(scores, pins),
         *chain_delta_cells(scores, pins),
         *auc_delta_cells(scores, pins),
+        *windows_matched_delta_cells(scores, pins),
     ]
     return tuple(sorted(produced, key=lambda cell: (_kind_of(cell), _sort_key(cell.key))))
 
@@ -685,6 +760,7 @@ def _kind_of(cell: Cell) -> str:
 def _sort_key(key: CellKey) -> tuple[str, ...]:
     contrast = "" if key.contrast is None else key.contrast.name
     return (
+        str(key.population),
         str(key.baseline),
         str(key.dressing_chain),
         str(key.chain_class),

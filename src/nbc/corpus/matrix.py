@@ -59,6 +59,7 @@ __all__ = [
     "encoding_depth",
     "id_collisions",
     "item_id",
+    "parse_chain",
     "parse_item_id",
     "payload_id",
     "render_chain",
@@ -355,6 +356,38 @@ def chain_class(
     )
 
 
+def parse_chain(
+    rendered: str,
+    chains: Mapping[str, Sequence[Sequence[str]]] = CHAINS,
+    heldout: Mapping[str, Sequence[Sequence[str]]] = HELDOUT_CHAINS,
+) -> tuple[str, ...]:
+    """The inverse of `render_chain`: a rendered chain name back into its links.
+
+    Lives beside its inverse for the reason `parse_item_id` does, and is what that function now
+    uses -- the split was written twice for a while and this is the one place it belongs. Story 4.6
+    is the second caller: the falsification conditions ask a chain how deep it encodes and which
+    registry declares it, and a `name.split("+")` at each call site would be textual matching where
+    a validated parse belongs.
+
+    Validated against the registries, so a chain no declaration names is refused rather than
+    silently classified.
+    """
+    if not isinstance(rendered, str) or not rendered:
+        raise CorpusMatrixInvalid(f"a rendered chain is a non-empty string, got {rendered!r}")
+    if rendered == CLEAN_CHAIN_NAME:
+        return ()
+
+    links = tuple(rendered.split(CHAIN_SEPARATOR))
+    declared = declared_links(chains) | declared_links(heldout)
+    unknown = [link for link in links if link not in declared]
+    if unknown:
+        raise CorpusMatrixInvalid(
+            f"chain {rendered!r} names {unknown!r}, which no registry declares; the declared links "
+            f"are {sorted(declared)}"
+        )
+    return links
+
+
 def parse_item_id(
     value: str,
     chains: Mapping[str, Sequence[Sequence[str]]] = CHAINS,
@@ -398,18 +431,13 @@ def parse_item_id(
     if not rendered:
         raise CorpusMatrixInvalid(f"item id {value!r} names no chain, not even {CLEAN_CHAIN_NAME!r}")
 
-    chain: tuple[str, ...] = () if rendered == CLEAN_CHAIN_NAME else tuple(
-        rendered.split(CHAIN_SEPARATOR)
-    )
-
-    declared = declared_links(chains) | declared_links(heldout)
-    unknown = [link for link in chain if link not in declared]
-    if unknown:
+    try:
+        chain = parse_chain(rendered, chains, heldout)
+    except CorpusMatrixInvalid as error:
         raise CorpusMatrixInvalid(
-            f"item id {value!r} names {unknown!r}, which no registry declares; the declared links "
-            f"are {sorted(declared)}. A cell keyed on a dressing nobody declared is a column that "
-            f"came out of a file rather than out of AD-20's one constant"
-        )
+            f"item id {value!r}: {error}. A cell keyed on a dressing nobody declared is a column "
+            f"that came out of a file rather than out of AD-20's one constant"
+        ) from error
 
     return payload, chain
 

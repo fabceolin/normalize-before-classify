@@ -42,6 +42,9 @@ __all__ = [
     "BENIGN_CLASSES",
     "CANONICAL",
     "CELL_AXES",
+    "CENSUS_CEILING_HIT",
+    "CENSUS_KINDS",
+    "CENSUS_WINDOW_OVERFLOW",
     "CHAIN_CLASSES_FOR_KEYS",
     "CONDITIONS",
     "CONTRAST_ARGUMENT_REQUIRED",
@@ -59,6 +62,7 @@ __all__ = [
     "DELTA_AUC_STRUCTURAL",
     "Delta",
     "Edit",
+    "FALSIFICATION_CONDITIONS",
     "FAMILIES",
     "FAMILY_ATTACK",
     "FAMILY_BENIGN",
@@ -66,8 +70,15 @@ __all__ = [
     "Interval",
     "ItemScore",
     "LABELS",
+    "MOVER_DIFFERENCE",
     "NEWCOMBE_PAIRED",
+    "OUTCOME_NOT_EVALUABLE",
+    "OUTCOME_NOT_TRIGGERED",
+    "OUTCOME_TRIGGERED",
     "PERMITTED_SPANS",
+    "POPULATIONS",
+    "POPULATION_ALL",
+    "POPULATION_SINGLE_WINDOW",
     "PROTECTED_AXES",
     "PairedCount",
     "RAW",
@@ -75,6 +86,8 @@ __all__ = [
     "Rate",
     "Score",
     "StageResult",
+    "VERDICT_OUTCOMES",
+    "Verdict",
     "WILSON_SCORE",
 ]
 
@@ -610,11 +623,23 @@ AUC_STRUCTURAL: Final[str] = "auc-structural-components"
 DELTA_AUC_STRUCTURAL: Final[str] = "delta-auc-structural-components"
 """The same structural components for two conditions over one item set, with their covariance."""
 
+MOVER_DIFFERENCE: Final[str] = "mover-difference"
+"""The difference of two INDEPENDENT estimates, each arriving with an interval rather than a
+variance.
+
+N1's criterion writes the combination as `Var(D) = Var(A) + Var(B)`, which is correct for two
+independent estimates and assumes both come with variances. The deltas this project produces do
+not: they are Newcombe intervals, asymmetric by construction, and that asymmetry is the reason the
+method was chosen. MOVER-R is the interval-form of the same argument and reduces to the variance
+sum exactly when both intervals are symmetric.
+"""
+
 INTERVAL_METHODS: Final[tuple[str, ...]] = (
     WILSON_SCORE,
     NEWCOMBE_PAIRED,
     AUC_STRUCTURAL,
     DELTA_AUC_STRUCTURAL,
+    MOVER_DIFFERENCE,
 )
 """The whole of the methods this project publishes an interval under.
 
@@ -915,6 +940,21 @@ asserts the two tuples are equal, which is the comparison that makes a second sp
 """
 
 
+POPULATION_ALL: Final[str] = "all"
+POPULATION_SINGLE_WINDOW: Final[str] = "single_window"
+
+POPULATIONS: Final[tuple[str, ...]] = (POPULATION_ALL, POPULATION_SINGLE_WINDOW)
+"""Which items a cell was computed over. Not an axis and not a contrast.
+
+The windows-matched companion is the *same* comparison over a restricted item set: the items that
+occupy exactly one window under both canon states. A new contrast kind would claim its two sides
+differ on some axis, and they do not. This says what it is, so a difference driven by the windowing
+artifact can be told from one driven by the layer.
+
+`all` is the default, so every cell built before the companion existed keeps its meaning.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class CellKey:
     """What a published number is about. The pooling rule is a precondition of it existing.
@@ -938,8 +978,13 @@ class CellKey:
     family: str | None
     benign_class: str | None = None
     contrast: Contrast | None = None
+    population: str = POPULATION_ALL
 
     def __post_init__(self) -> None:
+        if self.population not in POPULATIONS:
+            raise ValueError(
+                f"population must be one of {POPULATIONS}, got {self.population!r}"
+            )
         if self.contrast is not None and not isinstance(self.contrast, Contrast):
             raise ValueError(f"contrast must be a Contrast, got {self.contrast!r}")
         spans = self.contrast.spans if self.contrast is not None else frozenset()
@@ -1005,6 +1050,7 @@ class CellKey:
     def as_json_object(self) -> dict[str, object]:
         payload: dict[str, object] = {axis: getattr(self, axis) for axis in CELL_AXES}
         payload["contrast"] = None if self.contrast is None else self.contrast.name
+        payload["population"] = self.population
         return payload
 
 
@@ -1058,6 +1104,17 @@ class Rate:
         }
 
 
+CENSUS_CEILING_HIT: Final[str] = "ceiling_hit"
+CENSUS_WINDOW_OVERFLOW: Final[str] = "window_overflow"
+
+CENSUS_KINDS: Final[tuple[str, ...]] = (CENSUS_CEILING_HIT, CENSUS_WINDOW_OVERFLOW)
+"""The censuses this table reports, closed.
+
+Per-stage edit counts belong here too and are not: they come off `results/traces.jsonl`, which
+story 4-7 writes.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class Count:
     """A census: `k` of `n`, and **no interval, with no field to put one in**.
@@ -1069,17 +1126,34 @@ class Count:
 
     Saying that in a docstring while leaving an `interval` field defaulting to `None` would last
     until the first person who found the gap untidy. There is no field.
+
+    `census` names **which** census this is, and it is not decoration. Story 4.3 emitted two -- the
+    ceiling hits and the window overflow -- and gave them the same key and the same type, so
+    nothing on the record told them apart. Story 4.6 found it by reading the ceiling census to
+    decide which chains ran past the recursion budget: without this field a chain with one
+    multi-window document would have been classified as over-ceiling and counted into N4's
+    generalization set. A free string would have let a third census arrive unnamed, so the
+    vocabulary is closed and lives beside the type.
     """
 
     k: int
     n: int
     key: CellKey
+    census: str = CENSUS_CEILING_HIT
 
     def __post_init__(self) -> None:
         _refuse_a_bad_tally(self.k, self.n)
+        if self.census not in CENSUS_KINDS:
+            raise ValueError(f"census must be one of {CENSUS_KINDS}, got {self.census!r}")
 
     def as_json_object(self) -> dict[str, object]:
-        return {"kind": "count", "key": self.key.as_json_object(), "k": self.k, "n": self.n}
+        return {
+            "kind": "count",
+            "census": self.census,
+            "key": self.key.as_json_object(),
+            "k": self.k,
+            "n": self.n,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1206,3 +1280,81 @@ def _refuse_a_bad_tally(k: object, n: object) -> None:
         raise ValueError("a cell over no items is not a cell; there is nothing it is about")
     if k > n:
         raise ValueError(f"k must not exceed n, got k={k} and n={n}")
+
+
+# --- the falsification conditions -------------------------------------------------------------------
+
+FALSIFICATION_CONDITIONS: Final[tuple[str, ...]] = ("N1", "N2", "N3", "N4")
+"""The four conditions this artifact commits to evaluating, and the whole of them."""
+
+OUTCOME_TRIGGERED: Final[str] = "triggered"
+OUTCOME_NOT_TRIGGERED: Final[str] = "not_triggered"
+OUTCOME_NOT_EVALUABLE: Final[str] = "not_evaluable"
+
+VERDICT_OUTCOMES: Final[tuple[str, ...]] = (
+    OUTCOME_TRIGGERED,
+    OUTCOME_NOT_TRIGGERED,
+    OUTCOME_NOT_EVALUABLE,
+)
+"""Three, and the third is the one the whole design turns on.
+
+`triggered` and `not_triggered` are the artifact working. `not_evaluable` is the artifact NOT
+working, and the danger is that it reads as the second: a section listing four conditions with no
+way to tell "checked and did not fire" from "never checked" is a section a reader cannot use. A
+two-valued outcome would have made that distinction unrepresentable.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class Verdict:
+    """One falsification condition, evaluated by the run rather than by the author.
+
+    `keys` are the cells it read, so a reader recomputes the comparison rather than trusting it.
+    `computed` carries the inputs in full and always includes a **minimum detectable effect**: a
+    `not_triggered` verdict is the one most likely to be misread, because "N3 did not trigger"
+    reads as "the layer costs nothing" when it may mean "this corpus could not have detected a cost
+    below X".
+    """
+
+    condition: str
+    outcome: str
+    keys: tuple[CellKey, ...]
+    reason: str
+    computed: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if self.condition not in FALSIFICATION_CONDITIONS:
+            raise ValueError(
+                f"condition must be one of {FALSIFICATION_CONDITIONS}, got {self.condition!r}"
+            )
+        if self.outcome not in VERDICT_OUTCOMES:
+            raise ValueError(
+                f"outcome must be one of {VERDICT_OUTCOMES}, got {self.outcome!r}"
+            )
+        if not isinstance(self.keys, tuple) or not all(
+            isinstance(key, CellKey) for key in self.keys
+        ):
+            raise ValueError(f"keys must be a tuple of CellKeys, got {self.keys!r}")
+        if not self.reason.strip():
+            raise ValueError(f"verdict {self.condition} carries an empty reason")
+        computed = dict(self.computed)
+        if "minimum_detectable_effect" not in computed:
+            raise ValueError(
+                f"verdict {self.condition} carries no minimum_detectable_effect; without it a "
+                f"not_triggered outcome reads as evidence of no effect rather than as evidence "
+                f"this corpus could not have detected one"
+            )
+        object.__setattr__(self, "computed", MappingProxyType(computed))
+
+    @property
+    def triggered(self) -> bool:
+        return self.outcome == OUTCOME_TRIGGERED
+
+    def as_json_object(self) -> dict[str, object]:
+        return {
+            "condition": self.condition,
+            "outcome": self.outcome,
+            "keys": [key.as_json_object() for key in self.keys],
+            "reason": self.reason,
+            "computed": dict(self.computed),
+        }

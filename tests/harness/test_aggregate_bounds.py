@@ -50,6 +50,24 @@ SCORES_FILE_MODULES: dict[str, str] = {
 """Who may spell the scores file's name. `aggregate.py` takes a path and is deliberately absent."""
 
 
+SUBTRACTION_EXEMPT: dict[str, str] = {
+    "verdict.py": (
+        "reports the difference between two published deltas inside a Verdict, whose interval "
+        "comes from stats.mover_difference_interval -- and a Verdict has no interval field, so a "
+        "difference cannot inherit one there"
+    ),
+    "summary.py": (
+        "reports the gap between two published cells inside a SummaryFinding, which has no "
+        "interval field -- so a difference cannot inherit one there"
+    ),
+}
+"""Modules where subtracting two estimates is not the thing the rule forbids.
+
+Checked rather than trusted: `test_the_exemption_holds_because_a_finding_carries_no_interval`
+asserts the property the reason claims.
+"""
+
+
 def source_files() -> tuple[Path, ...]:
     return tuple(sorted(SRC.rglob("*.py")))
 
@@ -162,10 +180,18 @@ def test_no_module_builds_a_delta_out_of_two_rates() -> None:
     The limit, declared: assigning each side to a local first hides it from this scan. What stops
     that is `Delta` refusing a Wilson interval, which is the only interval two `Rate`s could offer
     it.
+
+    `SUBTRACTION_EXEMPT` is one entry and it is not a convenience. `summary.py` subtracts two
+    published cells to report the **gap** between them, and the rule this scan enforces is about a
+    difference that INHERITS an interval it has no right to. A `SummaryFinding` has no interval
+    field at all, so the thing the rule prevents is unrepresentable there -- and the test below
+    asserts that rather than taking the exemption's word for it.
     """
     accessors = {"value", "lo", "hi"}
     offenders: list[str] = []
     for path in source_files():
+        if path.name in SUBTRACTION_EXEMPT:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Sub)):
@@ -230,3 +256,44 @@ def test_the_declared_tie_convention_is_the_one_classify_implements() -> None:
     spelling = {ast.GtE: ">=", ast.Gt: ">", ast.LtE: "<=", ast.Lt: "<"}[type(operator)]
     assert spelling == THRESHOLD_COMPARISON
     assert classify(0.5, 0.5) is True
+
+
+def test_the_exemption_holds_because_a_finding_carries_no_interval() -> None:
+    """The exemption above says a `SummaryFinding` cannot inherit an interval. This is that claim.
+
+    Without it the entry would be an assertion in a docstring, which is the shape this repository
+    keeps finding in its own history: a reason recorded beside a value and never compared to it.
+    """
+    from nbc.harness.summary import SummaryFinding
+
+    from nbc.schema import Verdict
+
+    assert set(SUBTRACTION_EXEMPT) == {"summary.py", "verdict.py"}
+    for record in (SummaryFinding, Verdict):
+        assert "interval" not in record.__slots__, record.__name__
+    assert "interval" not in SummaryFinding(
+        kind="saturation",
+        keys=(_a_key(),),
+        statement="x",
+        computed={},
+    ).as_json_object()
+    assert "interval" not in Verdict(
+        condition="N1",
+        outcome="not_triggered",
+        keys=(_a_key(),),
+        reason="x",
+        computed={"minimum_detectable_effect": 0.0},
+    ).as_json_object()
+
+
+def _a_key():  # type: ignore[no-untyped-def]
+    from nbc.schema import CellKey
+
+    return CellKey(
+        baseline="b",
+        dressing_chain="clean",
+        chain_class="bound",
+        window_policy="shared",
+        canon_on=True,
+        family="attack",
+    )

@@ -25,6 +25,7 @@ from nbc.harness.summary import (
     FINDING_RESOLUTION,
     FINDING_SATURATION,
     FINDING_SIGN_DISAGREEMENT,
+    FINDING_WINDOWS_MATCHED,
     REJECTED_JUSTIFICATIONS,
     REJECTED_SUMMARIES,
     SATURATION_TIE_SHARE,
@@ -36,6 +37,7 @@ from nbc.harness.summary import (
     resolution_findings,
     saturation_findings,
     sign_disagreement_findings,
+    windows_matched_findings,
 )
 from nbc.schema import (
     AUC_STRUCTURAL,
@@ -46,6 +48,7 @@ from nbc.schema import (
     DELTA_AUC_STRUCTURAL,
     FAMILY_ATTACK,
     NEWCOMBE_PAIRED,
+    POPULATION_SINGLE_WINDOW,
     WILSON_SCORE,
     Auc,
     CellKey,
@@ -330,11 +333,70 @@ def test_findings_aborts_when_the_run_published_no_threshold_free_summary() -> N
     assert "has not answered" in str(caught.value)
 
 
+def windows_matched_pair(whole: float, matched: float) -> list[Delta]:
+    """A canon delta and its single-window companion, which is what the fifth finding reads."""
+    unmatched = recall_delta(whole)
+    companion = Delta(
+        value=matched,
+        interval=Interval(matched - 0.02, matched + 0.02, NEWCOMBE_PAIRED),
+        key=CellKey(
+            baseline=BASELINE,
+            dressing_chain=CLEAN_CHAIN_NAME,
+            chain_class=CHAIN_CLASS_BOUND,
+            window_policy=POLICY,
+            canon_on=None,
+            family=FAMILY_ATTACK,
+            benign_class=None,
+            contrast=CANON_CONTRAST,
+            population=POPULATION_SINGLE_WINDOW,
+        ),
+    )
+    return [unmatched, companion]
+
+
+def test_a_windows_matched_gap_wider_than_the_matched_half_width_is_reported() -> None:
+    """The confound this companion exists to expose: a document over one window is scored as the
+    maximum over its windows, so the layer can move a cell by changing how many windows a document
+    needs rather than what the classifier sees in any of them."""
+    (finding,) = windows_matched_findings(windows_matched_pair(0.30, 0.05))
+    assert finding.kind == FINDING_WINDOWS_MATCHED
+    assert finding.computed["gap"] == pytest.approx(0.25)
+    assert finding.computed["matched_half_width"] == pytest.approx(0.02)
+    assert len(finding.keys) == 2, "both cells are named"
+
+
+def test_a_windows_matched_gap_within_the_half_width_is_not_reported() -> None:
+    """The input that keeps the previous test from being a finding attached to every cell."""
+    assert windows_matched_findings(windows_matched_pair(0.30, 0.29)) == ()
+
+
+def test_a_companion_never_stands_in_for_the_published_cell_in_a_sign_comparison() -> None:
+    """The companion shares a column with the cell it companions. It was overwriting it in the
+    sign-disagreement pairing, which turned a real disagreement into no finding at all -- silently,
+    on a check whose whole job is to surface one."""
+    unmatched, companion = windows_matched_pair(-0.03, 0.30)
+    produced = sign_disagreement_findings([auc_delta(0.12), unmatched, companion])
+    assert len(produced) == 1
+    assert produced[0].computed["threshold_delta"] == pytest.approx(-0.03)
+
+
+def test_a_companion_with_no_unmatched_twin_produces_no_finding() -> None:
+    _, companion = windows_matched_pair(0.30, 0.05)
+    assert windows_matched_findings([companion]) == ()
+
+
+def test_an_auc_delta_has_no_window_companion_and_is_not_paired_with_one() -> None:
+    """The two are told apart by the interval's method, which is a field. Pairing a ΔAUC with a
+    proportion companion would compare two different quantities and always report a gap."""
+    _, companion = windows_matched_pair(0.30, 0.05)
+    assert windows_matched_findings([auc_delta(0.12), companion]) == ()
+
+
 def test_findings_returns_every_kind_in_a_stable_order() -> None:
     cells = [
         auc(0.75, tied_pairs=8),
         auc_delta(0.12),
-        recall_delta(-0.03),
+        *windows_matched_pair(-0.03, 0.30),
         Count(1, 2, recall_delta(0.0).key),
     ]
     produced = findings(cells)
