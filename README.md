@@ -192,12 +192,12 @@ separately from inference time. No figure for it is claimed here — that is wha
 - [ ] attack corpus from pinned public datasets, in five dressings: clean, base64, hex, homoglyph, zero-width
 - [ ] benign corpus, two classes reported separately: real pinned public source files, and conversational
       text carrying legitimate encoded content — the frame is declared, hashed and enforced, and the
-      builder is written; no corpus is committed yet, and the build now stops earlier than the
-      pinned pool's gold-label contradiction: the attack pool declares **no licence** at its pinned
-      revision while its rows would be redistributed here, so the licence gate refuses to publish
-      them. That is an open question recorded in `pins.toml`, not a waiver, and it is a decision for
-      a person: ask the publisher to declare a licence, find a licensed pool that clears the same
-      training-lineage bar, or state a redistribution position here and accept the exposure
+      builder is written. The two gates that stopped it are answered, both by a person and both in
+      `pins.toml`: the attack pool declares **no licence** at its pinned revision and is published
+      anyway under a stated, signed position — see "redistribution of undeclared material" below,
+      and note that the identifier still reads `not-declared` everywhere it appears — and the two
+      texts the pool labels both ways are withdrawn whole rather than adjudicated. No corpus is
+      committed yet
 - [ ] canonicalization layer with a declared recursion ceiling
 - [ ] measurement harness and results table, every rate with its n and interval
 - [x] "what this does not show" — the eleven caveats that do not depend on the result, written
@@ -389,4 +389,65 @@ will recover. Divide it by the drawn positives before reading the encoded column
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The MIT offer covers **this repository's own code and text**. It does
+not, and cannot, cover other people's rows that this repository redistributes — read the next
+section before you redistribute the corpus further.
+
+## Redistribution of undeclared material
+
+`data/` holds other people's material: drawn rows from a pinned Hugging Face dataset and whole
+source files from pinned GitHub repositories. That is redistribution, not reference, so every
+pinned source declares a licence, the build compares each declaration against a closed list of
+SPDX identifiers before it fetches a byte, and an identifier that is absent, unrecognized or
+incompatible stops the build. Nothing here defaults to allow.
+
+One pinned source does not clear that bar, and this section is the reason it is published anyway.
+
+**`xTRam1/safe-guard-prompt-injection` at revision `a3a877d6` declares no licence.** No `license`
+key in its dataset card's front matter, no `license` tag — read at the pinned sha on 2026-08-28 and
+re-read against the hub API on 2026-08-30, unchanged. It is the attack pool, and it has no
+fallback: 1200 drawn attack positives out of the 3073 unique positives it carries, dressed into
+five encodings, are written into `data/`.
+
+**The position, stated plainly.** Nobody granted a licence for those rows. This project has not
+inferred one, has not asserted one on the publisher's behalf, and has not quietly relabelled the
+gap: `pins.toml` still records the identifier as `not-declared`, and so do the generated
+`data/ATTRIBUTION.md` and every `results.json` this repository publishes. What exists instead is a
+decision, recorded in `pins.toml` under `[attack_dataset.licence.accepted]` with a name and a date,
+to publish the corpus with the question open and visible rather than resolved.
+
+**Why not one of the other three doors.** Asking the publisher to declare a licence puts the whole
+measurement behind an unbounded external wait with no assurance of an answer. Moving to another
+attack pool invalidates this project's committed OQ2 figures, forces its spike to be re-run and
+re-derives the exclusion set — a large cost paid for a licence question rather than a measurement
+one. Writing a permissive identifier into `pins.toml` would have passed the gate in a single line
+and published a false statement of fact to everyone reading the credits file: it is the cheapest
+door and the only dishonest one, and it is the reason the build gained a way to record a decision
+rather than a way to record a licence.
+
+**What this means for you.** If you redistribute this corpus, or anything derived from its attack
+half, you inherit the same open question — not a resolved one. If you are the publisher of that
+dataset and you declare a licence at a pinned revision, this becomes a two-line change and the
+section goes away. If you believe the rows should not be here at all, the contact path is an issue
+on this repository.
+
+The same gate is not relaxed for anything else. It is per source: the next pinned source that
+declares no licence aborts the build exactly as this one did, and clearing it requires a separate,
+separately signed decision that lands in this section too.
+
+### Two texts this build does not use
+
+Immediately behind that gate sits a different problem in the same dataset, and it is recorded here
+for the same reason. The pinned pool carries two texts under **both** labels: a jailbreak prompt at
+three rows (`train[2208]` at label 0, `train[3823]` and `train[4272]` at label 1) and a
+docker-terminal prompt at two (`train[2952]` at label 0, `train[3525]` at label 1). Exactly one row
+of each pair is wrong and the artifact says nothing about which.
+
+The build refuses to choose, because a builder that picks a label has an unreviewed annotation
+policy, which is the thing this project claims not to have. **Both texts are withdrawn whole** —
+all five rows — and that is not a label: it asserts nothing about what either text should have been
+called, only that a text the pool contradicts itself about is not usable evidence in either
+direction. The withdrawal is declared in `pins.toml`, names each row by split, index and label,
+carries the SHA-256 of the exact withdrawn text, and is checked against the pool as read before
+anything is drawn. A pool that grows a sixth contradictory row stops the build rather than losing
+it quietly.

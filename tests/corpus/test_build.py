@@ -291,6 +291,34 @@ def test_the_cli_refuses_to_run_with_no_subcommand() -> None:
 
 
 @pytest.mark.smoke
+def test_the_committed_withdrawals_describe_the_pinned_pool_exactly() -> None:
+    """The one claim in `pins.toml` that only the artifact can settle.
+
+    Five row positions, five labels and two SHA-256 digests, asserted against the dataset the pins
+    name rather than against a fixture. Everything else about the withdrawal mechanism is covered
+    offline; this is the half that goes stale silently when somebody re-pins the pool, and it is
+    the same check the CI `attack-pool-report` step runs.
+
+    Both directions in one pass, because `withdraw` reports both: a declared row the pool does not
+    carry, and a row the pool carries that no declaration names.
+    """
+    pins = load_pins(Path(nbc.__file__).resolve().parents[2])
+    dataset = pins.attack_datasets[0]
+    assert dataset.withdrawn, "the pins declare no withdrawal; this test has lost its subject"
+
+    rows, observed_splits = build.read_attack_pool(dataset)
+    assert attack.verify_splits(dataset.splits, observed_splits) == ()
+
+    pool, problems = attack.withdraw(rows, dataset.withdrawn)
+    assert problems == ()
+    assert len(rows) - len(pool) == sum(len(entry.rows) for entry in dataset.withdrawn)
+
+    # And nothing else in the pool contradicts itself: if it did, FR4 would stop the build and
+    # this file's declaration would be describing a question that is no longer the only one.
+    assert attack.contradictions(pool) == ()
+
+
+@pytest.mark.smoke
 def test_every_source_really_answers_the_status_the_pins_declare() -> None:
     """`pins.toml` records a status per source and caveat 3d publishes one of them.
 
@@ -438,23 +466,25 @@ def offline_build(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> Path:
     return repo_root
 
 
-def _resolved_licence(dataset):
-    """The pinned pool's licence question answered, so a fixture can exercise the builder.
+def _over_a_fake_pool(dataset):
+    """The committed attack pin with its withdrawals dropped, for a fixture that fakes the pool.
 
-    The committed pool declares no licence and its rows are redistributed, so AD-34's gate aborts
-    every real build. That abort is the story's own outcome and it is asserted where it belongs, in
-    `tests/corpus/test_attribution.py`, against the committed file. Here it would only prevent every
-    other property of the builder from being tested at all, so the fixture answers the question the
-    way a resolution would -- and it is a `replace()` of the committed record, so the day the pin
-    declares a real licence this fixture keeps testing the builder rather than silently diverging.
+    The licence is **not** touched, and that is the point of this helper existing in this shape.
+    It used to answer the licence question too, because the committed pool declared none and
+    AD-34's gate aborted every build; that question was answered for real on 2026-08-30, so the
+    fixture stopped needing to pretend and now exercises the committed declaration itself.
+
+    What it still has to drop is the withdrawals. `corpus/attack.py::withdraw` compares the
+    declared digests and rows against the pool as read and aborts when they disagree in either
+    direction -- deliberately, so a withdrawal cannot quietly describe nothing -- and every pool
+    below is six invented payloads that hash to nothing the declaration names. Dropping them here
+    is honest about that; keeping them would mean loosening the comparison in production code so a
+    test could pass, which is the trade this project does not make.
+
+    The withdrawals are exercised against the real texts in `tests/corpus/test_attack.py`, and
+    against the real dataset by the CI step that runs `attack-pool-report`.
     """
-    return dataclasses.replace(
-        dataset.licence,
-        identifier="MIT",
-        source="fixture: the licence question answered, so the builder can be tested",
-        attribution=f"{dataset.repository}, MIT, revision {dataset.revision}",
-        unresolved="",
-    )
+    return dataclasses.replace(dataset, withdrawn=())
 
 
 def _pins_with_a_small_draw(root: Path) -> object:
@@ -467,9 +497,8 @@ def _pins_with_a_small_draw(root: Path) -> object:
     pins = load_pins(root)
     dataset = pins.attack_datasets[0]
     small = dataclasses.replace(
-        dataset,
+        _over_a_fake_pool(dataset),
         draw=dataclasses.replace(dataset.draw, sample_size_positives=4),
-        licence=_resolved_licence(dataset),
     )
     return dataclasses.replace(pins, attack_datasets=(small,))
 
@@ -755,9 +784,8 @@ def _small_corpus_pins(root: Path) -> object:
         pins,
         attack_datasets=(
             dataclasses.replace(
-                dataset,
+                _over_a_fake_pool(dataset),
                 draw=dataclasses.replace(dataset.draw, sample_size_positives=4),
-                licence=_resolved_licence(dataset),
             ),
         ),
         benign_frame=dataclasses.replace(

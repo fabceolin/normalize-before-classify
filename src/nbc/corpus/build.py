@@ -80,8 +80,12 @@ from nbc.corpus.attack import (
     AttackDrawUnsatisfiable,
     LabelContradiction,
     PoolRow,
+    WithdrawalDoesNotMatchPool,
+    contradictions,
     draw_attack_items,
     serialize,
+    verify_splits,
+    withdraw,
 )
 from nbc.corpus.benign import (
     CodeFile,
@@ -854,6 +858,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     subcommands.add_parser(
+        "attack-pool-report",
+        help=(
+            "read the pinned attack pool and run every gate that needs no exclusion index -- "
+            "the declared splits, the declared withdrawals and the contradiction gate -- then "
+            "print the accounting, without drawing or writing a corpus"
+        ),
+    )
+    subcommands.add_parser(
         "build-attack",
         help=(
             f"draw the declared attack positives and write data/{ATTACK_CORPUS_FILENAME}; "
@@ -902,6 +914,48 @@ def main(argv: list[str] | None = None) -> int:
                 rows_removed=0,
                 outcomes=outcomes_of(planned, observations, {}),
             ).as_run_fields()
+        elif args.subcommand == "attack-pool-report":
+            # Everything the full build does to the pool before the exclusion index is fetched,
+            # and nothing after it. It exists so CI can assert against the **real artifact** that
+            # the declarations still describe it: the licence gate is a pure read of `pins.toml`
+            # and needs no network, but "the withdrawn rows are the rows the pool carries" is a
+            # claim about somebody else's dataset that only the dataset can settle. Reaching it
+            # through `build-attack` would cost the largest download this project makes and would
+            # leave a corpus on disk; this costs one parquet pair and writes nothing.
+            refuse_unlicensed_redistribution(pins)
+            dataset = pins.attack_datasets[0]
+            rows, observed_splits = read_attack_pool(dataset)
+            split_problems = verify_splits(dataset.splits, observed_splits)
+            if split_problems:
+                raise AttackDrawUnsatisfiable(*split_problems)
+            pool, withdrawal_problems = withdraw(rows, dataset.withdrawn)
+            if withdrawal_problems:
+                raise WithdrawalDoesNotMatchPool(*withdrawal_problems)
+            contradiction_problems = contradictions(pool)
+            if contradiction_problems:
+                raise LabelContradiction(*contradiction_problems)
+            report = {
+                "attack_pool": {
+                    "repository": dataset.repository,
+                    "revision": dataset.revision,
+                    "observed_splits": list(observed_splits),
+                    "rows_read": len(rows),
+                    "withdrawn_rows": len(rows) - len(pool),
+                    "rows_used": len(pool),
+                    "unique_positives": len(
+                        {
+                            row.text
+                            for row in pool
+                            if row.text and row.label == dataset.attack_label
+                        }
+                    ),
+                    # Published so the report says which decisions it applied, not merely that it
+                    # applied some: a count of five with no names beside it is a number a reader
+                    # has to go and reconstruct from another file.
+                    "withdrawn": [entry.as_run_fields() for entry in dataset.withdrawn],
+                    "licence": dataset.licence.as_run_fields(),
+                }
+            }
         elif args.subcommand == "verify-corpus":
             manifest, items = read_corpus(pins, args.root)
             # The credits are generated, so verifying them is regenerating them. A hash would

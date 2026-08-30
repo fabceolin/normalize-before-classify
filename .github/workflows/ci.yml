@@ -216,32 +216,43 @@ jobs:
         # the one place they run.
         run: uv run pytest -m smoke
 
-      - name: Prove the licence abort fires on the real pool
-        # FR5.2 / AD-34, end to end, against the pinned dataset itself. The pool declares NO
-        # licence at its pinned revision and its rows would be redistributed into data/*.jsonl in
-        # an MIT repository, so the build stops before it fetches anything -- and that is what
-        # this step asserts. Exit 25 is RedistributionRefused; 2 is a usage error, which is what a
-        # typo in this very step produces, and 0 would mean a corpus was published under a licence
-        # nobody established.
+      - name: Prove the declarations still describe the real pool
+        # Both human decisions of 2026-08-30, checked against the pinned dataset itself.
         #
-        # WHAT THIS STEP NO LONGER PROVES, stated rather than quietly dropped. It used to assert
-        # exit 16, LabelContradiction: the pool carries two texts at both labels and FR4's second
-        # abort fired on them. The licence gate is deliberately ahead of the pool read -- a build
-        # that may not publish must not first download what it may not publish -- so that abort is
-        # now behind this one and cannot be reached live until the licence question is resolved.
-        # It is still covered offline, over a fake pool, in tests/corpus/test_build.py.
+        # WHAT THIS STEP USED TO ASSERT, stated rather than quietly dropped. It asserted exit 25,
+        # RedistributionRefused: the pool declared no licence and the build stopped before it
+        # fetched anything. Before that it asserted exit 16, LabelContradiction. Both aborts were
+        # answered on 2026-08-30 -- the licence exposure is accepted under a stated position in
+        # README.md and the two contradictory texts are withdrawn whole -- and both answers live
+        # in pins.toml with a name and a date on them. Neither gate was removed or relaxed:
+        # tests/corpus/test_attribution.py cuts the acceptance out of the committed file and
+        # asserts exit 25 still fires, and tests/corpus/test_attack.py does the same for the
+        # withdrawals and exit 16.
         #
-        # WHEN THE LICENCE QUESTION IS RESOLVED, THIS STEP CHANGES WITH IT, and the expected code
-        # goes back to 16 until the gold-label contradiction is resolved too. Both are human
-        # decisions, and this step is what keeps either from being made silently: whoever makes one
-        # has to come here and say what the build is expected to do instead.
+        # WHAT IS LEFT THAT ONLY THE ARTIFACT CAN SETTLE is whether those decisions still describe
+        # it. The licence declaration is a pure read of pins.toml and the offline suite covers it
+        # completely. The withdrawal is a claim about somebody else's rows -- five positions, five
+        # labels and two SHA-256 digests -- and no test without the dataset in hand can check it.
+        # So this step reads the pool and runs every gate that needs no exclusion index. Exit 0 is
+        # both decisions still describing the artifact; 26 is a withdrawal that no longer does;
+        # 16 is a contradiction nobody has ruled on; 25 is the licence gate; 2 is a usage error,
+        # which is what a typo in this very step produces.
+        #
+        # `attack-pool-report` rather than `build-attack` on purpose: it reads one parquet pair
+        # and writes nothing, where reaching the same gates through the build would cost the
+        # largest download this project makes and leave a corpus behind for the next step to
+        # find.
+        #
+        # IF EITHER DECISION IS REVISITED, THIS STEP CHANGES WITH IT. That is what keeps the next
+        # one from being made silently: whoever makes it has to come here and say what the build
+        # is expected to do instead.
         run: |
           set +e
-          uv run python -m nbc.corpus.build build-attack
+          uv run python -m nbc.corpus.build attack-pool-report
           status=$?
           set -e
-          if [ "$status" -ne 25 ]; then
-            echo "::error::expected exit 25 (RedistributionRefused), got $status"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::expected exit 0 (the declarations describe the pinned pool), got $status"
             exit 1
           fi
 

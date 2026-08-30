@@ -16,10 +16,17 @@ the source row would make the gold label a copy of somebody else's annotation, w
 what FR4 says this repository does not do. `tests/corpus/test_build.py` walks this file's AST and
 refuses any `CorpusItem(...)` whose `label=` is not one of the two schema constants.
 
-**The order of the pipeline is load-bearing.** Rows -> contradiction gate -> positives ->
-exclusion filter -> draw -> render, once per declared chain. Two of those steps are where they are
-for a reason:
+**The order of the pipeline is load-bearing.** Rows -> declared withdrawals -> contradiction gate
+-> positives -> exclusion filter -> draw -> render, once per declared chain. Three of those steps
+are where they are for a reason:
 
+- the withdrawals run **first**, before the contradiction gate. They are the answers a human has
+  already given to FR4's abort, recorded in `pins.toml` with a name and a date, and a gate that
+  ran ahead of them would abort on the very texts they answer. Running them first leaves the gate
+  looking at every text nobody has ruled on, so a contradiction that appears tomorrow still stops
+  the build -- which is what makes the declaration a list of answered questions rather than a
+  silencer. `withdraw` refuses to remove anything its declaration does not describe exactly, in
+  both directions.
 - the contradiction gate runs over **every row**, not over the positives. Each of the two texts
   the pinned pool carries at both labels appears once as a positive and once as a benign row, so
   a gate that looked only at rows carrying `attack_label` would see neither and would pass
@@ -55,6 +62,7 @@ that silently does not exist.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping, Sequence
@@ -75,7 +83,13 @@ from nbc.corpus.matrix import (
     validate as validate_matrix,
 )
 from nbc.errors import NbcError
-from nbc.pins import DRAW_HEAD, DRAW_SEEDED_RANDOM, AttackDataset, AttackDraw
+from nbc.pins import (
+    DRAW_HEAD,
+    DRAW_SEEDED_RANDOM,
+    AttackDataset,
+    AttackDraw,
+    WithdrawnText,
+)
 from nbc.schema import ATTACK, FAMILY_ATTACK, CorpusItem
 
 __all__ = [
@@ -83,12 +97,15 @@ __all__ = [
     "AttackDrawUnsatisfiable",
     "LabelContradiction",
     "PoolRow",
+    "WithdrawalDoesNotMatchPool",
     "contradictions",
     "draw_attack_items",
     "render_attack_item",
     "select_payloads",
     "serialize",
+    "text_digest",
     "verify_splits",
+    "withdraw",
 ]
 
 class LabelContradiction(NbcError, exit_code=16):
@@ -107,11 +124,42 @@ class LabelContradiction(NbcError, exit_code=16):
 
     Every contradictory text is collected before aborting, and each is reported with **both** of
     its rows by split and index, so a human can open the dataset at those two positions.
+
+    **How one is answered.** Not by an override that picks a label -- that override would be the
+    annotation policy this abort exists to refuse. The human withdraws the text whole, in
+    `pins.toml`, naming every row and the SHA-256 of the text and signing it with a date; see
+    `withdraw` and `pins.WithdrawnText`. Withdrawing asserts nothing about what the label should
+    have been, only that a text the pool contradicts itself about is not usable evidence in
+    either direction. This gate keeps firing on everything nobody has withdrawn.
     """
 
     def __init__(self, *problems: str) -> None:
         super().__init__(
             "the pinned dataset labels the same text both ways:\n  - " + "\n  - ".join(problems)
+        )
+        self.problems = tuple(problems)
+
+
+class WithdrawalDoesNotMatchPool(NbcError, exit_code=26):
+    """`pins.toml` withdraws rows the pool as read does not carry, or carries differently.
+
+    Code 26. A **different diagnosis** from `LabelContradiction`, and the difference is what the
+    human does next. Code 16 says the pinned dataset contains a gold-label error nobody has ruled
+    on yet, and the next action is to rule on it. This says a ruling exists and no longer
+    describes the artifact it was taken about -- the pool moved, the indices shifted, a third row
+    appeared -- and the next action is to re-read the dataset and re-declare, or to discover that
+    the pinned revision is not the one being read.
+
+    It is deliberately not silent and deliberately not lenient in either direction. A withdrawal
+    naming rows the pool does not carry would otherwise sit in the file forever describing
+    nothing; a pool carrying rows the withdrawal does not name would otherwise have those rows
+    removed unremarked, which is exactly the unreviewed annotation policy FR4 refuses.
+    """
+
+    def __init__(self, *problems: str) -> None:
+        super().__init__(
+            "a declared withdrawal does not describe the pinned pool:\n  - "
+            + "\n  - ".join(problems)
         )
         self.problems = tuple(problems)
 
@@ -153,6 +201,94 @@ class PoolRow:
     index: int
     text: str
     label: int
+
+
+def text_digest(text: str) -> str:
+    """The full SHA-256 of an exact pool text: how a withdrawal in `pins.toml` names what it left.
+
+    **Full, and deliberately not `matrix.payload_id`.** A payload id keys rows inside one corpus
+    and is only ever compared against other ids from the same build, so it is truncated and that
+    costs nothing. This value is a claim about a text in somebody else's dataset that a reader
+    checks against the artifact with no corpus in hand, by hashing the cell themselves. Truncating
+    it would trade the one property it exists to have for shorter lines in a file.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def withdraw(
+    rows: Sequence[PoolRow], withdrawals: Sequence[WithdrawnText]
+) -> tuple[tuple[PoolRow, ...], tuple[str, ...]]:
+    """Remove the declared withdrawn texts from the pool, or say why the declaration is wrong.
+
+    Returns the surviving rows and the problems. A caller that gets problems must abort: the
+    surviving rows are still returned, but they were computed against a declaration that does not
+    describe the pool, so nothing may be built from them.
+
+    **The comparison runs in both directions, as sets.** For each declared digest, the rows the
+    pool actually carries at that exact text are compared against the rows the declaration names.
+    A row named and not present, and a row present and not named, are both problems -- and they
+    are different sentences, because a stale index and a pool that grew a row are different
+    things to go and look at. Comparing only one direction is the "a check whose two sides come
+    from the same place" pattern with one side missing, which the Epic 1 review found in
+    production code as often as in tests.
+
+    **Labels are compared too, not just positions.** A withdrawal that named the right rows under
+    the wrong labels would be a declaration nobody had read against the artifact, and the whole
+    point of writing them down is that somebody did.
+
+    Nothing here decides *whether* a text may be withdrawn. That rule is the loader's -- the rows
+    must carry at least two distinct labels -- so it fires at load with no dataset in hand rather
+    than after the pool is fetched.
+    """
+    if not withdrawals:
+        return tuple(rows), ()
+
+    by_digest: dict[str, list[PoolRow]] = {}
+    for row in rows:
+        by_digest.setdefault(text_digest(row.text), []).append(row)
+
+    problems: list[str] = []
+    # Keyed on the whole row, not on its `(split, index)` position. A position is only unique
+    # because each split is enumerated from zero, which is a property of how the pool is read
+    # rather than one this function is entitled to assume: keying on it would let a withdrawal of
+    # one text remove a *different* row that happened to share a position, silently and with no
+    # message. `PoolRow` is frozen, so the whole row is the key.
+    removed: set[PoolRow] = set()
+    for entry in withdrawals:
+        present = by_digest.get(entry.text_sha256, [])
+        observed = {(row.split, row.index, row.label) for row in present}
+        declared = {(row.split, row.index, row.label) for row in entry.rows}
+
+        if not present:
+            problems.append(
+                f"the withdrawal of {entry.text_sha256} (declared {entry.on} by {entry.by}) "
+                f"names {len(entry.rows)} row(s) and the pool carries no text hashing to it at "
+                f"all. Either the pinned revision being read is not the one the withdrawal was "
+                f"taken against, or the text was edited upstream"
+            )
+            continue
+
+        missing = sorted(declared - observed)
+        extra = sorted(observed - declared)
+        if missing:
+            problems.append(
+                f"the withdrawal of {entry.text_sha256} names "
+                f"{[f'{split}[{index}] label={label}' for split, index, label in missing]}, "
+                f"which the pool as read does not carry at that text; it carries "
+                f"{sorted(f'{row.split}[{row.index}] label={row.label}' for row in present)}"
+            )
+        if extra:
+            problems.append(
+                f"the pool carries {entry.text_sha256} at "
+                f"{[f'{split}[{index}] label={label}' for split, index, label in extra]}, which "
+                f"the withdrawal does not name. A row removed by a declaration that does not "
+                f"mention it is removed by nobody's decision"
+            )
+        if not missing and not extra:
+            removed.update(present)
+
+    surviving = tuple(row for row in rows if row not in removed)
+    return surviving, tuple(problems)
 
 
 def contradictions(rows: Iterable[PoolRow]) -> tuple[str, ...]:
@@ -301,6 +437,7 @@ class AttackDrawReport:
     chains: tuple[str, ...]
     held_out_chains: tuple[str, ...]
     rows_by_split: Mapping[str, int]
+    withdrawn_rows: int
     positives_by_split: Mapping[str, int]
     blank_positive_rows: int
     payloads_below_decode_floor: int
@@ -326,6 +463,11 @@ class AttackDrawReport:
                 # without appearing here would be a cell computed over rows nobody declared.
                 "held_out_chains": list(self.held_out_chains),
                 "rows_by_split": dict(sorted(self.rows_by_split.items())),
+                # The rows a declared withdrawal removed before anything was counted. Published
+                # beside the pool's own count so the two reconcile in the manifest rather than in
+                # a reader's head: `rows_by_split` is the artifact, this is what this build did
+                # not use, and `pins.toml` says who decided that and why.
+                "withdrawn_rows": self.withdrawn_rows,
                 "positives_by_split": dict(sorted(self.positives_by_split.items())),
                 # Counted and published rather than dropped in silence. The 3071-versus-3073
                 # discrepancy this project already shipped came from a truncation nobody
@@ -396,11 +538,20 @@ def draw_attack_items(
     if split_problems:
         raise AttackDrawUnsatisfiable(*split_problems)
 
-    contradiction_problems = contradictions(rows)
+    # Withdrawal runs BEFORE the contradiction gate, and that order is the whole design. Running
+    # it after would mean the gate had already aborted on the very texts the declaration answers,
+    # and the declaration could never take effect. Running it before means the gate still sees
+    # every text nobody has ruled on -- so a contradiction that appears tomorrow still stops the
+    # build, and the file below is a list of answered questions rather than a silencer.
+    pool, withdrawal_problems = withdraw(rows, dataset.withdrawn)
+    if withdrawal_problems:
+        raise WithdrawalDoesNotMatchPool(*withdrawal_problems)
+
+    contradiction_problems = contradictions(pool)
     if contradiction_problems:
         raise LabelContradiction(*contradiction_problems)
 
-    positive_rows = [row for row in rows if row.label == dataset.attack_label]
+    positive_rows = [row for row in pool if row.label == dataset.attack_label]
     if not positive_rows:
         observed_labels = sorted({row.label for row in rows})
         raise AttackDrawUnsatisfiable(
@@ -445,7 +596,12 @@ def draw_attack_items(
         declared_splits=tuple(dataset.splits),
         chains=tuple(render_chain(chain) for chain in chains),
         held_out_chains=tuple(render_chain(chain) for chain in held_out),
+        # Over the pool **as read**, not over the survivors: this is the artifact's own count,
+        # and a reader reconciles it against `withdrawn_rows` and the positives below. Silently
+        # shrinking it would make the one number that describes the pinned dataset describe this
+        # build's opinion of it instead.
         rows_by_split=_count_by_split(rows),
+        withdrawn_rows=len(rows) - len(pool),
         positives_by_split=_count_by_split(positive_rows),
         blank_positive_rows=blank,
         # Over the **bound** chains only, and deliberately: the exemption is story 3.4's, whose

@@ -116,6 +116,14 @@ def test_every_pinned_source_declares_a_licence_and_an_attribution(pins) -> None
 
 
 def _dataset_licence(pins, **fields):
+    """The committed pins with the attack pool's licence fields moved.
+
+    `accepted` is cleared unless a caller asks for it. Every caller here that declares an
+    identifier is describing a source whose question the *publisher* answered, and an acceptance
+    answers the absence of an answer -- the loader refuses the combination outright, and this
+    helper builds records directly, so nothing else would stop a fixture from being incoherent.
+    """
+    fields.setdefault("accepted", None)
     dataset = pins.attack_datasets[0]
     return replace(
         pins,
@@ -125,22 +133,115 @@ def _dataset_licence(pins, **fields):
     )
 
 
-def test_the_committed_pins_are_refused_and_the_message_names_the_source(pins) -> None:
-    """The story's own expected outcome, asserted rather than narrated.
+def test_the_committed_pins_pass_only_because_a_human_accepted_the_exposure(pins) -> None:
+    """The committed state, and the one edit that takes it back to an abort.
 
-    `xTRam1/safe-guard-prompt-injection` declares no licence at the pinned revision and its rows
-    are redistributed into `data/*.jsonl`. The gate fires on it and on nothing else.
+    `xTRam1/safe-guard-prompt-injection` still declares **no licence** at the pinned revision and
+    its rows are still redistributed into `data/*.jsonl`. What changed on 2026-08-30 is that a
+    named person recorded a decision to publish anyway, with the reasoning in `README.md`. So the
+    two halves are asserted separately: the fact is unchanged, and the build proceeds only because
+    of the decision.
+
+    Removing the acceptance is the input that turns this red, and it is the whole check: a gate
+    that passed because the *fact* had been edited away would be a different gate.
     """
-    problems = licence_problems(pins)
-    assert len(problems) == 1, problems
-    # The repository id is read from the pin rather than typed here: `pins.toml` is the only home
-    # for one, and `tests/test_pins.py` refuses a copy under `tests/`.
     dataset = pins.attack_datasets[0]
-    assert dataset.repository in problems[0]
-    assert dataset.revision in problems[0]
-    assert "declares no licence" in problems[0]
+    # The fact, unchanged, read from the pin rather than typed here: `pins.toml` is the only home
+    # for a repository id, and `tests/test_pins.py` refuses a copy under `tests/`.
     assert dataset.licence.identifier == NOT_DECLARED
     assert dataset.licence.redistributed
+    assert dataset.licence.blocks_redistribution
+
+    # The decision, and where it points.
+    accepted = dataset.licence.accepted
+    assert accepted is not None
+    assert accepted.by and accepted.on and accepted.reasoning
+    assert not dataset.licence.refuses_publication
+    assert licence_problems(pins) == ()
+
+    # Take the decision away and the same file aborts again, naming the same source.
+    withdrawn = _dataset_licence(pins, accepted=None)
+    (problem,) = licence_problems(withdrawn)
+    assert dataset.repository in problem
+    assert dataset.revision in problem
+    assert "declares no licence" in problem
+
+
+def test_the_acceptance_reasoning_is_published_where_a_reader_meets_it(pins) -> None:
+    """It travels into `results.json` and into the generated credits, not just into `pins.toml`.
+
+    A decision recorded only in the file that permits it is a decision nobody downstream sees.
+    """
+    dataset = pins.attack_datasets[0]
+    accepted = dataset.licence.accepted
+    assert accepted is not None
+
+    fields = dataset.licence.as_run_fields()
+    assert fields["identifier"] == NOT_DECLARED, "the run fields must not launder the gap"
+    assert fields["accepted"] == accepted.as_run_fields()
+
+    counts, _unaccounted = counts_by_key((), pins)
+    credits = render(pins, counts, build_id="fixture")
+    assert "Published without a licence, by decision" in credits
+    assert accepted.by in credits
+    assert accepted.on in credits
+    assert accepted.position in credits
+    # Rendered on one line: a raw newline from the TOML multi-line string would end the list item
+    # and drop the rest of the reasoning without failing anything.
+    assert " ".join(accepted.reasoning.split()) in credits
+
+
+def test_the_position_names_a_heading_the_readme_actually_has(pins) -> None:
+    """P1: the position is the evidence for the decision, so it is resolved against the prose.
+
+    A free-text "see the README" cannot be resolved and would be evidence recorded beside a value
+    that nothing compares it to. This reads `README.md`, derives the anchors its headings produce,
+    and refuses a position naming one that is not there.
+    """
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    anchors = {
+        "README.md#"
+        + re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+        for line in readme.splitlines()
+        if line.startswith("#")
+    }
+    assert "README.md#redistribution-of-undeclared-material" in anchors, (
+        "the fixture this test rests on is gone"
+    )
+    for record in pinned_sources(pins):
+        accepted = record.licence.accepted
+        if accepted is not None:
+            assert accepted.position in anchors, record.key
+
+
+def test_an_acceptance_does_not_excuse_a_licence_that_refuses_redistribution(pins) -> None:
+    """The acceptance answers the ABSENCE of a licence and nothing else.
+
+    A signature on a GPL source would be a human overruling terms somebody actually wrote, which
+    is a different act from publishing where nobody wrote any. The gate refuses it; the loader
+    refuses the same combination one layer earlier.
+    """
+    dataset = pins.attack_datasets[0]
+    copyleft = _dataset_licence(
+        pins,
+        identifier="gpl-3.0",
+        attribution=f"{dataset.repository}, GPL-3.0, revision {dataset.revision}",
+        accepted=dataset.licence.accepted,
+    )
+    (problem,) = licence_problems(copyleft)
+    assert REFUSED["gpl-3.0"] in problem
+
+
+def test_an_acceptance_does_not_excuse_an_empty_identifier(pins) -> None:
+    """`not-declared` is a reading of the card; `""` is a field nobody filled in.
+
+    There is nothing to accept about a reading that was never made, and the empty limb is checked
+    before the acceptance so a signature can never stand in for one.
+    """
+    dataset = pins.attack_datasets[0]
+    blank = _dataset_licence(pins, identifier="", accepted=dataset.licence.accepted)
+    (problem,) = licence_problems(blank)
+    assert "empty licence identifier" in problem
 
 
 def test_a_declared_compatible_licence_passes(pins) -> None:
@@ -234,15 +335,28 @@ def test_a_source_nobody_redistributes_may_declare_nothing(pins) -> None:
 
 
 def test_the_gate_agrees_with_the_pin_layers_own_property(pins) -> None:
-    """P1 / decision D-C: `Licence.blocks_redistribution` is consumed, not merely published.
+    """P1 / decision D-C: `Licence.refuses_publication` is consumed, not merely published.
 
-    Asserted in both directions over the committed file and over a mutated copy, so the property
-    and the gate cannot part company without this failing.
+    The gate is compared against `refuses_publication` -- the fact **and** the absence of a
+    decision about it -- rather than against `blocks_redistribution`, which is the fact alone.
+    Comparing it against the fact would now be wrong in a way that matters: it would demand an
+    abort for a source somebody accepted, and the two properties exist separately precisely so
+    that `results.json` can keep saying the licence was never established.
+
+    Asserted over the committed file and over two mutated copies -- the decision removed, and a
+    real licence declared -- so the property and the gate cannot part company without this
+    failing.
     """
     for record in pinned_sources(pins):
-        blocked = record.licence.blocks_redistribution
+        refused = record.licence.refuses_publication
         named = any(record.repository in problem for problem in licence_problems(pins))
-        assert blocked == named, record.key
+        assert refused == named, record.key
+
+    without_the_decision = _dataset_licence(pins, accepted=None)
+    dataset = without_the_decision.attack_datasets[0]
+    assert dataset.licence.refuses_publication
+    assert dataset.licence.blocks_redistribution
+    assert len(licence_problems(without_the_decision)) == 1
 
     licensed = _dataset_licence(
         pins,
@@ -254,6 +368,7 @@ def test_the_gate_agrees_with_the_pin_layers_own_property(pins) -> None:
         unresolved="",
     )
     assert not licensed.attack_datasets[0].licence.blocks_redistribution
+    assert not licensed.attack_datasets[0].licence.refuses_publication
     assert licence_problems(licensed) == ()
 
 
@@ -475,7 +590,42 @@ def test_verify_corpus_refuses_a_corpus_with_no_credits(
     assert "is not beside the corpus" in capsys.readouterr().err
 
 
-def test_the_committed_declaration_aborts_the_build_before_it_touches_the_network(
+def _pins_with_the_question_reopened(destination: Path) -> Path:
+    """The committed `pins.toml` with the acceptance cut out and the open question put back.
+
+    Text surgery on the real file rather than a hand-written fixture, so the input that turns the
+    gate red is the committed declaration with one block moved -- P3, a check whose two sides come
+    from the same place is not a check. The surgery **asserts what it removed**, so a file whose
+    shape changes fails here loudly instead of quietly cutting nothing and passing.
+
+    The block is replaced rather than deleted, and that is not decoration: `_read_licence` refuses
+    a redistributed source that declares neither an identifier, an open question nor a decision,
+    so a plain deletion would abort at load with exit 4 and this test would stop exercising the
+    build-time gate it is named after.
+    """
+    lines = (REPO_ROOT / "pins.toml").read_text(encoding="utf-8").splitlines(keepends=True)
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("[attack_dataset.licence.accepted]")
+    ]
+    assert len(starts) == 1, "the acceptance block this test rewrites is not where it was"
+    begin = starts[0]
+    end = next(index for index in range(begin + 1, len(lines)) if lines[index].startswith("["))
+    removed = "".join(lines[begin:end])
+    assert "position =" in removed and "reasoning =" in removed, removed
+
+    path = destination / "pins.toml"
+    path.write_text(
+        "".join(lines[:begin])
+        + 'unresolved = "fixture: the decision withdrawn, the question open again"\n\n'
+        + "".join(lines[end:]),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_the_gate_still_aborts_the_build_before_the_network_when_nobody_has_decided(
     tmp_path: Path, capsys
 ) -> None:
     """The story's outcome, through the CLI, under the offline guard.
@@ -483,8 +633,11 @@ def test_the_committed_declaration_aborts_the_build_before_it_touches_the_networ
     The suite installs a guard that raises on any socket, so a build that reached the pool before
     the licence gate would fail here with a network error rather than with exit 25. The exit code
     is therefore evidence for *both* halves of the claim: the gate fires, and it fires first.
+
+    What changed on 2026-08-30 is the committed file, not the gate. The acceptance is cut out
+    here, and everything this test asserted before still holds.
     """
-    shutil.copy(REPO_ROOT / "pins.toml", tmp_path / "pins.toml")
+    _pins_with_the_question_reopened(tmp_path)
 
     assert (
         build_module.main(["--root", str(tmp_path), "build-corpus"])
@@ -500,13 +653,32 @@ def test_the_committed_declaration_aborts_the_build_before_it_touches_the_networ
 
 def test_build_attack_is_refused_by_the_same_gate(tmp_path: Path, capsys) -> None:
     """`build-attack` writes redistributed rows too, so it is gated identically."""
-    shutil.copy(REPO_ROOT / "pins.toml", tmp_path / "pins.toml")
+    _pins_with_the_question_reopened(tmp_path)
 
     assert (
         build_module.main(["--root", str(tmp_path), "build-attack"])
         == RedistributionRefused.exit_code
     )
     assert load_pins(REPO_ROOT).attack_datasets[0].repository in capsys.readouterr().err
+
+
+def test_the_committed_declaration_now_reaches_the_pool_instead_of_aborting(
+    tmp_path: Path,
+) -> None:
+    """The other side of the two tests above, and the reason they had to be rewritten.
+
+    With the acceptance in place the licence gate no longer stops anything, so under the offline
+    guard the build gets as far as the first socket and dies there. Asserting that it is **not**
+    `RedistributionRefused` is what keeps the pair honest: without this, both tests above would
+    keep passing over a tampered file while nobody noticed that the committed one no longer does
+    what the story says it does.
+    """
+    shutil.copy(REPO_ROOT / "pins.toml", tmp_path / "pins.toml")
+
+    with pytest.raises(BaseException) as caught:
+        build_module.build_attack_corpus(load_pins(tmp_path), root=str(tmp_path))
+    assert not isinstance(caught.value, RedistributionRefused)
+    assert not list(tmp_path.rglob("*.jsonl"))
 
 
 # --- the three sides that have to agree ---------------------------------------------------------
@@ -522,15 +694,33 @@ def test_the_readme_describes_the_file_this_build_actually_writes(repo_root: Pat
     assert "python -m nbc.corpus.build verify-corpus" in readme
 
 
-def test_the_ci_step_asserts_the_exit_code_this_abort_declares(repo_root: Path) -> None:
-    """The CI step that proves the gate fires must expect the code the gate raises.
+def test_the_ci_step_asserts_what_the_committed_declarations_actually_do(
+    repo_root: Path,
+) -> None:
+    """P6: the CI step must expect what the code does, and must name the codes the code declares.
 
     Split on the workflow's own step boundaries rather than grepped for a number: the file has
     several `-ne` comparisons and matching the wrong one would make this test agree with itself.
+
+    Two claims, because the step makes two. It asserts a success code, and it explains in prose
+    which aborts it would have caught -- and that prose is the thing P6 is about, a decision
+    recorded in a comment and cited later as fact. So the numbers it names are compared against
+    the exit codes the classes declare, not against literals typed here.
     """
+    from nbc.corpus.attack import LabelContradiction, WithdrawalDoesNotMatchPool
+    from nbc.errors import EXIT_OK
+
     workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     steps = workflow.split("- name:")
-    matching = [step for step in steps if "licence abort" in step.splitlines()[0].lower()]
+    matching = [
+        step for step in steps if "describe the real pool" in step.splitlines()[0].lower()
+    ]
     assert len(matching) == 1, [step.splitlines()[0] for step in steps]
-    expected = re.findall(r'\$status" -ne (\d+)', matching[0])
-    assert expected == [str(RedistributionRefused.exit_code)]
+    step = matching[0]
+
+    expected = re.findall(r'\$status" -ne (\d+)', step)
+    assert expected == [str(EXIT_OK)]
+    assert "attack-pool-report" in step
+
+    for abort in (RedistributionRefused, WithdrawalDoesNotMatchPool, LabelContradiction):
+        assert f"{abort.exit_code} is" in step, abort.__name__

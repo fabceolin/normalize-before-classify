@@ -1733,6 +1733,310 @@ def test_recording_the_open_question_lets_the_file_load_and_reaches_the_run_fiel
     assert "OPEN" in dataset.as_run_fields()["licence"]["unresolved"]
 
 
+# --- the acceptance: a decision recorded where a licence is not ---------------------------------
+#
+# Every gate below is exercised through the input that makes it fail. The shape being guarded is
+# narrow on purpose: `accepted` answers the ABSENCE of a licence and nothing else, and each test
+# here is one way of asking it to answer something else.
+
+
+def _accepted(**overrides: Any) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "on": "2026-08-30",
+        "by": "a named human",
+        "position": "README.md#a-section-that-states-it",
+        "reasoning": "fixture: the exposure weighed and taken",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _undeclared_licence(**overrides: Any) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "identifier": NOT_DECLARED,
+        "source": "nothing on the card",
+        "attribution": "example/attacks",
+        "redistributed": True,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_an_acceptance_lets_the_file_load_and_reaches_the_run_fields(tmp_path: Path) -> None:
+    """The decision is a record, exactly as the open question was, and travels the same way.
+
+    The identifier is asserted **unchanged** beside it: what makes this shape defensible rather
+    than a laundered waiver is that `results.json` still says the licence was never established.
+    """
+    write_pins(
+        tmp_path,
+        _document(datasets=[_dataset(licence=_undeclared_licence(accepted=_accepted()))]),
+    )
+
+    dataset = load_pins(tmp_path).attack_datasets[0]
+    fields = dataset.as_run_fields()["licence"]
+
+    assert dataset.licence.identifier == NOT_DECLARED
+    assert dataset.licence.blocks_redistribution is True
+    assert dataset.licence.refuses_publication is False
+    assert fields["identifier"] == NOT_DECLARED
+    assert fields["accepted"]["by"] == "a named human"
+    assert "unresolved" not in fields
+
+
+def test_an_open_question_and_a_decision_cannot_both_stand(tmp_path: Path) -> None:
+    """A question is open or it is answered; a file carrying both says neither."""
+    write_pins(
+        tmp_path,
+        _document(
+            datasets=[
+                _dataset(
+                    licence=_undeclared_licence(
+                        unresolved="2026-08-29: OPEN", accepted=_accepted()
+                    )
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "both an open `unresolved` question and an `accepted` decision" in str(caught.value)
+
+
+def test_a_decision_about_material_nobody_redistributes_is_refused(tmp_path: Path) -> None:
+    """There is nothing to accept: no byte of it reaches `data/`, so no exposure was taken."""
+    write_pins(
+        tmp_path,
+        _document(
+            datasets=[
+                _dataset(
+                    licence=_undeclared_licence(redistributed=False, accepted=_accepted())
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "declares is not redistributed" in str(caught.value)
+
+
+def test_a_decision_beside_a_declared_licence_is_refused(tmp_path: Path) -> None:
+    """`accepted` answers the absence of a licence, never the terms of one that exists.
+
+    Without this the combination would be a way to sign off a copyleft source, which is a human
+    overruling terms somebody actually wrote rather than publishing where nobody wrote any.
+    """
+    write_pins(
+        tmp_path,
+        _document(
+            datasets=[
+                _dataset(
+                    licence=_undeclared_licence(identifier="gpl-3.0", accepted=_accepted())
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "also accepts publishing without one" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "position",
+    [
+        "see the README",
+        "README.md",
+        "docs/policy.md#somewhere",
+        "README.md#Not Lowercased",
+    ],
+)
+def test_a_position_that_cannot_be_resolved_is_refused(tmp_path: Path, position: str) -> None:
+    """A position is evidence for the decision, so it has to be the kind of thing a test resolves.
+
+    "See the README" cannot be checked against anything, which makes it evidence recorded beside
+    a value that nothing compares it to -- the defect pattern this project keeps finding. The
+    shape is enforced here; `tests/corpus/test_attribution.py` resolves the anchor against the
+    prose.
+    """
+    write_pins(
+        tmp_path,
+        _document(
+            datasets=[
+                _dataset(licence=_undeclared_licence(accepted=_accepted(position=position)))
+            ]
+        ),
+    )
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "README.md#anchor" in str(caught.value)
+
+
+@pytest.mark.parametrize("field", ["on", "by", "reasoning"])
+def test_a_decision_missing_its_signature_is_refused(tmp_path: Path, field: str) -> None:
+    """An unsigned, undated or unargued decision is indistinguishable from a default-allow."""
+    accepted = _accepted()
+    del accepted[field]
+    write_pins(
+        tmp_path,
+        _document(datasets=[_dataset(licence=_undeclared_licence(accepted=accepted))]),
+    )
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert f"accepted.{field} is missing" in str(caught.value)
+
+
+def test_a_decision_dated_to_a_day_that_does_not_exist_is_refused(tmp_path: Path) -> None:
+    write_pins(
+        tmp_path,
+        _document(
+            datasets=[
+                _dataset(licence=_undeclared_licence(accepted=_accepted(on="2026-13-45")))
+            ]
+        ),
+    )
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "ISO calendar date" in str(caught.value)
+
+
+# --- withdrawals: the rows a build declares it does not use --------------------------------------
+
+
+DIGEST_ONE = "a" * 64
+DIGEST_TWO = "b" * 64
+
+
+def _withdrawn(**overrides: Any) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "text_sha256": DIGEST_ONE,
+        "rows": [
+            {"split": "train", "index": 1, "label": 0},
+            {"split": "train", "index": 2, "label": 1},
+        ],
+        "on": "2026-08-30",
+        "by": "a named human",
+        "reason": "fixture: contradicted, so neither row is usable",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_a_withdrawal_loads_and_reaches_the_run_fields(tmp_path: Path) -> None:
+    write_pins(tmp_path, _document(datasets=[_dataset(withdrawn=[_withdrawn()])]))
+
+    dataset = load_pins(tmp_path).attack_datasets[0]
+    (entry,) = dataset.withdrawn
+
+    assert entry.text_sha256 == DIGEST_ONE
+    assert entry.labels == (0, 1)
+    assert [row.where for row in entry.rows] == ["train[1] label=0", "train[2] label=1"]
+    assert dataset.as_run_fields()["withdrawn"][0]["by"] == "a named human"
+
+
+def test_a_withdrawal_whose_rows_agree_on_a_label_is_refused(tmp_path: Path) -> None:
+    """The rule that keeps this from becoming a general exclusion knob.
+
+    Only texts the pool labels BOTH ways can be named here, which is exactly the case FR4 leaves
+    no correct row to keep. A text at one label is either usable or excluded for some other
+    reason that has to be declared as that other reason.
+    """
+    rows = [
+        {"split": "train", "index": 1, "label": 1},
+        {"split": "train", "index": 2, "label": 1},
+    ]
+    write_pins(tmp_path, _document(datasets=[_dataset(withdrawn=[_withdrawn(rows=rows)])]))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "at a single label" in str(caught.value)
+
+
+def test_a_withdrawal_naming_fewer_than_two_rows_is_refused(tmp_path: Path) -> None:
+    rows = [{"split": "train", "index": 1, "label": 0}]
+    write_pins(tmp_path, _document(datasets=[_dataset(withdrawn=[_withdrawn(rows=rows)])]))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "names 1 row(s)" in str(caught.value)
+
+
+def test_a_withdrawal_naming_one_position_twice_is_refused(tmp_path: Path) -> None:
+    """One row carries one label, so a repeated position is a transcription error."""
+    rows = [
+        {"split": "train", "index": 1, "label": 0},
+        {"split": "train", "index": 1, "label": 1},
+    ]
+    write_pins(tmp_path, _document(datasets=[_dataset(withdrawn=[_withdrawn(rows=rows)])]))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "names train[1] twice" in str(caught.value)
+
+
+def test_two_withdrawals_of_one_text_are_refused(tmp_path: Path) -> None:
+    """Two entries for one text disagree the moment their row lists do."""
+    write_pins(
+        tmp_path,
+        _document(datasets=[_dataset(withdrawn=[_withdrawn(), _withdrawn()])]),
+    )
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert f"declares {DIGEST_ONE} twice" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "digest",
+    ["a" * 40, "A" * 64, "not a digest", "a" * 63],
+)
+def test_a_withdrawal_digest_that_is_not_a_sha256_is_refused(
+    tmp_path: Path, digest: str
+) -> None:
+    """A 40-character value is a commit sha, and this field names a text, not a revision."""
+    write_pins(
+        tmp_path,
+        _document(datasets=[_dataset(withdrawn=[_withdrawn(text_sha256=digest)])]),
+    )
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "SHA-256" in str(caught.value)
+
+
+def test_a_withdrawal_with_no_rows_field_is_refused(tmp_path: Path) -> None:
+    entry = _withdrawn()
+    del entry["rows"]
+    write_pins(tmp_path, _document(datasets=[_dataset(withdrawn=[entry])]))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "rows is missing" in str(caught.value)
+
+
+def test_a_label_outside_the_binary_pair_is_refused_in_a_withdrawal(tmp_path: Path) -> None:
+    rows = [
+        {"split": "train", "index": 1, "label": 0},
+        {"split": "train", "index": 2, "label": 7},
+    ]
+    write_pins(tmp_path, _document(datasets=[_dataset(withdrawn=[_withdrawn(rows=rows)])]))
+
+    with pytest.raises(PinsFileInvalid) as caught:
+        load_pins(tmp_path)
+    assert "must be 0 or 1" in str(caught.value)
+
+
+def test_a_dataset_declaring_no_withdrawals_is_the_ordinary_case(tmp_path: Path) -> None:
+    """The field is optional and its absence is not a problem: most pools contradict nothing."""
+    write_pins(tmp_path, _document(datasets=[_dataset()]))
+    assert load_pins(tmp_path).attack_datasets[0].withdrawn == ()
+
+
 def test_the_family_pair_check_sees_through_casing_and_separators(tmp_path: Path) -> None:
     """`DeBERTa-v2` and `deberta_v2` are one architecture declared twice, and SC5 must say so."""
     write_pins(tmp_path, _document(baselines=[

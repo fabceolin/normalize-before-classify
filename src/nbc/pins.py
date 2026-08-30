@@ -101,6 +101,7 @@ __all__ = [
     "BenignCodeFrame",
     "BenignCodeRepository",
     "BenignFrame",
+    "Acceptance",
     "ConfirmatoryCell",
     "FRAME_ID_FIELD",
     "MAXIMUM_FILES_PER_BENIGN_CODE_REPOSITORY",
@@ -131,6 +132,7 @@ __all__ = [
     "PinMismatch",
     "Pins",
     "PinsFileInvalid",
+    "PoolRowRef",
     "BaselineSetInvalid",
     "Provenance",
     "RemoteArtifact",
@@ -144,6 +146,7 @@ __all__ = [
     "TRAINED_ON",
     "TRAINING_SOURCE_RELATIONSHIPS",
     "WINDOW_POLICIES",
+    "WithdrawnText",
     "canonical_source_id",
     "hf_cache_root",
     "load_pins",
@@ -385,6 +388,21 @@ pattern admitted Cyrillic homoglyphs, and a repository id reaches an API URL. Re
 alphanumeric first character also refuses the `..` and `.` segments that traverse that URL.
 """
 
+_README_ANCHOR: Final[re.Pattern[str]] = re.compile(
+    r"\AREADME\.md#[a-z0-9]+(?:-[a-z0-9]+)*\Z", re.ASCII
+)
+r"""Where a declaration points when it says the reasoning lives in prose: `README.md#some-heading`.
+
+A shape rather than free text, because a test resolves it: `tests/corpus/test_attribution.py`
+reads `README.md`, derives the anchors its headings actually produce, and refuses a position
+naming one that is not there. A free-text "see the README" cannot be resolved, so it would be
+evidence recorded beside a value that nothing compares it to -- the defect this project keeps
+finding in its own history.
+"""
+
+_SHA256: Final[re.Pattern[str]] = re.compile(r"\A[0-9a-f]{64}\Z")
+"""A full SHA-256 digest, lowercase hex. Not `_SHA`, which is a 40-character git commit id."""
+
 _FIELD_REFERENCE: Final[str] = "::"
 """How a pin names a field inside a file it also pins: `<pinned path>::<field>`.
 
@@ -484,6 +502,47 @@ class PinMismatch(NbcError, exit_code=6):
 
 
 @dataclass(frozen=True, slots=True)
+class Acceptance:
+    """A named human's dated decision to publish material whose licence nobody established.
+
+    **Not a licence, and deliberately not spelled as one.** The `identifier` beside this stays
+    `not-declared`, because that is what the publisher declares and no field in this file can
+    change it. What this record claims is narrower and true: a person, on a date, read the
+    situation and chose to publish anyway, and `position` names the section of `README.md` where
+    the reasoning a reader can argue with actually lives.
+
+    **Why not simply write a compatible identifier.** It would have passed the same gate in one
+    line, and it would have put a false statement of fact into `ATTRIBUTION.md`: a downstream
+    reader would believe they had been granted a licence that nobody granted. That is a worse
+    exposure than the one this record accepts, and it is the reason the gate learned this shape
+    instead of the pin learning a convenient lie.
+
+    **Per source, never a vocabulary entry.** Admitting `not-declared` to
+    `corpus/attribution.py::COMPATIBLE` would also have been one line, and would have made every
+    future undeclared source sail through unread -- the default-allow that module's own docstring
+    names as the failure mode it exists to prevent. This lives inside one source's `[licence]`
+    block, so the next undeclared source aborts exactly as this one did.
+
+    It answers the **absence** of a licence and nothing else. A source declaring a licence that
+    refuses redistribution is not made compatible by a signature, and the loader refuses the
+    combination rather than leaving the precedence to whichever branch runs first.
+    """
+
+    on: str
+    by: str
+    position: str
+    reasoning: str
+
+    def as_run_fields(self) -> dict[str, object]:
+        return {
+            "on": self.on,
+            "by": self.by,
+            "position": self.position,
+            "reasoning": self.reasoning,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Licence:
     """What a pinned source declares, recorded as found -- including declaring nothing."""
 
@@ -492,6 +551,7 @@ class Licence:
     attribution: str
     redistributed: bool
     unresolved: str = ""
+    accepted: Acceptance | None = None
 
     @property
     def declared(self) -> bool:
@@ -507,6 +567,18 @@ class Licence:
         """
         return self.redistributed and not self.declared
 
+    @property
+    def refuses_publication(self) -> bool:
+        """Redistributed, no licence established, and no human has accepted that.
+
+        `blocks_redistribution` stays exactly what it was -- the *fact* about the material -- and
+        this is the *decision* taken about that fact. They are two properties on purpose: one
+        property collapsing both would make an accepted source indistinguishable from a licensed
+        one, and `results.json` would lose the ability to say that the licence was never
+        established while the build went ahead anyway.
+        """
+        return self.blocks_redistribution and self.accepted is None
+
     def as_run_fields(self) -> dict[str, object]:
         fields: dict[str, object] = {
             "identifier": self.identifier,
@@ -518,6 +590,10 @@ class Licence:
             # Published rather than kept local: a reader of results.json is entitled to see that
             # this repository redistributes material under a licence nobody established.
             fields["unresolved"] = self.unresolved
+        if self.accepted is not None:
+            # For the same reason, one step further on: the reader is entitled to see *who*
+            # decided to publish it anyway, when, and where the reasoning is written down.
+            fields["accepted"] = self.accepted.as_run_fields()
         return fields
 
 
@@ -874,12 +950,82 @@ class AttackDraw:
 
 
 @dataclass(frozen=True, slots=True)
+class PoolRowRef:
+    """One row of a pinned dataset, named the way an abort names it: split, index and label.
+
+    Structural, never a parsed string. `"train[2208] label=0"` would have been one field instead
+    of three and would have put a regex between this declaration and the artifact it describes --
+    textual pattern-matching where structural identity belongs, which is defect pattern 2 of the
+    Epic 1 review.
+    """
+
+    split: str
+    index: int
+    label: int
+
+    @property
+    def where(self) -> str:
+        """How this row is spelled in a message a human takes to the dataset viewer."""
+        return f"{self.split}[{self.index}] label={self.label}"
+
+    def as_run_fields(self) -> dict[str, object]:
+        return {"split": self.split, "index": self.index, "label": self.label}
+
+
+@dataclass(frozen=True, slots=True)
+class WithdrawnText:
+    """A text the pinned pool labels both ways, withdrawn whole by a named human on a date.
+
+    **What this is not.** It is not a label. FR4's abort exists because exactly one of a
+    contradictory pair is wrong, the builder has no evidence about which, and a builder that
+    picks one has an unreviewed annotation policy. Withdrawing the text picks neither: when one
+    of two rows is wrong and nothing can say which, neither row is usable, so both leave. The
+    corpus that results carries no annotation this repository did not derive itself.
+
+    **Why it cannot become a general "drop rows I dislike" knob.** The loader refuses an entry
+    whose declared rows do not carry at least two distinct labels, so the only texts this field
+    can name are texts the contradiction gate would have aborted on. A withdrawal of an
+    uncontradicted text is a pin error, not a quiet exclusion.
+
+    **Why the digest and the rows are both declared.** Either alone would rot silently. The
+    digest without the rows would let the pool grow a fourth row under the same text and the
+    withdrawal would swallow it unremarked; the rows without the digest would let the pool's
+    contents shift under fixed indices and the withdrawal would remove something else entirely.
+    `corpus/attack.py::withdraw` compares both against the pool as read, as sets and in both
+    directions, and a difference in either aborts rather than being absorbed.
+    """
+
+    text_sha256: str
+    rows: tuple[PoolRowRef, ...]
+    on: str
+    by: str
+    reason: str
+
+    @property
+    def labels(self) -> tuple[int, ...]:
+        return tuple(sorted({row.label for row in self.rows}))
+
+    def as_run_fields(self) -> dict[str, object]:
+        return {
+            "text_sha256": self.text_sha256,
+            "rows": [row.as_run_fields() for row in self.rows],
+            "on": self.on,
+            "by": self.by,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AttackDataset:
     """One pinned attack dataset, by identity and by draw.
 
     `splits` is the whole set the counts are taken over, never one of them: the build compares
     this list against the splits the reader actually yields, in both directions, because reading
     a split as the dataset is the same error as reading a row count as a positive count.
+
+    `withdrawn` is the same shape of claim one level down: rows this declaration says the pool
+    carries and this build will not use, compared against the pool as read before anything is
+    drawn.
     """
 
     key: str
@@ -890,6 +1036,7 @@ class AttackDataset:
     draw: AttackDraw
     licence: Licence
     provenance: Provenance
+    withdrawn: tuple[WithdrawnText, ...] = ()
 
     @property
     def artifact(self) -> RemoteArtifact:
@@ -905,6 +1052,7 @@ class AttackDataset:
             "draw": self.draw.as_run_fields(),
             "licence": self.licence.as_run_fields(),
             "provenance": self.provenance.as_run_fields(),
+            "withdrawn": [entry.as_run_fields() for entry in self.withdrawn],
         }
 
 
@@ -1492,19 +1640,66 @@ class _Reader:
         return value
 
 
+def _read_acceptance(
+    reader: _Reader, table: Mapping[str, Any], at: str
+) -> Acceptance | None:
+    """The optional `[<source>.licence.accepted]` block. `None` when nobody has decided."""
+    raw = table.get("accepted")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        reader.note(f"{at}.accepted must be a table, got {type(raw).__name__}")
+        return None
+    where = f"{at}.accepted"
+    return Acceptance(
+        on=reader.calendar_date(reader.string(raw, "on", where), f"{where}.on"),
+        by=reader.string(raw, "by", where),
+        position=reader.matching(
+            reader.string(raw, "position", where),
+            _README_ANCHOR,
+            f"{where}.position",
+            "a `README.md#anchor` naming the section that states the position",
+        ),
+        reasoning=reader.string(raw, "reasoning", where),
+    )
+
+
 def _read_licence(reader: _Reader, parent: Mapping[str, Any], where: str) -> Licence:
     table = reader.table(parent, "licence", where)
     at = f"{where}.licence"
     identifier = reader.string(table, "identifier", at)
     redistributed = reader.boolean(table, "redistributed", at)
     unresolved = str(table.get("unresolved", "")).strip()
-    if redistributed and identifier == NOT_DECLARED and not unresolved:
+    accepted = _read_acceptance(reader, table, at)
+    if accepted is not None and unresolved:
+        reader.note(
+            f"{at} carries both an open `unresolved` question and an `accepted` decision. A "
+            f"question is open or it is answered; carrying both leaves a reader of results.json "
+            f"to guess which of the two describes the build that produced it."
+        )
+    if accepted is not None and not redistributed:
+        reader.note(
+            f"{at} accepts publishing material it also declares is not redistributed. There is "
+            f"nothing here to accept, and a declaration carrying a field its own situation does "
+            f"not consume reads as a decision that was taken and was not."
+        )
+    if accepted is not None and identifier != NOT_DECLARED:
+        reader.note(
+            f"{at} declares the licence {identifier!r} and also accepts publishing without one. "
+            f"`accepted` answers the absence of a licence and nothing else: a source that "
+            f"declares one is judged against the compatible and the refused sets, and a licence "
+            f"that refuses redistribution is not made compatible by a signature."
+        )
+    if redistributed and identifier == NOT_DECLARED and not unresolved and accepted is None:
         reader.note(
             f"{at} redistributes material under an undeclared licence. Either declare the "
-            f"identifier, or record the open question in an `unresolved` field stating the date "
-            f"and what has to happen: contact the publisher, find a licensed source, or state a "
-            f"redistribution position. FR5.2 makes this a build abort in the corpus story; it is "
-            f"refused here so the decision is taken before the corpus is built, not after."
+            f"identifier; or record the open question in an `unresolved` field stating the date "
+            f"and what has to happen -- contact the publisher, find a licensed source, state a "
+            f"redistribution position; or, if the position has been stated and the exposure "
+            f"taken, record it in an `accepted` table naming the human, the date and the "
+            f"README section that argues it. FR5.2 makes this a build abort in the corpus "
+            f"story; it is refused here so the decision is taken before the corpus is built, "
+            f"not after."
         )
     return Licence(
         identifier=identifier,
@@ -1512,6 +1707,7 @@ def _read_licence(reader: _Reader, parent: Mapping[str, Any], where: str) -> Lic
         attribution=reader.string(table, "attribution", at),
         redistributed=redistributed,
         unresolved=unresolved,
+        accepted=accepted,
     )
 
 
@@ -1889,6 +2085,109 @@ def _read_attack_draw(
     )
 
 
+def _read_withdrawn(
+    reader: _Reader, table: Mapping[str, Any], where: str
+) -> tuple[WithdrawnText, ...]:
+    """The `[[<attack_dataset>.withdrawn]]` entries, with every rule this file can enforce alone.
+
+    What it cannot enforce alone is the only thing that matters at build time -- that these rows
+    are the rows the pool actually carries -- and that comparison lives in
+    `corpus/attack.py::withdraw`, against the artifact. Everything here is shape, so that a
+    malformed withdrawal is a load error rather than a build error a gigabyte later.
+    """
+    raw = table.get("withdrawn", [])
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        reader.note(f"{where}.withdrawn must be an array of tables")
+        return ()
+
+    entries: list[WithdrawnText] = []
+    for index, entry in enumerate(raw):
+        at = f"{where}.withdrawn[{index}]"
+        digest = reader.matching(
+            reader.string(entry, "text_sha256", at),
+            _SHA256,
+            f"{at}.text_sha256",
+            "a 64-character lowercase hex SHA-256 of the exact withdrawn text",
+        )
+        rows = _read_pool_rows(reader, entry, at)
+        # Two rows at one label are a duplicate, not a contradiction, and this field withdraws
+        # contradictions. Refusing the case here is what keeps `withdrawn` from becoming a
+        # general exclusion knob: the only texts it can name are texts FR4's gate would stop on.
+        if len(rows) >= 2 and len({row.label for row in rows}) < 2:
+            reader.note(
+                f"{at} withdraws a text its own rows carry at a single label "
+                f"{sorted({row.label for row in rows})}. This field withdraws texts the pool "
+                f"labels BOTH ways, which is the one case FR4 leaves no correct row to keep; a "
+                f"text at one label is either usable or excluded for some other stated reason."
+            )
+        entries.append(
+            WithdrawnText(
+                text_sha256=digest,
+                rows=rows,
+                on=reader.calendar_date(reader.string(entry, "on", at), f"{at}.on"),
+                by=reader.string(entry, "by", at),
+                reason=reader.string(entry, "reason", at),
+            )
+        )
+
+    for digest in sorted(
+        {
+            entry.text_sha256
+            for entry in entries
+            if entry.text_sha256
+            and sum(1 for other in entries if other.text_sha256 == entry.text_sha256) > 1
+        }
+    ):
+        reader.note(
+            f"{where}.withdrawn declares {digest} twice; two entries for one text disagree the "
+            f"moment their row lists do, and nothing would say which one this build applied"
+        )
+    return tuple(entries)
+
+
+def _read_pool_rows(
+    reader: _Reader, entry: Mapping[str, Any], at: str
+) -> tuple[PoolRowRef, ...]:
+    """The `rows = [{ split, index, label }, ...]` list of one withdrawal."""
+    raw = entry.get("rows")
+    if raw is None:
+        reader.note(f"{at}.rows is missing")
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        reader.note(f"{at}.rows must be a list of `{{ split, index, label }}` tables")
+        return ()
+    if len(raw) < 2:
+        reader.note(
+            f"{at}.rows names {len(raw)} row(s). A withdrawal answers a text the pool carries "
+            f"at more than one row, so fewer than two rows describes something this field is "
+            f"not for"
+        )
+
+    rows: list[PoolRowRef] = []
+    for index, row in enumerate(raw):
+        where = f"{at}.rows[{index}]"
+        rows.append(
+            PoolRowRef(
+                split=reader.string(row, "split", where),
+                index=reader.integer(row, "index", where),
+                label=reader.label_value(row, "label", where),
+            )
+        )
+    for position in sorted(
+        {
+            (row.split, row.index)
+            for row in rows
+            if sum(1 for other in rows if (other.split, other.index) == (row.split, row.index))
+            > 1
+        }
+    ):
+        reader.note(
+            f"{at}.rows names {position[0]}[{position[1]}] twice; one row carries one label, so "
+            f"a repeated position is a transcription error rather than a second row"
+        )
+    return tuple(rows)
+
+
 def _read_attack_dataset(
     reader: _Reader, table: Mapping[str, Any], index: int
 ) -> AttackDataset:
@@ -1960,6 +2259,7 @@ def _read_attack_dataset(
         draw=_read_attack_draw(reader, table, where),
         licence=_read_licence(reader, table, where),
         provenance=provenance,
+        withdrawn=_read_withdrawn(reader, table, where),
     )
 
 

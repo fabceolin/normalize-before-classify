@@ -358,17 +358,89 @@ xTRam1/safe-guard-prompt-injection, licence not declared, \
 revision a3a877d608f37b7d20d9945671902df895ecdb46\
 """
 redistributed = true
-# NOT an acceptance of the risk, and not a licence chosen on the publisher's behalf. This field
-# exists so the pin file can load while the question is open, and so the question travels into
-# `results.json` where a reader sees it rather than discovering it themselves.
-unresolved = """\
-2026-08-29: OPEN. The publisher declares no licence at the pinned revision, and these rows are \
-redistributed into data/*.jsonl in an MIT repository. FR5.2 and AD-34 make this a build abort in \
-story 3.8, which cannot pass until this is resolved, and the attack pool is a single dataset with \
-no fallback. Resolving it is a human decision with three doors: ask the publisher to declare a \
-licence, find a licensed pool that clears the same AD-26 lineage bar, or state a redistribution \
-position in the README and accept the exposure. Recorded here so the decision is taken before the \
-corpus is built rather than after it ships.\
+# The question that stood in an `unresolved` field here from 2026-08-29 to 2026-08-30 is answered
+# below, and the field is gone because a question is open or it is answered -- `_read_licence`
+# refuses a block carrying both. What the answer is NOT: a licence. `identifier` above still reads
+# `not-declared`, and it will keep reading that in `ATTRIBUTION.md` and in `results.json`, because
+# writing a compatible SPDX identifier here would have passed the same gate in one line and told
+# every downstream reader they had been granted something nobody granted.
+
+[attack_dataset.licence.accepted]
+# The date the decision was taken, not the date it was typed here; they are the same day.
+on = "2026-08-30"
+by = "Fabricio Ceolin"
+# Resolved, not decorative: `tests/corpus/test_attribution.py` reads README.md, derives the
+# anchors its headings actually produce, and refuses a position naming one that is not there.
+position = "README.md#redistribution-of-undeclared-material"
+reasoning = """\
+The publisher declares no licence at the pinned revision -- no license key in the dataset card's \
+front matter and no license tag -- re-read against the hub API at that sha on 2026-08-30, two \
+days after the reading recorded in `source` above, and unchanged. The other three doors were \
+weighed and each costs more than it buys here: asking the publisher puts an experiment behind an \
+unbounded external wait with no assurance of an answer; moving to another pool invalidates the \
+committed OQ2 figures (0.836 and 0.8721), forces the spike to be re-run and re-derives the \
+exclusion set, which is a large cost paid for a licence question rather than for a measurement \
+one; and asserting a permissive identifier this dataset never declared would publish a false \
+statement of fact to everyone who reads ATTRIBUTION.md. So the exposure is taken instead, named, \
+and pushed to where a reader meets it: no licence was granted for these rows by anybody, this \
+repository's MIT offer does not reach them, and anyone redistributing the corpus further \
+inherits the same open question rather than a resolved one. What is actually redistributed is \
+1200 drawn attack positives, dressed, out of 3073 unique positives in a publicly downloadable \
+dataset, credited by repository and revision. That is the scope of the exposure and it is stated \
+rather than minimised.\
+"""
+
+# --- the rows this build does not use ----------------------------------------------------------
+#
+# FR4's second abort, answered. The pinned pool carries two texts under BOTH labels, and exactly
+# one row of each pair is wrong with nothing in the artifact to say which. The builder may not
+# choose -- a builder that picks a label has an unreviewed annotation policy, which is precisely
+# what FR4 claims this repository does not have -- so neither row is kept.
+#
+# **This is not an annotation.** Withdrawing a text asserts nothing about what its label should
+# have been. It says only that the pool contradicts itself here and that a contradicted text is
+# not usable evidence in either direction.
+#
+# **This cannot become a general exclusion knob.** `_read_withdrawn` refuses an entry whose own
+# rows do not carry at least two distinct labels, so the only texts nameable here are texts the
+# contradiction gate would have aborted on. And `corpus/attack.py::withdraw` compares the digest
+# AND the row list against the pool as read, as sets and in both directions, before removing
+# anything: a row named and absent aborts, and a row present and unnamed aborts too. A pool that
+# grows a fourth contradictory row tomorrow stops this build rather than losing it quietly.
+#
+# Every digest below was computed from the pinned revision's own cells on 2026-08-30, with the
+# project's own reader, and is checkable with `sha256sum` against the text at those rows.
+
+[[attack_dataset.withdrawn]]
+# The DAN jailbreak prompt. THREE rows, not the two FR4 anticipated: two at label 1 and one at
+# label 0. The count is why the rows are enumerated rather than summarised.
+text_sha256 = "8b551daa8a221a2c1ebd95218eb7c3a1d274b560c6a0d6ac000b72af3ad7b8d1"
+rows = [
+    { split = "train", index = 2208, label = 0 },
+    { split = "train", index = 3823, label = 1 },
+    { split = "train", index = 4272, label = 1 },
+]
+on = "2026-08-30"
+by = "Fabricio Ceolin"
+reason = """\
+1667 bytes carried at three rows under two labels. Two rows agreeing does not settle it: the \
+pool offers no evidence that a majority over three annotations of one text is the correct label \
+rather than one duplicated mistake, and treating it as evidence would be adopting a voting rule \
+nobody declared. Withdrawn whole.\
+"""
+
+[[attack_dataset.withdrawn]]
+# The "Caveat Emptor" docker-terminal prompt, at two rows under two labels.
+text_sha256 = "ade15f194d7f52320aa82d350915046c87eae755d2b20360c7d53844b9eaa631"
+rows = [
+    { split = "train", index = 2952, label = 0 },
+    { split = "train", index = 3525, label = 1 },
+]
+on = "2026-08-30"
+by = "Fabricio Ceolin"
+reason = """\
+1101 bytes carried at two rows under two labels, one each. Exactly one is wrong and the artifact \
+says nothing about which. Withdrawn whole.\
 """
 
 # --- exclusion sources -------------------------------------------------------------------------

@@ -23,6 +23,16 @@ fetched into the Hugging Face cache and never committed here... the build-time l
 about rows that ARE redistributed", and applying the abort to every declaration instead would stop
 the run over a model nobody redistributes while saying nothing new about the rows that are.
 
+**What happens when the answer is "publish it anyway".** The abort has one way through and it is
+not a flag: `pins.Licence.accepted`, a table naming a human, a date, the README heading that
+argues the position, and the reasoning. It answers the **absence** of a licence and nothing else
+-- a refused identifier stays refused, an empty one stays a malformed pin -- and it lives inside
+one source's `[licence]` block, so the next undeclared source aborts exactly as that one did.
+`identifier` stays `not-declared` through this module, into `ATTRIBUTION.md` and into
+`results.json`: what the acceptance changes is that a decision exists, never that a licence does.
+Writing a compatible SPDX identifier instead would have passed this gate in one line and published
+a false statement of fact to everyone who reads the credits file.
+
 **A closed vocabulary, never a pattern.** `COMPATIBLE` and `REFUSED` are two disjoint frozensets of
 SPDX identifiers, compared case-normalized. An identifier in neither is *unrecognized* and aborts:
 the failure mode of a substring rule ("contains `MIT`", "starts with `BSD`") is that
@@ -317,12 +327,22 @@ def licence_problems(pins: Pins) -> tuple[str, ...]:
             continue
 
         identifier = record.identifier
-        # `Licence.blocks_redistribution` is the pin layer's own name for this condition. It is
-        # called rather than restated: D-C of the Epic 1 decisions is about exactly this property
-        # being published and consumed by nothing, and a second spelling of the same rule here
-        # would be a second place it can drift from. The empty-identifier limb is the one case the
-        # property does not cover, since `"" != "not-declared"` reads as declared.
-        if licence.blocks_redistribution or not identifier:
+        # `Licence.blocks_redistribution` is the pin layer's own name for material this repository
+        # ships whose licence nobody established, and `Licence.refuses_publication` is that fact
+        # together with the absence of a human decision about it. Both are called rather than
+        # restated: D-C of the Epic 1 decisions is about exactly these properties being published
+        # and consumed by nothing, and a second spelling of either rule here would be a second
+        # place it can drift from. The empty-identifier limb is the one case neither property
+        # covers, since `"" != "not-declared"` reads as declared -- and it is tested first so an
+        # acceptance can never stand in for a reading that was never made.
+        if not identifier:
+            problems.append(
+                f"{record.label} is redistributed into data/ and declares an empty licence "
+                f"identifier. `not-declared` is a reading of the publisher's card; an empty "
+                f"string is a field nobody filled in, and there is nothing to accept about a "
+                f"reading that does not exist"
+            )
+        elif licence.refuses_publication:
             problems.append(
                 f"{record.label} is redistributed into data/ and declares no licence "
                 f"({licence.source}). Nothing in this repository can choose one on the "
@@ -333,6 +353,12 @@ def licence_problems(pins: Pins) -> tuple[str, ...]:
                     else ""
                 )
             )
+        elif licence.blocks_redistribution:
+            # Undeclared, and a named human accepted publishing it anyway on a stated date with
+            # the reasoning in the README. The identifier stays `not-declared` from here into
+            # `ATTRIBUTION.md` and into `results.json`, so nothing downstream can read this as a
+            # grant: what exists is a decision, not a licence, and the two are rendered apart.
+            continue
         elif identifier in REFUSED:
             problems.append(
                 f"{record.label} is redistributed into data/ under {licence.identifier!r}, which "
@@ -460,6 +486,38 @@ def render(pins: Pins, counts: Mapping[str, int], *, build_id: str) -> str:
                 ]
             )
         )
+    # Immediately under the table rather than at the end: a reader who stops at the first
+    # `not-declared` cell has to meet this paragraph without scrolling for it.
+    accepted = [
+        (record, acceptance)
+        for record in redistributed
+        if (acceptance := record.licence.accepted) is not None
+    ]
+    if accepted:
+        lines += [
+            "",
+            "### Published without a licence, by decision",
+            "",
+            "The sources below declare **no licence** at their pinned revision, and nothing in",
+            "this repository chose one on their behalf -- their identifier in the table above",
+            "still reads `not-declared`. What follows is a named person's dated decision to",
+            "publish the rows anyway, with the reasoning in this repository's `README.md` rather",
+            "than in a generated file.",
+            "",
+            "**If you redistribute this corpus further, read this before the licence column.**",
+            "Nobody granted a licence for these rows, and the MIT licence at the root of this",
+            "repository does not reach them.",
+            "",
+        ]
+        for record, acceptance in accepted:
+            lines += [
+                f"- `{record.repository}` -- accepted by {acceptance.by} on "
+                f"{acceptance.on}; position stated in `{acceptance.position}`.",
+                # Collapsed to one line because the declaration is a TOML multi-line string and a
+                # raw newline here would end the list item and silently drop the rest of it.
+                f"  {' '.join(acceptance.reasoning.split())}",
+            ]
+
     lines += [
         "",
         "### Required attribution, as each source states it",
