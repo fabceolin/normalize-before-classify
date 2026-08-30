@@ -74,6 +74,7 @@ __all__ = [
     "main",
     "merge_shards",
     "open_baselines",
+    "timing_pass",
     "results_directory",
     "scores_path",
     "score_shard",
@@ -526,6 +527,33 @@ def _describe_paths(header: ShardHeader) -> str:
     return "; ".join(path.describe() for path in sorted(header.paths, key=lambda p: p.baseline_key))
 
 
+def timing_pass(pins: Pins, *, root: str | Path | None = None) -> dict[str, object]:
+    """Read the corpus, build the one context, open the baselines, and hand all three to the pass.
+
+    This function exists because `harness/timing.py` may do none of those things. It may not build
+    a `CanonContext` -- AD-6 gives one run one context and the tripwire in
+    `tests/canon/test_recursion.py` names that module as refused -- and it may not name a corpus
+    file, which AD-1's locator scan enforces. Both restrictions land here, on the entrypoint that
+    is already allowed to do both, and the pass receives what it measures.
+
+    The context is `default_context()` with no `ceiling=` of its own, exactly as `score_shard`
+    takes it: a timing pass that set its own ceiling would be timing a layer nobody scored under,
+    which is the failure AD-6 exists to prevent.
+    """
+    from nbc.harness.timing import run_timing_pass
+
+    _, items = read_corpus(pins, root)
+    context = default_context()
+    baselines = open_baselines(pins)
+    report = run_timing_pass(
+        items,
+        context,
+        baselines,
+        expected_keys=[baseline.key for baseline in pins.baselines],
+    )
+    return {"timing": report.as_json_object(), "items": len(items)}
+
+
 def main(argv: list[str] | None = None) -> int:
     """`score-shard` runs inference for hours; `merge` verifies and writes. Two subcommands.
 
@@ -555,10 +583,11 @@ def main(argv: list[str] | None = None) -> int:
         "--shards",
         metavar="N",
         type=int,
-        required=True,
+        default=None,
         help=(
             "how many shards the pass is split into. Membership is derived from each key's "
-            "digest, so the same N always produces the same partition"
+            "digest, so the same N always produces the same partition. Required by score-shard "
+            "and merge; the timing pass is not sharded and does not take it"
         ),
     )
     subcommands = parser.add_subparsers(dest="subcommand", required=True)
@@ -584,7 +613,22 @@ def main(argv: list[str] | None = None) -> int:
             f"{RESULTS_DIRNAME}/{SCORES_FILENAME}. Writes nothing if any check fails"
         ),
     )
+    subcommands.add_parser(
+        "timing",
+        help=(
+            "measure the canonicalization layer's cost and each baseline's inference latency in "
+            "one dedicated pass, one document at a time at batch size 1. Not sharded: a sharded "
+            "pass has many processes contending for one machine and would time the contention"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    # `--shards` stays on the top-level parser so the documented `--shards N score-shard --shard I`
+    # keeps working, and is checked here rather than by argparse because `timing` genuinely takes
+    # no shard count and a required flag it must pass a meaningless value for is a flag that will
+    # eventually be given a meaningful-looking one.
+    if args.subcommand in {"score-shard", "merge"} and args.shards is None:
+        parser.error(f"{args.subcommand} requires --shards N")
 
     report: dict[str, object]
     try:
@@ -592,6 +636,8 @@ def main(argv: list[str] | None = None) -> int:
         pins = load_pins(args.root)
         if args.subcommand == "score-shard":
             report = score_shard(pins, shards=args.shards, shard=args.shard, root=args.root)
+        elif args.subcommand == "timing":
+            report = timing_pass(pins, root=args.root)
         else:
             report = merge_shards(pins, shards=args.shards, root=args.root)
     except NbcError as abort:
