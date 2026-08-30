@@ -119,16 +119,26 @@ uv sync --frozen --extra build --group dev
 uv run python -m nbc.platform    # the platform floor, checked before anything else
 uv run python -m nbc.pins --verify   # every pinned artifact, resolved and checked
 uv run pytest                    # the offline unit suite, no network, no model download
+uv run python -m nbc.corpus.build attack-pool-report  # reads the pinned pool, writes nothing
 uv run python -m nbc.corpus.build build-corpus   # draws data/*.jsonl and data/manifest.json
 uv run python -m nbc.corpus.build verify-corpus  # the guarded read; touches no network
 ```
 
 `build-corpus` reaches the network and is the only way to produce a corpus anything can measure over:
 it writes `data/manifest.json`, and `verify-corpus` — the same guarded read every consumer goes
-through — refuses without one. **It does not currently succeed**, and the reason is a checked fact
-rather than a defect in it: the pinned attack pool carries two texts under both labels, so the build
-stops with the gold-label abort. Resolving that is a decision about two rows in somebody else's
-dataset, and the build stopping is what keeps it from being made silently.
+through — refuses without one.
+
+`attack-pool-report` is the cheap half of that: it reads the pinned attack pool and runs every gate
+that needs no exclusion index — the declared splits, the declared withdrawals and the gold-label
+contradiction gate — then prints the accounting without drawing or writing anything. It is what CI
+runs to check that the two decisions recorded in `pins.toml` still describe the dataset they were
+taken about.
+
+Both aborts that used to stop `build-corpus` were answered on 2026-08-30 by a person, and both
+answers are in `pins.toml` with a name and a date on them: the licence question in
+"redistribution of undeclared material" below, and the two contradictory texts withdrawn whole in
+the subsection under it. Neither gate was removed or loosened — the suite still asserts that each
+one fires when its decision is taken away.
 
 `uv` is pinned to an exact version by `pyproject.toml` and refuses to run under any other, so the
 environment a table came from is the environment you get. The models and the corpus are pinned by
