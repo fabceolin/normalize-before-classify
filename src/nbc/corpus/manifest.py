@@ -38,7 +38,15 @@ from pathlib import Path
 from typing import Any, Final, Mapping, Sequence
 
 from nbc.corpus.exclusion import declaration_digest
-from nbc.corpus.matrix import CHAINS, HELDOUT_CHAINS, render_chain
+from nbc.corpus.matrix import (
+    CHAIN_CLASS_HELD_OUT,
+    CHAINS,
+    HELDOUT_CHAINS,
+    chain_class,
+    encoding_depth,
+    parse_chain,
+    render_chain,
+)
 from nbc.errors import NbcError
 from nbc.pins import Pins
 from nbc.schema import ATTACK, BENIGN, BENIGN_CLASSES, FAMILY_ATTACK, CorpusItem
@@ -51,11 +59,13 @@ __all__ = [
     "DATA_DIRNAME",
     "MANIFEST_FILENAME",
     "MANIFEST_SCHEMA_VERSION",
+    "ConfirmatoryCellNotFalsifiable",
     "CorpusFile",
     "CorpusManifestMismatch",
     "LFS_POINTER_VERSION",
     "Manifest",
     "build_id",
+    "confirmatory_cell_falsifiability_problems",
     "confirmatory_cell_problems",
     "content_hash",
     "corpus_presence",
@@ -201,10 +211,12 @@ def confirmatory_cell_problems(pins: Pins) -> tuple[str, ...]:
     built in. A cell naming a chain no registry declares is a verdict with no data behind it, and it
     would look exactly like one with data until the run reached it.
 
-    **Story 3.9 adds the requirement this does not check**: that the chain must be held out or
-    nested past the recursion ceiling and never a bound one, with the reason. That is deliberately
-    not here -- FR5.4 splits declaration and hashing into the corpus epic and the assertion into the
-    story that owns it, and writing half of 3.9 here would leave a check nobody can find.
+    **Story 3.9's assertion is not here, and it now has an address**:
+    `confirmatory_cell_falsifiability_problems`, below, which refuses a cell whose chain is bound
+    and inside the decode budget. It is a separate function rather than four more lines in this one
+    for the reason this paragraph used to give: a check folded into a differently named gate is a
+    check nobody can find. What it needs and this one does not is the recursion ceiling, which
+    arrives as a parameter from a caller holding the layer's own context.
     """
     cell = pins.benign_frame.confirmatory_cell
     problems: list[str] = []
@@ -227,6 +239,106 @@ def confirmatory_cell_problems(pins: Pins) -> tuple[str, ...]:
             f"would carry no row in that cell and the verdict would be computed over nothing"
         )
     return tuple(problems)
+
+
+class ConfirmatoryCellNotFalsifiable(NbcError, exit_code=35):
+    """The pre-registered N1 cell names a chain on which N1 cannot come out either way.
+
+    Code 35 because 3 through 34 are taken. An abort rather than a warning, and the reason is that
+    the alternative is worse than a wrong number: a run that reached the verdict would report N1
+    `not_triggered` with every field present and every interval computed, and nothing in the output
+    would say the condition had been unfalsifiable from the moment it was declared.
+
+    **Why a bound chain inside the decode budget is refused.** Story 3.4's round-trip contract makes
+    recovery on a bound chain total -- the layer undoes the dressing it was written against -- so
+    `Delta recall` sits at or near its maximum by construction. `D = FPR delta - recall delta` could
+    then lie wholly above zero only if the layer converted a **majority of the declared benign
+    class** into fresh false positives. That is an impossibility dressed as a threshold, and a cell
+    pre-registered on it would satisfy every word of FR5.4 while guaranteeing the verdict in
+    advance. It would do so legibly, which is what makes it worse than an obvious error.
+
+    **Why "held out or past the ceiling" is the admissible pair.** Those are the two halves of N4's
+    generalization set and the only two places recovery is not decided in advance: a held-out chain
+    names encodings the layer was never written against, and a chain nested past the recursion
+    ceiling is one the layer is told to stop short of. On both, `Delta recall` is a measurement.
+    """
+
+    def __init__(self, *problems: str) -> None:
+        if not problems:
+            raise ValueError("ConfirmatoryCellNotFalsifiable must name at least one problem")
+        self.problems: tuple[str, ...] = tuple(problems)
+        super().__init__(
+            "the pre-registered confirmatory cell could not have falsified anything:\n  - "
+            + "\n  - ".join(problems)
+        )
+
+
+def confirmatory_cell_falsifiability_problems(pins: Pins, *, ceiling: int) -> tuple[str, ...]:
+    """Every reason the declared confirmatory cell's chain guarantees N1's verdict in advance.
+
+    Story 3.9. The chain must be **held out** or **nested past the recursion ceiling**, never a
+    bound chain the layer will fully recover; `ConfirmatoryCellNotFalsifiable` carries the reason.
+
+    **`ceiling` is a parameter and has no default.** `tests/canon/test_recursion.py` holds
+    `DEFAULT_CEILING` to a single reader under `src/` and that rule is not weakened here: the caller
+    passes the ceiling its own `CanonContext` carries, which is the ceiling the layer will actually
+    apply rather than a second copy of the constant. Story 4.6 met the same problem from the other
+    end and read `over_ceiling` off the run's own ceiling-hit census; at declaration time there is no
+    run, and the honest source is the shipped context.
+
+    **The depth comparison is not a claim about the layer.** `tests/corpus/test_matrix.py`
+    canonicalizes every declared chain at the shipped ceiling and asserts
+    `ceiling_hit is (encoding_depth(chain) > ctx.ceiling)`, so `encoding_depth > ceiling` here and
+    `ceiling_hit` there are two computations of one fact that are compared rather than assumed
+    equal.
+
+    **Precondition.** The chain must be one some registry declares; `parse_chain` raises
+    `CorpusMatrixInvalid` otherwise. `build.py` runs `confirmatory_cell_problems` first, which
+    refuses an undeclared chain with the message that names the registries -- this function is not a
+    second copy of that check and does not repeat its message.
+    """
+    cell = pins.benign_frame.confirmatory_cell
+    links = parse_chain(cell.dressing_chain)
+    if chain_class(links) == CHAIN_CLASS_HELD_OUT:
+        return ()
+
+    depth = encoding_depth(links)
+    if depth > ceiling:
+        return ()
+
+    admissible = sorted(
+        render_chain(chain)
+        for chain in HELDOUT_CHAINS.get(cell.benign_class, ())
+    ) + sorted(
+        render_chain(chain)
+        for chain in CHAINS.get(cell.benign_class, ())
+        if encoding_depth(chain) > ceiling
+    )
+    # Empty is unreachable behind the shape gate, which refuses a class no registry declares before
+    # this function is called, and it is empty in production for that reason rather than by luck.
+    # Said in words anyway: a bare `[]` at the end of a refusal reads as "there is no way out",
+    # which is a different and much worse claim than "you asked about a class this table has no
+    # registry for". `tests/corpus/test_confirmatory_cell.py` reaches it with a synthetic cell.
+    way_out = (
+        f"{admissible}"
+        if admissible
+        else (
+            f"no chain is admissible for {cell.benign_class!r}, because neither registry declares "
+            f"any for it -- which is a problem confirmatory_cell_problems reports first and this "
+            f"message is not a second copy of"
+        )
+    )
+    return (
+        f"the confirmatory cell names dressing chain {cell.dressing_chain!r}, which is a bound "
+        f"chain of encoding_depth {depth} against a recursion ceiling of {ceiling}, so the layer "
+        f"recovers it completely and story 3.4's round-trip contract says so. Recall recovery on "
+        f"that chain is at its maximum by construction, so D = FPR delta - recall delta could lie "
+        f"wholly above zero only if the layer turned a majority of {cell.benign_class} into fresh "
+        f"false positives -- an impossibility dressed as a threshold. A cell pre-registered here "
+        f"would satisfy every word of the requirement while guaranteeing the verdict in advance, "
+        f"and it would do it legibly, which is worse. Declare a held-out chain or one nested past "
+        f"the ceiling: {way_out}",
+    )
 
 
 LFS_POINTER_VERSION: Final[str] = "https://git-lfs.github.com/spec/v1"

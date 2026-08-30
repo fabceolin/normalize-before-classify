@@ -514,6 +514,14 @@ CONTEXT_BUILDERS: dict[str, str] = {
         "are where a second pass would invent a second ceiling and publish two conditions that "
         "were not the same condition"
     ),
+    "nbc/corpus/build.py": (
+        "story 3.9's falsifiability gate asks whether the pre-registered confirmatory chain nests "
+        "past the recursion ceiling, and the honest ceiling is the one the layer as shipped will "
+        "apply. Reading `DEFAULT_CEILING` a second time would have been the workaround; taking "
+        "`default_context().ceiling` is the layer answering. Build time, not measurement time -- "
+        "the gate runs at step 0 before the first archive is fetched, and it is the same category "
+        "as the entry below rather than a widening toward the harness"
+    ),
     "nbc/corpus/benign.py": (
         "story 3.6's B-code file-eligibility rule asks the layer whether it would examine a decode "
         "candidate in a file. That is a BUILD-TIME selection question, not a measurement pass: it "
@@ -563,8 +571,15 @@ def test_the_measurement_entrypoint_sets_no_ceiling_of_its_own() -> None:
 
     The failing input is one keyword: `default_context(ceiling=2)`, which the scanner below is
     shown catching over a synthetic module.
+
+    **Generalised when story 3.9 admitted a third builder.** This asserted it of the entrypoint
+    alone, which was the only file that could have broken it at the time. The allow-list is what
+    makes a `ceiling=` possible at all, so the rule now runs over every entry in it: admitting a
+    module to `CONTEXT_BUILDERS` costs the same promise the entrypoint made. Widening a list and
+    tightening the rule that list depends on is the trade this check exists to price.
     """
-    assert ceiling_arguments(SRC / MEASUREMENT_ENTRYPOINT) == []
+    for site in sorted(CONTEXT_BUILDERS):
+        assert ceiling_arguments(SRC / site) == [], site
 
 
 def ceiling_arguments(path: Path) -> list[str]:

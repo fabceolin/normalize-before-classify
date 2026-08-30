@@ -94,15 +94,18 @@ from nbc.corpus.benign import (
     draw_benign_items,
     select_repository_files,
 )
+from nbc.canon.pipeline import default_context
 from nbc.corpus.manifest import (
     ATTACK_CORPUS_FILENAME,
     BENIGN_CORPUS_FILENAME,
     DATA_DIRNAME,
     MANIFEST_FILENAME,
     MANIFEST_SCHEMA_VERSION,
+    ConfirmatoryCellNotFalsifiable,
     CorpusManifestMismatch,
     Manifest,
     build_id,
+    confirmatory_cell_falsifiability_problems,
     confirmatory_cell_problems,
     corpus_directory,
     files_for,
@@ -705,7 +708,9 @@ def build_corpus(
     describe both.
 
     Step 0 is the licence gate (AD-34), ahead of even the confirmatory cell: both are pure reads of
-    `pins.toml`, and this one decides whether the rows may be published at all.
+    `pins.toml`, and this one decides whether the rows may be published at all. The confirmatory
+    cell is then asked two questions in order -- does it name a cell of this table, and could N1
+    have come out either way on it -- because the first is what makes the second's parse safe.
     """
     refuse_unlicensed_redistribution(pins)
 
@@ -721,6 +726,18 @@ def build_corpus(
     cell_problems = confirmatory_cell_problems(pins)
     if cell_problems:
         raise CorpusManifestMismatch(*cell_problems)
+
+    # Story 3.9, immediately after and never before: the shape gate above is what makes
+    # `parse_chain` below safe, and its message about an undeclared chain is the better one. This
+    # asks the second question -- could N1 have come out either way on the chain that was
+    # pre-registered -- and the ceiling comes from the layer as shipped rather than from a second
+    # reading of its constant. `default_context()` takes no `ceiling=` here and
+    # `tests/canon/test_recursion.py` asserts that of every module allowed to build one.
+    falsifiability = confirmatory_cell_falsifiability_problems(
+        pins, ceiling=default_context().ceiling
+    )
+    if falsifiability:
+        raise ConfirmatoryCellNotFalsifiable(*falsifiability)
 
     rows, observed_splits, _withdrawn = read_attack_pool(dataset)
 

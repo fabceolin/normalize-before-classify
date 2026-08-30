@@ -847,8 +847,10 @@ hand_authored_items = 20
 [benign_frame.confirmatory_cell]
 # FR5.4's single cell, declared here -- in the epic that builds the corpus -- and hashed into
 # `build_id`, so it cannot have been chosen after the numbers existed. Emission and evaluation are
-# the measurement epic's, and story 3.9 adds the assertion that the chain must be held out or nested
-# past the recursion ceiling and never a bound one. This block is the declaration and the hash.
+# the measurement epic's. Story 3.9 is the assertion, and it is enforced rather than described:
+# `manifest.confirmatory_cell_falsifiability_problems` refuses a chain that is bound and inside the
+# layer's decode budget, at corpus-build step 0, with exit 35. This block is the declaration and the
+# hash; the chain below has to survive that gate.
 declared_on = "2026-08-29"
 baseline = "protectai-deberta-v3"
 # Four base64 links: `matrix.encoding_depth` is 4 against a declared ceiling of 3, so this cell sits
