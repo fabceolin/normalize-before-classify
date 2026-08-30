@@ -39,6 +39,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # EXPLICITLY off, and it is a cost decision rather than a default nobody looked at.
+          # `data/benign.jsonl` is tracked by Git LFS on the free tier, where the binding limit is
+          # 1 GB of bandwidth a month. Fetching it here would spend ~130 MB per job per push, so
+          # three jobs would burn the month's allowance in under three pushes, and the account it
+          # is billed to is the repository owner's.
+          #
+          # Nothing in this workflow needs the corpus. The offline suite builds its own corpora in
+          # temporary directories, and the step below WANTS the corpus absent or unfetched: that is
+          # what it asserts. Turning this on would make that step green for the wrong reason.
+          lfs: false
 
       - name: Install the pinned uv
         uses: astral-sh/setup-uv@v5
@@ -120,10 +131,18 @@ jobs:
           fi
 
       - name: Prove nothing reads the corpus without its manifest
-        # FR5.1's last clause, end to end and offline. There is no committed corpus, so the guarded
-        # read refuses -- and that refusal is the property: `data/*.jsonl` is reachable only through
-        # `manifest.read_corpus`, which compares the recorded frame_id and build_id before it hands
-        # back a row. 22 is CorpusManifestMismatch; 0 would mean something was read unverified.
+        # FR5.1's last clause, end to end and offline. The guarded read refuses -- and that refusal
+        # is the property: `data/*.jsonl` is reachable only through `manifest.read_corpus`, which
+        # compares the recorded frame_id and build_id before it hands back a row. 22 is
+        # CorpusManifestMismatch; 0 would mean something was read unverified.
+        #
+        # This step covers two states and 22 is the right answer to both. With no committed corpus
+        # there is nothing to read. Once the corpus is committed, `lfs: false` above means the
+        # checkout holds POINTERS, and the refusal becomes the LFS pointer gate saying so by name
+        # instead of the content hash claiming the file was edited. The consequence, stated rather
+        # than discovered: CI never verifies the real corpus, and that is what not spending the
+        # month's LFS bandwidth on every push costs. A job that does verify it belongs on a tag,
+        # not on every push.
         run: |
           set +e
           uv run python -m nbc.corpus.build verify-corpus
@@ -197,6 +216,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # EXPLICITLY off, and it is a cost decision rather than a default nobody looked at.
+          # `data/benign.jsonl` is tracked by Git LFS on the free tier, where the binding limit is
+          # 1 GB of bandwidth a month. Fetching it here would spend ~130 MB per job per push, so
+          # three jobs would burn the month's allowance in under three pushes, and the account it
+          # is billed to is the repository owner's.
+          #
+          # Nothing in this workflow needs the corpus. The offline suite builds its own corpora in
+          # temporary directories, and the step below WANTS the corpus absent or unfetched: that is
+          # what it asserts. Turning this on would make that step green for the wrong reason.
+          lfs: false
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -212,6 +242,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # EXPLICITLY off, and it is a cost decision rather than a default nobody looked at.
+          # `data/benign.jsonl` is tracked by Git LFS on the free tier, where the binding limit is
+          # 1 GB of bandwidth a month. Fetching it here would spend ~130 MB per job per push, so
+          # three jobs would burn the month's allowance in under three pushes, and the account it
+          # is billed to is the repository owner's.
+          #
+          # Nothing in this workflow needs the corpus. The offline suite builds its own corpora in
+          # temporary directories, and the step below WANTS the corpus absent or unfetched: that is
+          # what it asserts. Turning this on would make that step green for the wrong reason.
+          lfs: false
 
       - uses: astral-sh/setup-uv@v5
         with:

@@ -8,3 +8,22 @@ README.md text eol=lf
 *.py text eol=lf
 *.jsonl text eol=lf
 *.json text eol=lf
+
+# `data/benign.jsonl` is 130.4 MB, measured 2026-08-30, and GitHub refuses any single file over
+# 100 MB on push. It ships through Git LFS, decided by Fabricio Ceolin on 2026-08-30: this
+# repository is experimental work for one reader, so the free tier's bandwidth is a limit nobody
+# reaches, and in exchange the file stays REAL TEXT in the working tree -- which is the whole
+# reason AD-1 commits the corpus rather than rebuilding it. Compression to 15.6 MB was smaller
+# and would have taken that away from every reader at once.
+#
+# Named file by file rather than `data/*.jsonl`, and that is not tidiness: `attack.jsonl` is
+# 7.2 MB and packs to 1.7 MB in ordinary git, where it stays diffable on the web and outside the
+# LFS quota. The binding limit on the free tier is STORAGE, which does not reset and which GitHub
+# does not garbage-collect, so every megabyte tracked here is permanent.
+#
+# `-text` overrides the `*.jsonl text eol=lf` above for this path, because LFS carries bytes and
+# a line-ending conversion applied on top of a pointer file is a corruption of both.
+#
+# `corpus/storage.py` is what refuses a build whose corpus this declaration does not cover, and
+# `corpus/manifest.py` is what tells a reader holding a pointer that they are holding one.
+data/benign.jsonl filter=lfs diff=lfs merge=lfs -text

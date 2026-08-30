@@ -109,6 +109,11 @@ from nbc.corpus.manifest import (
     read_corpus,
     render as render_manifest,
 )
+from nbc.corpus.storage import (
+    CorpusNotPublishable,
+    GITATTRIBUTES_FILENAME,
+    storage_problems,
+)
 from nbc.corpus.exclusion import (
     NO_ANSWER,
     NORMALIZATION,
@@ -800,6 +805,11 @@ def build_corpus(
         },
     )
 
+    # Before the first byte reaches the disk. A corpus that cannot be pushed is a trap that
+    # springs hours later at a server, with a commit already made; the cheapest moment to learn
+    # it is while the bytes are still in memory.
+    refuse_an_unpublishable_corpus([(entry.name, entry.bytes) for entry in manifest.files])
+
     directory.mkdir(parents=True, exist_ok=True)
     for name, text, _rows in payloads:
         (directory / name).write_text(text, encoding="utf-8", newline="\n")
@@ -848,6 +858,48 @@ def write_corpus(path: Path, items: Iterable[CorpusItem], *, rebuild: bool = Fal
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(payload, encoding="utf-8", newline="\n")
     return len(payload.encode("utf-8"))
+
+
+def read_gitattributes(root: str | Path | None = None) -> str:
+    """The repository's `.gitattributes`, or empty text when there is none.
+
+    Read from the **repository root** rather than from `--root`, because tracking is a fact about
+    the checkout and not about wherever this build was told to write. A scratch build into a
+    temporary directory is still producing bytes that would have to be committed from here, so it
+    is checked against the declaration that would have to cover them.
+
+    Absent is not an error and is not silently fine either: it means nothing is tracked, which
+    `storage_problems` turns into an abort for exactly the files that need tracking.
+    """
+    base = Path(root) if root is not None else Path(__file__).resolve().parents[3]
+    try:
+        return (base / GITATTRIBUTES_FILENAME).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    except ValueError as error:
+        # `UnicodeDecodeError` is a `ValueError` and not an `OSError`. A declaration this reader
+        # cannot read is not a declaration that tracks anything, and guessing would be worse.
+        raise CorpusNotPublishable(
+            f"{base / GITATTRIBUTES_FILENAME} is not valid UTF-8: {error}"
+        ) from None
+    except OSError as error:
+        raise CorpusNotPublishable(
+            f"{base / GITATTRIBUTES_FILENAME} could not be read: {error}"
+        ) from None
+
+
+def refuse_an_unpublishable_corpus(sizes: Sequence[tuple[str, int]]) -> None:
+    """Abort when a corpus half is too large for a push and nothing tracks it.
+
+    Called with the bytes the build just rendered, **before** they reach the disk, and again by
+    `verify-corpus` over the bytes on disk -- because the declaration can be edited after a corpus
+    was written, and the half that would then be refused is the one nobody re-checked.
+    """
+    problems = storage_problems(
+        sizes, read_gitattributes(), directory=DATA_DIRNAME
+    )
+    if problems:
+        raise CorpusNotPublishable(*problems)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1002,6 +1054,11 @@ def main(argv: list[str] | None = None) -> int:
             drift = attribution_problems(committed, expected)
             if drift:
                 raise RedistributionRefused(*drift)
+            # The declaration is editable after the fact, so the corpus on disk is re-checked
+            # against it here rather than only at the build that wrote it.
+            refuse_an_unpublishable_corpus(
+                [(entry.name, entry.bytes) for entry in manifest.files]
+            )
             report = {
                 "verified_corpus": {
                     "frame_id": manifest.frame_id,

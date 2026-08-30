@@ -16,7 +16,8 @@ current declaration describes?*
 
 3. **The guarded read.** `read_corpus` refuses to hand back a single row when the recorded
    `frame_id` differs from `pins.toml`'s, when the recomputed `build_id` differs from the recorded
-   one, or when a corpus file's bytes no longer hash to what the manifest says. FR5.1's "the
+   one, when a corpus file's bytes no longer hash to what the manifest says, or when a corpus file
+   is the Git LFS pointer a clone that never fetched the object holds. FR5.1's "the
    entrypoint refuses to measure when the recorded `frame_id` differs" is enforced here rather than
    in the entrypoint, and deliberately: an entrypoint check is one caller's discipline, while a
    reader that verifies is the only way in. `tests/corpus/test_manifest.py` holds that with an AST
@@ -52,12 +53,14 @@ __all__ = [
     "MANIFEST_SCHEMA_VERSION",
     "CorpusFile",
     "CorpusManifestMismatch",
+    "LFS_POINTER_VERSION",
     "Manifest",
     "build_id",
     "confirmatory_cell_problems",
     "content_hash",
     "corpus_directory",
     "files_for",
+    "lfs_pointer_problem",
     "manifest_path",
     "parse",
     "read_corpus",
@@ -74,12 +77,15 @@ class CorpusManifestMismatch(NbcError, exit_code=22):
     attack sample size edited after the corpus was built would otherwise publish a table computed
     over the previous corpus.
 
-    Four inputs produce it:
+    Five inputs produce it:
 
     - the manifest records a `frame_id` that is not the one `pins.toml` declares;
     - the recomputed `build_id` is not the recorded one;
     - a corpus file's bytes do not hash to the recorded digest, or its row count differs;
-    - a corpus file the manifest names is missing, or the manifest itself is.
+    - a corpus file the manifest names is missing, or the manifest itself is;
+    - a corpus file is a **Git LFS pointer** rather than the corpus, which is what a clone made
+      without the LFS filters holds. Reported as itself rather than as a hash mismatch, because
+      the remedy is `git lfs pull` and the hash mismatch's message says to rebuild.
     """
 
     def __init__(self, *problems: str) -> None:
@@ -220,6 +226,93 @@ def confirmatory_cell_problems(pins: Pins) -> tuple[str, ...]:
             f"would carry no row in that cell and the verdict would be computed over nothing"
         )
     return tuple(problems)
+
+
+LFS_POINTER_VERSION: Final[str] = "https://git-lfs.github.com/spec/v1"
+"""The `version` line of a Git LFS pointer file, which is the spec's own identifier for one."""
+
+_LFS_POINTER_MAX_BYTES: Final[int] = 1024
+"""The spec caps a pointer at well under this. A bound so a 130 MB corpus is never line-split."""
+
+
+def lfs_pointer_problem(
+    name: str, payload: bytes, *, expected_sha256: str = "", expected_bytes: int = 0
+) -> str | None:
+    """The message for a corpus file that is a Git LFS pointer, or `None` if it is not one.
+
+    `data/benign.jsonl` is tracked by Git LFS, so a clone made without the LFS filters installed --
+    or one whose objects were never fetched -- gets a 131-byte text file where the corpus should
+    be. Without this, the content hash below is what notices, and what it says is *"the file was
+    edited after the build"*. That is a true statement about the bytes and the wrong diagnosis for
+    the reader: they edited nothing, and the thing they have to do is not rebuild the corpus.
+
+    Recognised **structurally**, as the spec defines a pointer -- a small UTF-8 file of `key value`
+    lines whose first key is `version` naming the LFS spec, carrying an `oid` and a `size` -- and
+    never by searching for a substring. A corpus row that happened to quote the spec URL inside a
+    payload is not a pointer, and this repository's corpus is a corpus *of prompt injections*,
+    which is the one place a string that looks like a marker is likely to appear on purpose.
+
+    **And the pointer is compared to the manifest, not merely reported.** Git LFS names its objects
+    by the SHA-256 of their content, which is the same digest `content_hash` records here, so
+    `oid sha256:...` and the manifest's `sha256` are two spellings of one fact that arrived from
+    two places: one written by `git add` and one written by the build. Verified against the real
+    corpus on 2026-08-30, where both read `22f8ee6d44d5e2...`. That makes the difference between
+    two situations a reader must not confuse:
+
+    - the pointer names the object this manifest expects, and the only thing wrong is that it was
+      never fetched. `git lfs pull` and the corpus is correct.
+    - the pointer names **another** object, so the committed corpus is not the one the manifest
+      describes and fetching it would not help. That is the drift the digest check exists for,
+      and it survives the file being a pointer.
+
+    `expected_sha256` and `expected_bytes` default to empty, in which case the comparison is
+    skipped and the pointer is only reported. A caller that has the manifest entry should pass it.
+    """
+    if len(payload) > _LFS_POINTER_MAX_BYTES:
+        return None
+    try:
+        text = payload.decode("utf-8")
+    except ValueError:
+        # `UnicodeDecodeError` is a `ValueError`. Binary that is not UTF-8 is not a pointer, and
+        # whatever it is, the hash below is the right thing to report it.
+        return None
+
+    fields: dict[str, str] = {}
+    for index, line in enumerate(text.splitlines()):
+        key, separator, value = line.partition(" ")
+        if not separator:
+            return None
+        if index == 0 and (key != "version" or value != LFS_POINTER_VERSION):
+            # The spec fixes `version` as the first line. Checking the position as well as the
+            # value is what stops a file that merely mentions the URL from being read as one.
+            return None
+        fields[key] = value
+
+    if fields.get("version") != LFS_POINTER_VERSION or not {"oid", "size"} <= set(fields):
+        return None
+
+    declared_oid = fields["oid"].removeprefix("sha256:")
+    head = (
+        f"{name} is a Git LFS pointer, not the corpus: {len(payload)} bytes declaring oid "
+        f"sha256:{declared_oid} and size {fields['size']}"
+    )
+    if expected_sha256 and declared_oid != expected_sha256:
+        return (
+            f"{head}. The manifest records {expected_sha256}, so this pointer names a DIFFERENT "
+            f"object: fetching it would not give you the corpus this manifest describes. The "
+            f"committed corpus and the manifest disagree, and that is not something `git lfs "
+            f"pull` fixes"
+        )
+    if expected_bytes and fields["size"] != str(expected_bytes):
+        return (
+            f"{head}. The manifest records {expected_bytes} bytes and the pointer claims "
+            f"{fields['size']}; the pointer and the manifest describe different files"
+        )
+    return (
+        f"{head}, which is the object this manifest expects. This clone never fetched it. Run "
+        f"`git lfs install` and then `git lfs pull`. Nothing here was edited and the corpus does "
+        f"not need rebuilding"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,6 +487,14 @@ def read_corpus(
             continue
         except OSError as error:
             problems.append(f"{directory / name} could not be read: {error}")
+            continue
+        pointer = lfs_pointer_problem(
+            name, payload, expected_sha256=entry.sha256, expected_bytes=entry.bytes
+        )
+        if pointer is not None:
+            # Ahead of the digest, because the digest is what would otherwise report this, and
+            # what it would say sends the reader to rebuild a corpus that is not the problem.
+            problems.append(pointer)
             continue
         digest = content_hash(payload)
         if digest != entry.sha256:
