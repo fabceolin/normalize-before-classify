@@ -38,8 +38,8 @@ inherits from here only the constraint that a pooled AUC is unconstructible. It 
 falsification condition (4-6), measures no time (4-5), and formats no percentage (5-1).
 
 **Three of the four declared contrasts are emitted here, and the fourth deliberately is not.**
-`canon_on_vs_off` and `clean_vs_<chain>` are `Delta`s and `attacks_vs_<benign_class>` keys every
-`Auc`. `bound_vs_held_out` is declared in `schema.CONTRAST_KINDS` and no cell in this module
+`canon_on_vs_off` keys both a paired-proportion `Delta` and a ΔAUC one, `clean_vs_<chain>` keys a
+`Delta`, and `attacks_vs_<benign_class>` keys every `Auc`. `bound_vs_held_out` is declared in `schema.CONTRAST_KINDS` and no cell in this module
 carries it: N4 compares a bound recovery interval against a held-out one, which is a comparison
 between two `Delta`s that already exist rather than a fifth cell, and inventing one here would put
 a column in the table that no requirement asks a reader to read.
@@ -58,7 +58,13 @@ from typing import Final
 
 from nbc.corpus.matrix import chain_class, parse_item_id, render_chain
 from nbc.errors import NbcError
-from nbc.harness.stats import AucSample, newcombe_paired_interval, roc_auc, wilson_interval
+from nbc.harness.stats import (
+    AucSample,
+    delta_auc,
+    newcombe_paired_interval,
+    roc_auc,
+    wilson_interval,
+)
 from nbc.pins import Baseline, Pins
 from nbc.schema import (
     AXIS_BENIGN_CLASS,
@@ -68,6 +74,7 @@ from nbc.schema import (
     AXIS_FAMILY,
     BENIGN_CLASSES,
     CANONICAL,
+    CONTRAST_ATTACKS_VS_BENIGN_CLASS,
     CONTRAST_CANON_ON_VS_OFF,
     CONTRAST_CLEAN_VS_CHAIN,
     FAMILY_ATTACK,
@@ -90,6 +97,7 @@ __all__ = [
     "Cell",
     "CellsInvalid",
     "auc_cells",
+    "auc_delta_cells",
     "canon_delta_cells",
     "cells",
     "census_cells",
@@ -345,9 +353,12 @@ def auc_cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Auc, ...]:
     Pooling is not refused by a check here; it is unreachable. The cell would need a key whose
     `benign_class` is null with nothing spanning it, and `CellKey` refuses that.
 
-    The contrast is `attacks_vs_<benign_class>`, which spans `family` and `benign_class` -- the two
-    sides of this comparison are drawn from different halves of the corpus, and a key that named
-    one of them would be describing half its own inputs.
+    The contrast is `attacks_vs_<benign_class>` and it spans **`family` alone**. The two sides are
+    drawn from different halves of the corpus, which is what `family` being null says; the benign
+    class is not spanned, because the comparison is against *one* class and which one is part of
+    what the cell is about. Story 4.4 corrected that: with the axis null, recovering the class
+    meant reading the part of `attacks_vs_b_code` after the underscore, which is a substring where
+    a field belongs.
     """
     groups = _grouped(scores, pins)
     produced: list[Auc] = []
@@ -376,9 +387,9 @@ def auc_cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Auc, ...]:
             )
             estimate = roc_auc(sample)
             contrast = Contrast(
-                "attacks_vs",
+                CONTRAST_ATTACKS_VS_BENIGN_CLASS,
                 benign_class,
-                frozenset({AXIS_FAMILY, AXIS_BENIGN_CLASS}),
+                frozenset({AXIS_FAMILY}),
             )
             produced.append(
                 Auc(
@@ -386,6 +397,8 @@ def auc_cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Auc, ...]:
                     interval=estimate.interval,
                     n_positive=estimate.n_positive,
                     n_negative=estimate.n_negative,
+                    tied_pairs=estimate.tied_pairs,
+                    total_pairs=estimate.total_pairs,
                     key=CellKey(
                         baseline=key.baseline,
                         dressing_chain=key.dressing_chain,
@@ -393,7 +406,7 @@ def auc_cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Auc, ...]:
                         window_policy=key.window_policy,
                         canon_on=key.canon_on,
                         family=None,
-                        benign_class=None,
+                        benign_class=benign_class,
                         contrast=contrast,
                     ),
                 )
@@ -471,6 +484,100 @@ def canon_delta_cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Delta, .
             )
         )
     return tuple(produced)
+
+
+def auc_delta_cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Delta, ...]:
+    """ΔAUC between canon-on and canon-off, over one item set, per benign class.
+
+    Emitted here for the reason `clean_vs_<chain>` is: this module is the only producer of cells,
+    so a summary or a verdict that computed its own comparison would become a second one.
+
+    The variance is `stats.delta_auc`'s -- `Var(A) + Var(B) - 2Cov(A, B)` from the structural
+    components -- and never the difference of two independent AUC intervals, which would be too
+    wide on two conditions measured over the same items and would err toward never declaring
+    anything.
+
+    Both conditions must cover the same attacks **and** the same benign items, in the same order;
+    `delta_auc` refuses anything else by comparing id tuples, and the ordering here is the file's
+    for both sides so the comparison is item-for-item.
+    """
+    groups = _grouped(scores, pins)
+    produced: list[Delta] = []
+
+    for key, attacks_on in sorted(groups.items(), key=lambda pair: _sort_key(pair[0])):
+        if key.family != FAMILY_ATTACK or key.canon_on is not True:
+            continue
+        attacks_off = groups.get(_with(key, canon_on=False))
+        if not attacks_off:
+            continue
+
+        for benign_class in BENIGN_CLASSES:
+            benign_on = groups.get(_benign_key(key, benign_class, canon_on=True))
+            benign_off = groups.get(_benign_key(key, benign_class, canon_on=False))
+            if not benign_on or not benign_off:
+                continue
+
+            on = _sample(attacks_on, benign_on)
+            off = _sample(attacks_off, benign_off)
+            if on.positive_ids != off.positive_ids or on.negative_ids != off.negative_ids:
+                raise CellsInvalid(
+                    f"the canon-on and canon-off AUC samples for {key.as_json_object()} against "
+                    f"{benign_class!r} do not cover the same items in the same order; a paired "
+                    f"difference over two different item sets is a different quantity wearing the "
+                    f"same name"
+                )
+
+            result = delta_auc(on, off)
+            produced.append(
+                Delta(
+                    value=result.delta,
+                    interval=result.interval,
+                    key=CellKey(
+                        baseline=key.baseline,
+                        dressing_chain=key.dressing_chain,
+                        chain_class=key.chain_class,
+                        window_policy=key.window_policy,
+                        canon_on=None,
+                        family=None,
+                        benign_class=benign_class,
+                        contrast=Contrast(
+                            CONTRAST_CANON_ON_VS_OFF,
+                            None,
+                            frozenset({AXIS_CANON_ON, AXIS_FAMILY}),
+                        ),
+                    ),
+                )
+            )
+    return tuple(produced)
+
+
+def _with(key: CellKey, **overrides: object) -> CellKey:
+    """The same key with some axes replaced. One place, because six call sites rebuilt it."""
+    fields: dict[str, object] = {
+        "baseline": key.baseline,
+        "dressing_chain": key.dressing_chain,
+        "chain_class": key.chain_class,
+        "window_policy": key.window_policy,
+        "canon_on": key.canon_on,
+        "family": key.family,
+        "benign_class": key.benign_class,
+        "contrast": key.contrast,
+    }
+    fields.update(overrides)
+    return CellKey(**fields)  # type: ignore[arg-type]
+
+
+def _benign_key(key: CellKey, benign_class: str, *, canon_on: bool) -> CellKey:
+    return _with(key, family=FAMILY_BENIGN, benign_class=benign_class, canon_on=canon_on)
+
+
+def _sample(attacks: Sequence[ItemScore], benign: Sequence[ItemScore]) -> AucSample:
+    return AucSample(
+        positive_ids=tuple(score.item_id for score in attacks),
+        positive_scores=tuple(score.p_injection for score in attacks),
+        negative_ids=tuple(score.item_id for score in benign),
+        negative_scores=tuple(score.p_injection for score in benign),
+    )
 
 
 def chain_delta_cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Delta, ...]:
@@ -566,6 +673,7 @@ def cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Cell, ...]:
         *auc_cells(scores, pins),
         *canon_delta_cells(scores, pins),
         *chain_delta_cells(scores, pins),
+        *auc_delta_cells(scores, pins),
     ]
     return tuple(sorted(produced, key=lambda cell: (_kind_of(cell), _sort_key(cell.key))))
 

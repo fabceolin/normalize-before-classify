@@ -809,21 +809,37 @@ REQUIRED_SPANS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
         CONTRAST_CANON_ON_VS_OFF: frozenset({AXIS_CANON_ON}),
         CONTRAST_CLEAN_VS_CHAIN: frozenset({AXIS_DRESSING_CHAIN}),
         CONTRAST_BOUND_VS_HELD_OUT: frozenset({AXIS_CHAIN_CLASS, AXIS_DRESSING_CHAIN}),
-        CONTRAST_ATTACKS_VS_BENIGN_CLASS: frozenset({AXIS_FAMILY, AXIS_BENIGN_CLASS}),
+        CONTRAST_ATTACKS_VS_BENIGN_CLASS: frozenset({AXIS_FAMILY}),
     }
 )
-"""The axes a comparison of that kind must span, because its two sides differ on them."""
+"""The axes a comparison of that kind must span, because its two sides differ on them.
+
+`attacks_vs_<benign_class>` spans `family` and **not** `benign_class`, and the distinction is the
+one story 4.4 corrected. Its two sides are attacks and benign items -- they differ on `family`. The
+benign class is a *coordinate*: the comparison is against one class, and which one is part of what
+the cell is about. Spanning it would leave the axis null, and the only way to recover the class
+would be to read the part of `attacks_vs_b_code` after the underscore -- a substring where a field
+belongs, in the module whose whole subject is that the two classes must never be confused.
+"""
 
 PERMITTED_SPANS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
     {
-        CONTRAST_CANON_ON_VS_OFF: frozenset({AXIS_CANON_ON}),
+        # `family` is permitted here and not required, because the same contrast keys two
+        # different quantities: a paired-proportion difference, which is about one family, and a
+        # difference of two AUCs, which is about neither -- an AUC draws its two sides from both
+        # halves of the corpus, so `family` is null for what the quantity IS rather than because
+        # anything was averaged. Widening it cannot pool anything: `family` is not one of
+        # `PROTECTED_AXES`, and `benign_class` stays named on both. What tells the two apart on
+        # the record is the interval's method, `newcombe-paired-score` against
+        # `delta-auc-structural-components`, which is a field rather than an inference.
+        CONTRAST_CANON_ON_VS_OFF: frozenset({AXIS_CANON_ON, AXIS_FAMILY}),
         # A held-out chain compared against `clean` also straddles `chain_class`, because `clean`
         # is bound. Whether it does is a fact about the registries and is decided by
         # `matrix.chain_class` at the call site, not by a literal here -- this module is a leaf and
         # cannot see the registries. So the axis is permitted and not required.
         CONTRAST_CLEAN_VS_CHAIN: frozenset({AXIS_DRESSING_CHAIN, AXIS_CHAIN_CLASS}),
         CONTRAST_BOUND_VS_HELD_OUT: frozenset({AXIS_CHAIN_CLASS, AXIS_DRESSING_CHAIN}),
-        CONTRAST_ATTACKS_VS_BENIGN_CLASS: frozenset({AXIS_FAMILY, AXIS_BENIGN_CLASS}),
+        CONTRAST_ATTACKS_VS_BENIGN_CLASS: frozenset({AXIS_FAMILY}),
     }
 )
 """The most a comparison of that kind may span. Anything beyond it is pooling wearing a label."""
@@ -954,20 +970,32 @@ class CellKey:
                     )
                 )
 
-        if AXIS_FAMILY not in spans:
-            if self.family not in FAMILIES:
-                raise ValueError(f"family must be one of {FAMILIES}, got {self.family!r}")
-            if self.family == FAMILY_ATTACK:
-                if self.benign_class is not None:
-                    raise ValueError(
-                        f"an attack cell has no benign class, got {self.benign_class!r}"
-                    )
-            elif AXIS_BENIGN_CLASS not in spans and self.benign_class not in BENIGN_CLASSES:
+        # `benign_class` is decided on every path, and the four are written out rather than
+        # collapsed. An earlier version checked it only when `family` was named, which left a cell
+        # whose contrast spanned `family` free to carry a null class with nothing claiming it --
+        # a pooled AUC, reachable, in the module that exists to make one unreachable.
+        if AXIS_BENIGN_CLASS in spans:
+            pass  # the axis is null by the check above, and the contrast says why
+        elif AXIS_FAMILY in spans:
+            # A comparison across the two halves still names the class it was scored against.
+            if self.benign_class not in BENIGN_CLASSES:
                 raise ValueError(
-                    f"a benign cell must name one of {BENIGN_CLASSES}, got {self.benign_class!r}; "
-                    f"a false-positive rate over both classes at once is the number FR3.1 exists "
-                    f"to prevent"
+                    f"a cell whose contrast spans family still names the benign class it was "
+                    f"measured against, got {self.benign_class!r}; without it a reader would have "
+                    f"to parse the contrast's name to learn which class this is about"
                 )
+        elif self.family == FAMILY_ATTACK:
+            if self.benign_class is not None:
+                raise ValueError(f"an attack cell has no benign class, got {self.benign_class!r}")
+        elif self.benign_class not in BENIGN_CLASSES:
+            raise ValueError(
+                f"a benign cell must name one of {BENIGN_CLASSES}, got {self.benign_class!r}; "
+                f"a false-positive rate over both classes at once is the number FR3.1 exists "
+                f"to prevent"
+            )
+
+        if AXIS_FAMILY not in spans and self.family not in FAMILIES:
+            raise ValueError(f"family must be one of {FAMILIES}, got {self.family!r}")
 
         if self.chain_class is not None and self.chain_class not in CHAIN_CLASSES_FOR_KEYS:
             raise ValueError(
@@ -1056,13 +1084,23 @@ class Count:
 
 @dataclass(frozen=True, slots=True)
 class Auc:
-    """A threshold-free estimate: rank separation, with its structural-component interval."""
+    """A threshold-free estimate: rank separation, with its structural-component interval.
+
+    `tied_pairs` of `total_pairs` says how many of the comparisons behind this number were ties
+    rather than orderings. It is on the record rather than derivable later because story 4.4's
+    saturation limit is a claim about *why* an AUC moved: a layer that pushes every score into the
+    ceiling at `p = 1` manufactures ties and drives AUC **down** without changing any ordering, and
+    this corpus is exactly where that happens. A reader who can see "8 of 16 were ties" can tell
+    that case from a real loss of separation; a reader given only the number cannot.
+    """
 
     value: float
     interval: Interval
     n_positive: int
     n_negative: int
     key: CellKey
+    tied_pairs: int = 0
+    total_pairs: int = 0
 
     def __post_init__(self) -> None:
         if isinstance(self.value, bool) or not isinstance(self.value, (int, float)):
@@ -1077,6 +1115,19 @@ class Auc:
             count = getattr(self, name)
             if isinstance(count, bool) or not isinstance(count, int) or count < 1:
                 raise ValueError(f"{name} counts items and must be a positive int, got {count!r}")
+        for name in ("tied_pairs", "total_pairs"):
+            count = getattr(self, name)
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError(f"{name} counts comparisons and must be an int, got {count!r}")
+        if self.tied_pairs > self.total_pairs:
+            raise ValueError(
+                f"tied_pairs {self.tied_pairs} exceeds total_pairs {self.total_pairs}"
+            )
+        if self.total_pairs not in (0, self.n_positive * self.n_negative):
+            raise ValueError(
+                f"total_pairs is every positive against every negative, "
+                f"{self.n_positive} x {self.n_negative}, got {self.total_pairs}"
+            )
 
     def as_json_object(self) -> dict[str, object]:
         return {
@@ -1086,6 +1137,8 @@ class Auc:
             "interval": self.interval.as_json_object(),
             "n_positive": self.n_positive,
             "n_negative": self.n_negative,
+            "tied_pairs": self.tied_pairs,
+            "total_pairs": self.total_pairs,
         }
 
 

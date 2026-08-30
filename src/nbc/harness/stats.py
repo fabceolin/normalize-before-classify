@@ -386,13 +386,23 @@ class AucSample:
 
 @dataclass(frozen=True, slots=True)
 class AucEstimate:
-    """One ROC AUC with its interval, the counts it rests on, and its variance."""
+    """One ROC AUC with its interval, the counts it rests on, its variance, and its ties.
+
+    `tied_pairs` and `total_pairs` ride out because the kernel already computes them and throwing
+    them away costs a later story its evidence. Story 4.4's saturation limit is a claim about *why*
+    an AUC moved, and the honest evidence for it is the share of comparisons that were ties rather
+    than orderings: "8 of these 16 comparisons were decided by the ceiling" is checkable where
+    "saturation may have affected this" is not. Recovering it afterwards would mean re-reading the
+    score file, and `harness/aggregate.py` is its only reader.
+    """
 
     auc: float
     interval: Interval
     n_positive: int
     n_negative: int
     variance: float
+    tied_pairs: int = 0
+    total_pairs: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,6 +438,15 @@ def _structural_components(
     v10 = [sum(_psi(x, y) for y in negatives) / n_neg for x in positives]
     v01 = [sum(_psi(x, y) for x in positives) / n_pos for y in negatives]
     return v10, v01
+
+
+def _tied_pairs(positives: Sequence[float], negatives: Sequence[float]) -> int:
+    """How many of the `n_pos * n_neg` comparisons were ties rather than orderings.
+
+    Counted from the same equality the kernel uses, so a change to what counts as a tie moves both
+    together. This is the input story 4.4's saturation limit reads.
+    """
+    return sum(1 for x in positives for y in negatives if x == y)
 
 
 def _sample_variance(values: Sequence[float]) -> float:
@@ -499,6 +518,8 @@ def roc_auc(sample: AucSample) -> AucEstimate:
         n_positive=len(v10),
         n_negative=len(v01),
         variance=variance,
+        tied_pairs=_tied_pairs(sample.positive_scores, sample.negative_scores),
+        total_pairs=len(v10) * len(v01),
     )
 
 

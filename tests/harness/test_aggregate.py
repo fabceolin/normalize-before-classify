@@ -312,7 +312,7 @@ def test_a_contrast_naming_an_undeclared_benign_class_is_refused() -> None:
         Contrast(
             CONTRAST_ATTACKS_VS_BENIGN_CLASS,
             "b_video",
-            frozenset({AXIS_FAMILY, AXIS_BENIGN_CLASS}),
+            frozenset({AXIS_FAMILY}),
         )
 
 
@@ -341,7 +341,7 @@ def test_the_contrast_name_is_the_one_a_results_file_carries() -> None:
         Contrast(
             CONTRAST_ATTACKS_VS_BENIGN_CLASS,
             "b_code",
-            frozenset({AXIS_FAMILY, AXIS_BENIGN_CLASS}),
+            frozenset({AXIS_FAMILY}),
         ).name
         == "attacks_vs_b_code"
     )
@@ -431,11 +431,16 @@ def test_an_auc_scores_attacks_against_one_benign_class_at_a_time() -> None:
         benign(6, 0.96, "b_chat"),
     ]
     produced = auc_cells(scores, PINS)
-    by_contrast = {cell.key.contrast.name: cell for cell in produced if cell.key.contrast}
-    assert set(by_contrast) == {"attacks_vs_b_code", "attacks_vs_b_chat"}
-    assert by_contrast["attacks_vs_b_code"].value == 1.0
-    assert by_contrast["attacks_vs_b_chat"].value == 0.0
-    assert by_contrast["attacks_vs_b_code"].interval.method == AUC_STRUCTURAL
+    # Keyed by the field, not by the contrast's name. Story 4.4 corrected that: reading the class
+    # out of `attacks_vs_b_code` is a substring where a field belongs.
+    by_class = {cell.key.benign_class: cell for cell in produced}
+    assert set(by_class) == set(BENIGN_CLASSES)
+    assert by_class["b_code"].value == 1.0
+    assert by_class["b_chat"].value == 0.0
+    assert by_class["b_code"].interval.method == AUC_STRUCTURAL
+    assert by_class["b_code"].key.family is None, "the two sides differ on family"
+    assert by_class["b_code"].key.contrast is not None
+    assert by_class["b_code"].key.contrast.name == "attacks_vs_b_code"
     assert all(cell.n_negative == 2 for cell in produced), "never pooled to four"
 
 
