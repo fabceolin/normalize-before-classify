@@ -338,12 +338,29 @@ the corpus rather than a miscount in a filter.
 
 def read_attack_pool(
     dataset: AttackDatasetPin,
-) -> tuple[tuple[PoolRow, ...], tuple[str, ...]]:
-    """Every row of the pinned attack dataset, over every split it ships, at the pinned revision.
+) -> tuple[tuple[PoolRow, ...], tuple[str, ...], tuple[PoolRow, ...]]:
+    """The pinned attack pool this build may use, the splits observed, and the rows withdrawn.
 
     Returns the rows and the splits **as observed**, never as declared: the caller compares the
     two, in both directions. Handing back the declared list would make that comparison a check of
     a value against itself, which is the pattern this project keeps finding in its own history.
+
+    **The withdrawal is applied here, at the one door, and that placement is a bug fix.** It used
+    to live inside `draw_attack_items`, which meant the attack half saw the filtered pool and
+    `read_benign_rows` -- reading the same tuple, one call later -- saw the unfiltered one. The
+    withdrawn texts went straight back into the corpus through the benign half, and `2026-08-30`'s
+    first full build caught it only because `selection_overlap` fired on rows that should not have
+    been in either half. The rule now has one home and the pool has one reader: nothing downstream
+    can hold rows this build declared it does not use, because nothing downstream is handed them.
+
+    Aborting rather than filtering silently: a declaration that does not describe the pool exactly,
+    in either direction, is `WithdrawalDoesNotMatchPool`.
+
+    **The withdrawn rows come back out of the same door** rather than being dropped on the floor.
+    A caller that wants the artifact as published -- the smoke test that compares the pool's
+    contradictions against a count a human reviewed -- reconstructs it from the two halves. The
+    alternative was a second reader returning unfiltered rows, and a second reader is how the
+    benign half came to be reading a different pool from the attack half in the first place.
 
     `datasets.load_dataset` with no `split` argument returns every split, which is what makes the
     observation an observation. Configs are enumerated for the same reason `iter_exclusion_texts`
@@ -385,7 +402,13 @@ def read_attack_pool(
                 PoolRow(split=name, index=index, text=text, label=label)
                 for index, (text, label) in enumerate(zip(texts, labels))
             )
-    return tuple(rows), tuple(observed)
+
+    as_published = tuple(rows)
+    surviving, problems = withdraw(as_published, dataset.withdrawn)
+    if problems:
+        raise WithdrawalDoesNotMatchPool(*problems)
+    kept = set(surviving)
+    return surviving, tuple(observed), tuple(row for row in as_published if row not in kept)
 
 
 def refuse_unlicensed_redistribution(pins: Pins) -> None:
@@ -440,7 +463,7 @@ def build_attack_corpus(
         )
     dataset = pins.attack_datasets[0]
 
-    rows, observed_splits = read_attack_pool(dataset)
+    rows, observed_splits, _withdrawn = read_attack_pool(dataset)
 
     # The exclusion index is the largest download this build makes, and it is built lazily so a
     # pool that fails a cheap gate -- a text carried at both labels, a split nobody declared --
@@ -694,7 +717,7 @@ def build_corpus(
     if cell_problems:
         raise CorpusManifestMismatch(*cell_problems)
 
-    rows, observed_splits = read_attack_pool(dataset)
+    rows, observed_splits, _withdrawn = read_attack_pool(dataset)
 
     read: dict[str, object] = {}
 
@@ -924,23 +947,26 @@ def main(argv: list[str] | None = None) -> int:
             # leave a corpus on disk; this costs one parquet pair and writes nothing.
             refuse_unlicensed_redistribution(pins)
             dataset = pins.attack_datasets[0]
-            rows, observed_splits = read_attack_pool(dataset)
+            # `read_attack_pool` already applied the declared withdrawals and aborted if they did
+            # not describe the pool exactly, so reaching this line is most of what this subcommand
+            # exists to check.
+            pool, observed_splits, withdrawn = read_attack_pool(dataset)
             split_problems = verify_splits(dataset.splits, observed_splits)
             if split_problems:
                 raise AttackDrawUnsatisfiable(*split_problems)
-            pool, withdrawal_problems = withdraw(rows, dataset.withdrawn)
-            if withdrawal_problems:
-                raise WithdrawalDoesNotMatchPool(*withdrawal_problems)
             contradiction_problems = contradictions(pool)
             if contradiction_problems:
                 raise LabelContradiction(*contradiction_problems)
+            withdrawn_rows = len(withdrawn)
             report = {
                 "attack_pool": {
                     "repository": dataset.repository,
                     "revision": dataset.revision,
                     "observed_splits": list(observed_splits),
-                    "rows_read": len(rows),
-                    "withdrawn_rows": len(rows) - len(pool),
+                    # The artifact's own count, recovered from the two halves the one door
+                    # returns rather than from a second read of the dataset.
+                    "rows_read": len(pool) + withdrawn_rows,
+                    "withdrawn_rows": withdrawn_rows,
                     "rows_used": len(pool),
                     "unique_positives": len(
                         {

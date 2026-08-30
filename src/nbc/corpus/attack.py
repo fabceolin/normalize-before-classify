@@ -20,13 +20,16 @@ refuses any `CorpusItem(...)` whose `label=` is not one of the two schema consta
 -> positives -> exclusion filter -> draw -> render, once per declared chain. Three of those steps
 are where they are for a reason:
 
-- the withdrawals run **first**, before the contradiction gate. They are the answers a human has
-  already given to FR4's abort, recorded in `pins.toml` with a name and a date, and a gate that
-  ran ahead of them would abort on the very texts they answer. Running them first leaves the gate
-  looking at every text nobody has ruled on, so a contradiction that appears tomorrow still stops
-  the build -- which is what makes the declaration a list of answered questions rather than a
-  silencer. `withdraw` refuses to remove anything its declaration does not describe exactly, in
-  both directions.
+- the withdrawals run **first**, before the contradiction gate, and they run in
+  `build.read_attack_pool` rather than here. They are the answers a human has already given to
+  FR4's abort, recorded in `pins.toml` with a name and a date, and a gate that ran ahead of them
+  would abort on the very texts they answer. Running them first leaves the gate looking at every
+  text nobody has ruled on, so a contradiction that appears tomorrow still stops the build --
+  which is what makes the declaration a list of answered questions rather than a silencer.
+  `withdraw` refuses to remove anything its declaration does not describe exactly, in both
+  directions. They live at the pool's one door because the benign half reads that same pool: with
+  the removal here, `read_benign_rows` saw the unfiltered rows and put both withdrawn texts back
+  into the corpus. `refuse_an_unwithdrawn_pool` is the precondition that placement leaves behind.
 - the contradiction gate runs over **every row**, not over the positives. Each of the two texts
   the pinned pool carries at both labels appears once as a positive and once as a benign row, so
   a gate that looked only at rows carrying `attack_label` would see neither and would pass
@@ -99,6 +102,7 @@ __all__ = [
     "PoolRow",
     "WithdrawalDoesNotMatchPool",
     "contradictions",
+    "refuse_an_unwithdrawn_pool",
     "draw_attack_items",
     "render_attack_item",
     "select_payloads",
@@ -289,6 +293,36 @@ def withdraw(
 
     surviving = tuple(row for row in rows if row not in removed)
     return surviving, tuple(problems)
+
+
+def refuse_an_unwithdrawn_pool(
+    rows: Sequence[PoolRow], withdrawals: Sequence[WithdrawnText]
+) -> None:
+    """Refuse a pool that still carries a text its own declaration says this build does not use.
+
+    `withdraw` runs once, at the door in `build.read_attack_pool`, so that the attack half and
+    `read_benign_rows` cannot be handed two different pools -- which is exactly what happened
+    before 2026-08-30 and put both withdrawn texts back into the corpus through the benign half.
+
+    This is that placement's precondition, checked where it is relied on. `AttackDrawReport`
+    publishes `withdrawn_rows` as a count derived from the **declaration** rather than from a
+    removal this function watched happen, and that is only honest if the removal happened at all.
+    A pool reaching here unfiltered means somebody read it through another door, and the report
+    would then claim rows were withheld while the corpus carried them.
+    """
+    declared = {entry.text_sha256 for entry in withdrawals}
+    if not declared:
+        return
+    still_here = sorted({text_digest(row.text) for row in rows} & declared)
+    if still_here:
+        raise WithdrawalDoesNotMatchPool(
+            *(
+                f"the pool handed to the draw still carries {digest}, which is declared "
+                f"withdrawn. The withdrawal is applied by `build.read_attack_pool`; a pool read "
+                f"any other way carries rows this build says it does not use"
+                for digest in still_here
+            )
+        )
 
 
 def contradictions(rows: Iterable[PoolRow]) -> tuple[str, ...]:
@@ -538,20 +572,16 @@ def draw_attack_items(
     if split_problems:
         raise AttackDrawUnsatisfiable(*split_problems)
 
-    # Withdrawal runs BEFORE the contradiction gate, and that order is the whole design. Running
-    # it after would mean the gate had already aborted on the very texts the declaration answers,
-    # and the declaration could never take effect. Running it before means the gate still sees
-    # every text nobody has ruled on -- so a contradiction that appears tomorrow still stops the
-    # build, and the file below is a list of answered questions rather than a silencer.
-    pool, withdrawal_problems = withdraw(rows, dataset.withdrawn)
-    if withdrawal_problems:
-        raise WithdrawalDoesNotMatchPool(*withdrawal_problems)
+    # The withdrawal happened at the door, in `build.read_attack_pool`, so that every reader of
+    # the pool gets the same one. This is the precondition that placement establishes, checked
+    # here because this is where the count derived from it is published.
+    refuse_an_unwithdrawn_pool(rows, dataset.withdrawn)
 
-    contradiction_problems = contradictions(pool)
+    contradiction_problems = contradictions(rows)
     if contradiction_problems:
         raise LabelContradiction(*contradiction_problems)
 
-    positive_rows = [row for row in pool if row.label == dataset.attack_label]
+    positive_rows = [row for row in rows if row.label == dataset.attack_label]
     if not positive_rows:
         observed_labels = sorted({row.label for row in rows})
         raise AttackDrawUnsatisfiable(
@@ -596,12 +626,11 @@ def draw_attack_items(
         declared_splits=tuple(dataset.splits),
         chains=tuple(render_chain(chain) for chain in chains),
         held_out_chains=tuple(render_chain(chain) for chain in held_out),
-        # Over the pool **as read**, not over the survivors: this is the artifact's own count,
-        # and a reader reconciles it against `withdrawn_rows` and the positives below. Silently
-        # shrinking it would make the one number that describes the pinned dataset describe this
-        # build's opinion of it instead.
+        # Over the pool this build **used**, with what it did not use published beside it, so a
+        # reader adds the two to recover the artifact's own count rather than being handed one
+        # number that quietly means either.
         rows_by_split=_count_by_split(rows),
-        withdrawn_rows=len(rows) - len(pool),
+        withdrawn_rows=sum(len(entry.rows) for entry in dataset.withdrawn),
         positives_by_split=_count_by_split(positive_rows),
         blank_positive_rows=blank,
         # Over the **bound** chains only, and deliberately: the exemption is story 3.4's, whose

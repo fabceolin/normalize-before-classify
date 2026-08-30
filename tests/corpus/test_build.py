@@ -31,7 +31,13 @@ from nbc.corpus import attack, build, crosscheck
 from nbc.corpus.exclusion import Observation, normalized_texts, plan, verify_observations
 from nbc.corpus.matrix import CHAINS, HELDOUT_CHAINS, render_chain
 from nbc.errors import exit_code_for
-from nbc.pins import EXCLUSION_UNREACHABLE, HTTP_OK, load_pins
+from nbc.pins import (
+    EXCLUSION_UNREACHABLE,
+    HTTP_OK,
+    PoolRowRef,
+    WithdrawnText,
+    load_pins,
+)
 from nbc.schema import FAMILY_ATTACK
 
 BUILDER = Path(build.__file__).resolve()
@@ -299,20 +305,24 @@ def test_the_committed_withdrawals_describe_the_pinned_pool_exactly() -> None:
     offline; this is the half that goes stale silently when somebody re-pins the pool, and it is
     the same check the CI `attack-pool-report` step runs.
 
-    Both directions in one pass, because `withdraw` reports both: a declared row the pool does not
-    carry, and a row the pool carries that no declaration names.
+    Both directions are covered by the abort this test does not see: `withdraw` reports a declared
+    row the pool does not carry and a row the pool carries that no declaration names.
     """
     pins = load_pins(Path(nbc.__file__).resolve().parents[2])
     dataset = pins.attack_datasets[0]
     assert dataset.withdrawn, "the pins declare no withdrawal; this test has lost its subject"
 
-    rows, observed_splits = build.read_attack_pool(dataset)
+    pool, observed_splits, withdrawn = build.read_attack_pool(dataset)
     assert attack.verify_splits(dataset.splits, observed_splits) == ()
 
-    pool, problems = attack.withdraw(rows, dataset.withdrawn)
-    assert problems == ()
-    assert len(rows) - len(pool) == sum(len(entry.rows) for entry in dataset.withdrawn)
-
+    # Reaching this line at all is most of the check: `read_attack_pool` aborts when the
+    # declaration and the pool disagree in either direction. What is left is that the rows it
+    # removed are the rows the declaration names, position for position and label for label.
+    assert {(row.split, row.index, row.label) for row in withdrawn} == {
+        (row.split, row.index, row.label)
+        for entry in dataset.withdrawn
+        for row in entry.rows
+    }
     # And nothing else in the pool contradicts itself: if it did, FR4 would stop the build and
     # this file's declaration would be describing a question that is no longer the only one.
     assert attack.contradictions(pool) == ()
@@ -396,7 +406,7 @@ def test_the_pinned_pool_yields_exactly_the_splits_the_pins_declare() -> None:
     pins = load_pins(Path(nbc.__file__).resolve().parents[2])
     dataset = pins.attack_datasets[0]
 
-    rows, observed = build.read_attack_pool(dataset)
+    rows, observed, _withdrawn = build.read_attack_pool(dataset)
 
     assert attack.verify_splits(dataset.splits, observed) == ()
     assert rows
@@ -404,37 +414,58 @@ def test_the_pinned_pool_yields_exactly_the_splits_the_pins_declare() -> None:
 
 
 @pytest.mark.smoke
-def test_the_pinned_pool_carries_texts_at_both_labels_and_the_build_stops() -> None:
+def test_the_pinned_pool_still_carries_the_two_texts_a_human_ruled_on_and_no_others() -> None:
     """FR4's second case, on the real pool. It is not hypothetical and this is where that is shown.
 
     The count is asserted against a reviewed constant rather than against whatever the pool
     happens to hold: a pool that grew a third contradiction, or lost these two, is a different
     gold-label situation and a human has to look at it again. `pins.toml` pins the revision, so
     the only way this number moves is a pin edit.
+
+    That the build now completes is because two texts were withdrawn by a person, never because
+    the gate was loosened, and this is the pair of assertions that says so against the real
+    dataset rather than against a fixture.
     """
     pins = load_pins(Path(nbc.__file__).resolve().parents[2])
     dataset = pins.attack_datasets[0]
 
-    rows, observed = build.read_attack_pool(dataset)
-    problems = attack.contradictions(rows)
+    pool, observed, withdrawn = build.read_attack_pool(dataset)
+    # The artifact as published, reconstructed from the two halves the one door returns: this
+    # asks about the dataset, not about the dataset after this repository's own decisions.
+    as_published = pool + withdrawn
+    problems = attack.contradictions(as_published)
 
     assert len(problems) == CONTRADICTIONS_IN_THE_PINNED_POOL, problems
+    # And the pool the build actually uses carries none of them, because both were withdrawn by a
+    # person on 2026-08-30. The pair is the point: the build completes because of a decision, not
+    # because the gate stopped seeing anything.
+    assert attack.contradictions(pool) == ()
 
-    # And the gate is reached from the top of the pipeline, before anything is downloaded: the
-    # thunk would raise if it were called, so the abort proves the order as well as the check.
+    # The gate is reached from the top of the pipeline, before anything is downloaded: the thunk
+    # would raise if it were called, so the abort proves the order as well as the check. The
+    # declaration is dropped for this call rather than the rows being put back, because an
+    # unfiltered pool beside a live declaration trips the withdrawal precondition first -- which
+    # is a different abort, and this test is about this one.
     def must_not_be_called() -> object:
         raise AssertionError("the exclusion index was built for a pool that already failed")
 
+    unruled = dataclasses.replace(dataset, withdrawn=())
     with pytest.raises(attack.LabelContradiction) as caught:
-        attack.draw_attack_items(rows, observed, dataset, must_not_be_called)
+        attack.draw_attack_items(as_published, observed, unruled, must_not_be_called)
     assert exit_code_for(caught.value) == attack.LabelContradiction.exit_code
 
 
 # --- the build end to end, with the two remote reads replaced ------------------------------------
 
 
-def _fake_pool() -> tuple[tuple[attack.PoolRow, ...], tuple[str, ...]]:
-    """A pool with the shape of the real one -- two splits, mixed labels -- and no contradiction."""
+def _fake_pool() -> tuple[
+    tuple[attack.PoolRow, ...], tuple[str, ...], tuple[attack.PoolRow, ...]
+]:
+    """A pool with the shape of the real one -- two splits, mixed labels -- and no contradiction.
+
+    The third element is `read_attack_pool`'s withdrawn half, empty here: these fixtures declare
+    no withdrawal, so there is nothing for the door to have removed.
+    """
     rows = [
         attack.PoolRow(split="train", index=index, text=f"payload {index}", label=1)
         for index in range(6)
@@ -442,7 +473,7 @@ def _fake_pool() -> tuple[tuple[attack.PoolRow, ...], tuple[str, ...]]:
         attack.PoolRow(split="test", index=index, text=f"benign {index}", label=0)
         for index in range(3)
     ]
-    return tuple(rows), ("train", "test")
+    return tuple(rows), ("train", "test"), ()
 
 
 @pytest.fixture()
@@ -866,6 +897,85 @@ def test_the_full_build_writes_both_halves_and_reports_the_cross_check(
     assert recorded == cross_check
     assert recorded["similarity_threshold"] == crosscheck.SIMILARITY_THRESHOLD
     assert recorded["shingle_width"] == crosscheck.SHINGLE_WIDTH
+
+
+def test_a_withdrawn_text_reaches_neither_half_of_the_corpus(
+    offline_full_build: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression the first full build of 2026-08-30 found, pinned so it stays found.
+
+    `withdraw` used to run inside `draw_attack_items`. The attack half got the filtered pool and
+    `read_benign_rows` -- reading the same tuple one call later -- got the unfiltered one, so both
+    withdrawn texts went straight back into the corpus under a benign gold label. Nothing caught
+    it offline. The live build stopped only because `selection_overlap` fired on a text that was
+    in both halves, which is a report about a symptom two steps downstream of the cause.
+
+    The pool now has one reader and `read_attack_pool` filters at that door, so the check is that
+    the text is in **neither** half. Reverting the placement turns this red.
+    """
+    contradicted = "the text a human ruled on"
+    withdrawal = WithdrawnText(
+        text_sha256=attack.text_digest(contradicted),
+        rows=(
+            PoolRowRef(split="train", index=6, label=1),
+            PoolRowRef(split="test", index=3, label=0),
+        ),
+        on="2026-08-30",
+        by="a named human",
+        reason="fixture: contradicted, so neither row is usable",
+    )
+
+    def pool_with_the_contradiction(dataset):
+        """`read_attack_pool`'s shipped tail over a fake read: the same `withdraw`, same abort."""
+        rows, observed, _empty = _fake_pool()
+        rows = rows + (
+            attack.PoolRow(split="train", index=6, text=contradicted, label=1),
+            attack.PoolRow(split="test", index=3, text=contradicted, label=0),
+        )
+        surviving, problems = attack.withdraw(rows, dataset.withdrawn)
+        assert problems == (), problems
+        kept = set(surviving)
+        return surviving, observed, tuple(row for row in rows if row not in kept)
+
+    monkeypatch.setattr(build, "read_attack_pool", pool_with_the_contradiction)
+
+    # The wiring itself, not only its outcome. The bug was that the benign half read a *different*
+    # tuple from the one the attack half was handed, so what this records is which pool
+    # `read_benign_rows` was actually given -- and the assertion below is that it is the one the
+    # door returned. Moving the withdrawal back inside `draw_attack_items` makes this the
+    # unfiltered pool again, and it goes red here rather than two steps downstream.
+    handed: list[object] = []
+    real_read_benign_rows = build.read_benign_rows
+
+    def recording_read_benign_rows(dataset, rows):
+        handed.append(tuple(rows))
+        return real_read_benign_rows(dataset, rows)
+
+    monkeypatch.setattr(build, "read_benign_rows", recording_read_benign_rows)
+
+    pins = _small_corpus_pins(offline_full_build)
+    dataset = pins.attack_datasets[0]
+    pins = dataclasses.replace(
+        pins,
+        attack_datasets=(dataclasses.replace(dataset, withdrawn=(withdrawal,)),),
+    )
+
+    _manifest, fields = build.build_corpus(pins, root=str(tmp_path))
+
+    directory = tmp_path / build.DATA_DIRNAME
+    written = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(directory.glob("*.jsonl"))
+    )
+    assert written, "the fixture wrote no corpus; this test has lost its subject"
+    assert contradicted not in written
+
+    (benign_pool,) = handed
+    assert benign_pool == pool_with_the_contradiction(pins.attack_datasets[0])[0]
+    assert all(row.text != contradicted for row in benign_pool)
+
+    # And the count travels: a build that dropped the rows without saying so would satisfy the
+    # assertions above and publish a corpus nobody could reconcile against the pinned dataset.
+    assert fields["attack_draw"]["withdrawn_rows"] == len(withdrawal.rows)
 
 
 def test_the_attack_half_refuses_to_overwrite_credits_that_are_already_there(
