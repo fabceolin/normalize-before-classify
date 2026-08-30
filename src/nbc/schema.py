@@ -31,6 +31,8 @@ __all__ = [
     "ATTACK",
     "BENIGN",
     "BENIGN_CLASSES",
+    "CANONICAL",
+    "CONDITIONS",
     "CanonContext",
     "CanonResult",
     "CorpusItem",
@@ -38,7 +40,9 @@ __all__ = [
     "FAMILIES",
     "FAMILY_ATTACK",
     "FAMILY_BENIGN",
+    "ItemScore",
     "LABELS",
+    "RAW",
     "Score",
     "StageResult",
 ]
@@ -195,6 +199,149 @@ class CorpusItem:
             "dressing": list(self.dressing),
             "text": self.text,
             "label": self.label,
+        }
+
+
+# --- the scoring pass --------------------------------------------------------------------------
+
+RAW: Final[str] = "raw"
+"""The item's text exactly as `data/*.jsonl` carries it, handed to the baseline unchanged."""
+
+CANONICAL: Final[str] = "canonical"
+"""The same item after the canonicalization layer. The other half of every comparison."""
+
+CONDITIONS: Final[tuple[str, ...]] = (RAW, CANONICAL)
+"""The two conditions every item is scored under, and the whole of them.
+
+A closed vocabulary rather than a free string, for the reason `FAMILIES` is one: the headline
+number is a difference between two conditions, and a third condition appearing in the scores file
+-- a typo, a variant somebody tried once -- would make "the difference" ill-defined while every
+individual record still looked valid.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class ItemScore:
+    """One corpus item, one baseline, one condition: the number the table is computed from.
+
+    `Score` is what the model boundary returns and says nothing about *what* was scored.  This is
+    the committed record, and it carries its own coordinates so that a line of the scores file
+    means something without the corpus beside it.  The three that identify it -- `item_id`,
+    `baseline_key`, `condition` -- are the key the shard algebra partitions on and the key the
+    coverage check counts; the rest travel with it because 4-1 and 4-3 group by them and a group
+    key resolved by joining against another file is a group key that can silently join wrongly.
+
+    **No class, and no threshold.** `p_injection` is committed as it was computed.  Turning it
+    into a class is story 4-3's job, at the per-baseline threshold `pins.toml` declares, in one
+    place -- because a threshold applied at write time is a threshold that cannot be changed
+    without re-running eighty-five hours of inference, and one applied in two places is one that
+    will eventually differ between them.
+
+    **`max_depth_reached` and `ceiling_hit` are present only under `CANONICAL`, and `None` under
+    `RAW`.** They are outcomes of the canonicalization layer, and the raw condition does not run
+    it: a depth of `0` on a raw record would be indistinguishable from a canonical record whose
+    document needed no decoding, so a reader tallying FR10's ceiling hits would be tallying over
+    twice the population.  `None` rather than an absent key, for the reason `CorpusItem` gives
+    about `benign_class`: absent-versus-null is the difference between "this record has no depth"
+    and "somebody forgot to write one".
+
+    `family`, `benign_class` and `label` are copied from the `CorpusItem` that was scored and
+    checked against each other here exactly as `CorpusItem` checks them, so a record that took a
+    wrong turn between the corpus and the scores file is refused at the point it is built.
+    """
+
+    item_id: str
+    family: str
+    benign_class: str | None
+    label: int
+    baseline_key: str
+    condition: str
+    p_injection: float
+    n_windows: int
+    max_depth_reached: int | None = None
+    ceiling_hit: bool | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("item_id", "baseline_key"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be a non-empty string, got {value!r}")
+
+        if self.family not in FAMILIES:
+            raise ValueError(f"family must be one of {FAMILIES}, got {self.family!r}")
+        if isinstance(self.label, bool) or self.label not in LABELS:
+            raise ValueError(f"label must be one of {LABELS}, got {self.label!r}")
+        # The same pairing `CorpusItem` enforces, enforced again on the way out. The corpus is
+        # verified on read, but the copy into this record is a second chance to attach the wrong
+        # label to a text, and it is the copy the published rates are computed over.
+        expected = ATTACK if self.family == FAMILY_ATTACK else BENIGN
+        if self.label != expected:
+            raise ValueError(
+                f"family {self.family!r} carries label {expected}, got {self.label!r}"
+            )
+        if self.family == FAMILY_ATTACK:
+            if self.benign_class is not None:
+                raise ValueError(
+                    f"an attack item has no benign class, got {self.benign_class!r}"
+                )
+        elif self.benign_class not in BENIGN_CLASSES:
+            raise ValueError(
+                f"a benign item must name one of {BENIGN_CLASSES}, got {self.benign_class!r}"
+            )
+
+        if self.condition not in CONDITIONS:
+            raise ValueError(f"condition must be one of {CONDITIONS}, got {self.condition!r}")
+
+        # Delegated rather than restated: `Score` already owns what a probability and a window
+        # count are, including that NaN fails every comparison and that a bool is not an int.
+        # Restating the rules here is how the two would come to disagree.
+        checked = Score(p_injection=self.p_injection, n_windows=self.n_windows)
+        object.__setattr__(self, "p_injection", checked.p_injection)
+
+        canonical = self.condition == CANONICAL
+        depth, hit = self.max_depth_reached, self.ceiling_hit
+        if canonical:
+            if isinstance(depth, bool) or not isinstance(depth, int):
+                raise ValueError(
+                    f"a {CANONICAL} score reports the depth its document reached, got {depth!r}"
+                )
+            if depth < 0:
+                raise ValueError(f"max_depth_reached must not be negative, got {depth!r}")
+            if not isinstance(hit, bool):
+                raise ValueError(
+                    f"a {CANONICAL} score reports whether the ceiling was hit, got {hit!r}"
+                )
+        else:
+            if depth is not None:
+                raise ValueError(
+                    f"a {self.condition!r} score reports no depth: the canonicalization layer "
+                    f"did not run over it, and a 0 here is indistinguishable from a canonical "
+                    f"document that needed no decoding, got {depth!r}"
+                )
+            if hit is not None:
+                raise ValueError(
+                    f"a {self.condition!r} score reports no ceiling hit: there was no recursion "
+                    f"to hit a ceiling, got {hit!r}"
+                )
+
+    def as_json_object(self) -> dict[str, object]:
+        """The serialized form, every key present, in a declared order.
+
+        Written by the shard walk and read by the merge, in different processes and possibly on
+        different machines, so the key set is fixed here rather than in whichever of the two is
+        edited first.
+        """
+        return {
+            "item_id": self.item_id,
+            "family": self.family,
+            "benign_class": self.benign_class,
+            "label": self.label,
+            "baseline_key": self.baseline_key,
+            "condition": self.condition,
+            "p_injection": self.p_injection,
+            "n_windows": self.n_windows,
+            "max_depth_reached": self.max_depth_reached,
+            "ceiling_hit": self.ceiling_hit,
         }
 
 

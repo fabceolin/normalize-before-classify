@@ -501,7 +501,19 @@ def test_no_stage_module_mentions_the_ceiling_at_all() -> None:
         assert "ceiling" not in bound
 
 
+MEASUREMENT_ENTRYPOINT = "nbc/harness/run.py"
+"""The one module on the measurement path that AD-6 lets build the context: the entrypoint."""
+
 CONTEXT_BUILDERS: dict[str, str] = {
+    MEASUREMENT_ENTRYPOINT: (
+        "story 4.2's scoring pass is the entrypoint AD-6 names when it says the ceiling is "
+        "overridable only through a context the entrypoint constructs once. It builds one, with "
+        "no `ceiling=` of its own -- asserted below -- and canonicalizes every corpus item "
+        "through it. Admitted by name rather than by widening the rule to `nbc/harness/`: "
+        "`harness/timing.py` and `harness/measure.py` acquiring one still fails here, and those "
+        "are where a second pass would invent a second ceiling and publish two conditions that "
+        "were not the same condition"
+    ),
     "nbc/corpus/benign.py": (
         "story 3.6's B-code file-eligibility rule asks the layer whether it would examine a decode "
         "candidate in a file. That is a BUILD-TIME selection question, not a measurement pass: it "
@@ -534,7 +546,63 @@ def test_only_the_pipeline_constructs_a_context() -> None:
     """
     assert construction_sites(SRC, "CanonContext") == ["nbc/canon/pipeline.py"]
     assert construction_sites(SRC, "default_context") == sorted(CONTEXT_BUILDERS)
-    assert not [site for site in CONTEXT_BUILDERS if site.startswith("nbc/harness/")]
+    # Narrowed rather than dropped when story 4.2 landed the entrypoint: exactly one harness
+    # module may build a context, and it is named. `measure.py` and `timing.py` are still refused.
+    assert [site for site in CONTEXT_BUILDERS if site.startswith("nbc/harness/")] == [
+        MEASUREMENT_ENTRYPOINT
+    ]
+
+
+def test_the_measurement_entrypoint_sets_no_ceiling_of_its_own() -> None:
+    """What admitting `harness/run.py` to the allow-list above is worth only if it is also true.
+
+    AD-6 lets the entrypoint construct the context; it does not let the measurement pass choose a
+    recursion depth. A `ceiling=` here would be a run parameter set in a second place, and the two
+    conditions the table compares would then be "raw" and "canonical at whatever this pass felt
+    like" -- which reads identically in the output file.
+
+    The failing input is one keyword: `default_context(ceiling=2)`, which the scanner below is
+    shown catching over a synthetic module.
+    """
+    assert ceiling_arguments(SRC / MEASUREMENT_ENTRYPOINT) == []
+
+
+def ceiling_arguments(path: Path) -> list[str]:
+    """Every `ceiling=` keyword handed to a `default_context(...)` or `CanonContext(...)` call."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+        if name not in ("default_context", "CanonContext"):
+            continue
+        found.extend(
+            f"{name}(ceiling=...)" for keyword in node.keywords if keyword.arg == "ceiling"
+        )
+    return found
+
+
+def test_the_ceiling_argument_scan_fires_on_an_entrypoint_that_picks_one(tmp_path: Path) -> None:
+    """The scanner's own failing input, so the assertion above cannot pass by failing to look."""
+    probe = tmp_path / "run.py"
+    probe.write_text(
+        "from nbc.canon.pipeline import default_context\n"
+        "def go():\n"
+        "    return default_context(trace_enabled=False, ceiling=2)\n",
+        encoding="utf-8",
+    )
+    assert ceiling_arguments(probe) == ["default_context(ceiling=...)"]
+
+    clean = tmp_path / "clean.py"
+    clean.write_text(
+        "from nbc.canon.pipeline import default_context\n"
+        "def go():\n"
+        "    return default_context(trace_enabled=False)\n",
+        encoding="utf-8",
+    )
+    assert ceiling_arguments(clean) == []
 
 
 def test_the_construction_site_scan_reports_a_module_that_builds_its_own(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +12,17 @@ from pathlib import Path
 import pytest
 
 from nbc import schema
-from nbc.schema import CanonContext, CanonResult, Edit, Score, StageResult
+from nbc.schema import (
+    CANONICAL,
+    CONDITIONS,
+    RAW,
+    CanonContext,
+    CanonResult,
+    Edit,
+    ItemScore,
+    Score,
+    StageResult,
+)
 
 
 def _schema_source() -> tuple[Path, ast.Module]:
@@ -104,6 +115,8 @@ def test_schema_declares_only_the_types_this_epic_uses() -> None:
         "ATTACK",
         "BENIGN",
         "BENIGN_CLASSES",
+        "CANONICAL",
+        "CONDITIONS",
         "CanonContext",
         "CanonResult",
         "CorpusItem",
@@ -111,7 +124,9 @@ def test_schema_declares_only_the_types_this_epic_uses() -> None:
         "FAMILIES",
         "FAMILY_ATTACK",
         "FAMILY_BENIGN",
+        "ItemScore",
         "LABELS",
+        "RAW",
         "Score",
         "StageResult",
     ]
@@ -134,6 +149,134 @@ def test_every_record_type_defined_here_is_exported() -> None:
     assert defined <= set(schema.__all__)
     missing = [name for name in schema.__all__ if not hasattr(schema, name)]
     assert not missing, f"{missing} are exported and not defined"
+
+
+# --- the scoring pass's record ------------------------------------------------------------------
+
+
+def an_item_score(**overrides) -> ItemScore:
+    fields = {
+        "item_id": "0001aaaa::clean",
+        "family": schema.FAMILY_ATTACK,
+        "benign_class": None,
+        "label": schema.ATTACK,
+        "baseline_key": "protectai-deberta-v3",
+        "condition": RAW,
+        "p_injection": 0.5,
+        "n_windows": 1,
+    }
+    return ItemScore(**{**fields, **overrides})
+
+
+def test_an_item_score_carries_its_own_coordinates() -> None:
+    """A line of the scores file means something without the corpus open beside it."""
+    assert [field.name for field in dataclasses.fields(ItemScore)] == [
+        "item_id",
+        "family",
+        "benign_class",
+        "label",
+        "baseline_key",
+        "condition",
+        "p_injection",
+        "n_windows",
+        "max_depth_reached",
+        "ceiling_hit",
+    ]
+
+
+def test_the_two_conditions_are_a_closed_vocabulary() -> None:
+    """A third condition would make "the difference between the two" ill-defined."""
+    assert CONDITIONS == (RAW, CANONICAL)
+
+    with pytest.raises(ValueError, match="condition must be one of"):
+        an_item_score(condition="canonicalised")
+
+
+def test_a_canonical_score_reports_the_layers_outcome() -> None:
+    record = an_item_score(condition=CANONICAL, max_depth_reached=2, ceiling_hit=True)
+
+    assert record.max_depth_reached == 2
+    assert record.ceiling_hit is True
+
+
+@pytest.mark.parametrize(
+    "kwargs, needle",
+    [
+        ({"max_depth_reached": None, "ceiling_hit": False}, "reports the depth"),
+        ({"max_depth_reached": 0, "ceiling_hit": None}, "reports whether the ceiling"),
+        ({"max_depth_reached": -1, "ceiling_hit": False}, "must not be negative"),
+        ({"max_depth_reached": True, "ceiling_hit": False}, "reports the depth"),
+    ],
+)
+def test_a_canonical_score_that_does_not_report_it_is_refused(kwargs, needle: str) -> None:
+    with pytest.raises(ValueError, match=needle):
+        an_item_score(condition=CANONICAL, **kwargs)
+
+
+@pytest.mark.parametrize("kwargs", [{"max_depth_reached": 0}, {"ceiling_hit": False}])
+def test_a_raw_score_that_reports_a_depth_or_a_ceiling_hit_is_refused(kwargs) -> None:
+    """A `0` on a raw record is indistinguishable from a canonical document that needed no decode.
+
+    That is the whole reason the fields are `None` here rather than zero: a reader tallying FR10's
+    ceiling hits over the scores file would otherwise be tallying over twice the population, and
+    every individual record would look valid.
+    """
+    with pytest.raises(ValueError, match="reports no"):
+        an_item_score(condition=RAW, **kwargs)
+
+
+def test_an_item_score_checks_its_family_against_its_label() -> None:
+    """The copy out of the corpus is a second chance to attach the wrong label to a text."""
+    with pytest.raises(ValueError, match="carries label"):
+        an_item_score(family=schema.FAMILY_BENIGN, benign_class="b_chat", label=schema.ATTACK)
+
+
+def test_an_attack_score_carries_no_benign_class_and_a_benign_one_must() -> None:
+    with pytest.raises(ValueError, match="an attack item has no benign class"):
+        an_item_score(benign_class="b_chat")
+
+    with pytest.raises(ValueError, match="must name one of"):
+        an_item_score(family=schema.FAMILY_BENIGN, label=schema.BENIGN, benign_class=None)
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.1, float("nan"), float("inf"), True, "0.5"])
+def test_an_item_score_refuses_a_p_injection_that_is_not_a_probability(bad: object) -> None:
+    """Delegated to `Score` rather than restated, and checked here so the delegation is real."""
+    with pytest.raises(ValueError, match="p_injection"):
+        an_item_score(p_injection=bad)
+
+
+def test_an_item_score_refuses_a_window_count_below_one() -> None:
+    with pytest.raises(ValueError, match="n_windows"):
+        an_item_score(n_windows=0)
+
+
+def test_an_item_score_stores_an_integral_probability_as_a_float() -> None:
+    """So the serialized form does not depend on how the caller happened to spell 1."""
+    assert json.loads(json.dumps(an_item_score(p_injection=1).as_json_object()))[
+        "p_injection"
+    ] == 1.0
+
+
+def test_an_item_score_that_names_nothing_is_refused() -> None:
+    for blank in ("item_id", "baseline_key"):
+        with pytest.raises(ValueError, match=f"{blank} must be a non-empty string"):
+            an_item_score(**{blank: ""})
+
+
+def test_the_serialized_form_carries_every_key_including_the_absent_ones() -> None:
+    """Absent-versus-null is the difference between "no depth" and "somebody forgot to write one"."""
+    payload = an_item_score().as_json_object()
+
+    assert list(payload) == [field.name for field in dataclasses.fields(ItemScore)]
+    assert payload["max_depth_reached"] is None
+    assert payload["ceiling_hit"] is None
+    assert payload["benign_class"] is None
+
+
+def test_an_item_score_is_frozen() -> None:
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        an_item_score().p_injection = 0.9  # type: ignore[misc]
 
 
 # --- the canonicalization layer's shapes ------------------------------------------------------

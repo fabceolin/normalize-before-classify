@@ -156,6 +156,12 @@ def test_a_row_is_walked_for_every_string_it_holds() -> None:
 WRITERS: dict[str, str] = {
     "build.py": "data/*.jsonl, data/manifest.json and data/ATTRIBUTION.md, per AD-1 and AD-34",
     "vendor_confusables.py": "the vendored confusables table under canon/data/",
+    "run.py": (
+        "story 4.2's scoring pass writes results/scores-<n>-<i>.jsonl and results/scores.jsonl. "
+        "It writes nothing under data/ and cannot: the locator scan in tests/corpus/test_manifest "
+        "refuses any module outside the two above that can even name a corpus file, so AD-1's "
+        "one-writer rule is untouched by this entry"
+    ),
 }
 
 _WRITE_ATTRIBUTES = frozenset({"write_text", "write_bytes", "writelines"})

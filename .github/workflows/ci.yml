@@ -134,6 +134,22 @@ jobs:
             exit 1
           fi
 
+      - name: Prove the scoring pass reads the corpus through the same guarded door
+        # Story 4.2's entrypoint. `harness/run.py` reaches `data/*.jsonl` only through
+        # `manifest.read_corpus`, so with no committed corpus the merge refuses before it has a
+        # demand set to verify a shard against. 22 is CorpusManifestMismatch; 0 would mean the
+        # harness assembled a table over rows nobody checked, and 27 (ScoreSetIncomplete) would
+        # mean it got as far as counting shard files with the corpus still unverified.
+        run: |
+          set +e
+          uv run python -m nbc.harness.run --shards 1 merge
+          status=$?
+          set -e
+          if [ "$status" -ne 22 ]; then
+            echo "::error::expected exit 22 (CorpusManifestMismatch) from the merge, got $status"
+            exit 1
+          fi
+
       - name: Verify the layer is inside its declared size budget
         # NFR5, made falsifiable. Checks three things against each other in one pass: the budget
         # the README states, the budget `SizeBudget` declares, and the layer as measured. Editing
