@@ -145,6 +145,7 @@ def test_schema_declares_only_the_types_this_epic_uses() -> None:
         "Count",
         "DELTA_AUC_STRUCTURAL",
         "Delta",
+        "EDIT_CENSUS_PREFIX",
         "Edit",
         "FALSIFICATION_CONDITIONS",
         "FAMILIES",
@@ -160,6 +161,7 @@ def test_schema_declares_only_the_types_this_epic_uses() -> None:
         "OUTCOME_NOT_TRIGGERED",
         "OUTCOME_TRIGGERED",
         "PERMITTED_SPANS",
+        "PIPELINE_STAGES",
         "POPULATIONS",
         "POPULATION_ALL",
         "POPULATION_SINGLE_WINDOW",
@@ -173,6 +175,7 @@ def test_schema_declares_only_the_types_this_epic_uses() -> None:
         "VERDICT_OUTCOMES",
         "Verdict",
         "WILSON_SCORE",
+        "edit_census_of",
     ]
 
 

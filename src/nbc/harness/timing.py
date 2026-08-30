@@ -58,7 +58,7 @@ would be worse than reporting none.
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Protocol
 
@@ -69,6 +69,7 @@ from nbc.schema import (
     BENIGN_CLASSES,
     FAMILY_ATTACK,
     CanonContext,
+    CanonResult,
     CorpusItem,
     Score,
 )
@@ -291,12 +292,23 @@ def corpus_class_of(item: CorpusItem) -> str:
     )
 
 
-def time_layer(items: Sequence[CorpusItem], context: CanonContext) -> LayerTiming:
+def time_layer(
+    items: Sequence[CorpusItem],
+    context: CanonContext,
+    on_trace: Callable[[CorpusItem, CanonResult], None] | None = None,
+) -> LayerTiming:
     """The layer's cost, one document at a time, with the context the entrypoint built.
 
     Every sample is one document canonicalized once, in the order the corpus was read. No warm-up
     run is discarded and no document is timed twice: the published recall was produced by a pass
     that saw each document once, and a warmed measurement would be a cost for a run nobody made.
+
+    `on_trace` is how story 4.7 gets `results/traces.jsonl` without a second canonicalization pass
+    and without this module acquiring a write. This pass already runs the layer over every item
+    with tracing on -- it refuses a context that has it off -- so the trace exists here and is
+    otherwise dropped. The callback is invoked **outside** the timed section, so writing a line
+    does not enter the number: a cost measurement that included the caller's IO would be measuring
+    the caller.
     """
     if not context.trace_enabled:
         raise TimingIncomplete(
@@ -313,10 +325,15 @@ def time_layer(items: Sequence[CorpusItem], context: CanonContext) -> LayerTimin
     for item in items:
         name = corpus_class_of(item)
         started = time.perf_counter_ns()
-        canonicalize(item.text, context)
+        result = canonicalize(item.text, context)
         elapsed = time.perf_counter_ns() - started
         samples[name].append(elapsed)
         overall.append(elapsed)
+        if on_trace is not None:
+            # Outside the timed section, and handed one item's result at a time so nothing
+            # accumulates: the trace for a 130 MB corpus is the unbounded structure story 4.2
+            # turned tracing off to avoid, and streaming it is what makes it bounded.
+            on_trace(item, result)
 
     empty = [name for name in CORPUS_CLASSES if not samples[name]]
     if empty:
@@ -389,6 +406,7 @@ def run_timing_pass(
     baselines: Mapping[str, TimedBaseline],
     *,
     expected_keys: Sequence[str] | None = None,
+    on_trace: Callable[[CorpusItem, CanonResult], None] | None = None,
 ) -> TimingReport:
     """Both halves, in one pass, on one clock, and the pass's own wall clock around them.
 
@@ -397,7 +415,7 @@ def run_timing_pass(
     be worse than reporting none.
     """
     started = time.perf_counter_ns()
-    layer = time_layer(items, context)
+    layer = time_layer(items, context, on_trace)
     inference = time_inference(items, baselines, expected_keys=expected_keys)
     return TimingReport(
         layer=layer,

@@ -36,8 +36,10 @@ memory bandwidth, and a latency measured here would describe the contention.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Final, Protocol
@@ -63,7 +65,35 @@ from nbc.harness.score import (
     serialize,
     shard_of,
 )
+from nbc.corpus.manifest import corpus_presence
+from nbc.harness.aggregate import cells as aggregate_cells
+from nbc.harness.aggregate import read_scores, read_traces
+from nbc.harness.results import (
+    RESULT_KEYS,
+    STEP_AGGREGATE,
+    STEP_BUILD,
+    STEP_MEASURE,
+    STEP_PREFLIGHT,
+    STEP_TIME,
+    STEP_VERIFY,
+    ResultsFile,
+    ResultsIncomplete,
+    RunBlock,
+    completeness_problems,
+    refuse_an_incomplete_table,
+    render_results,
+)
+from nbc.harness.summary import (
+    REJECTED_JUSTIFICATIONS,
+    REJECTED_SUMMARIES,
+    SUMMARY_CHOICE,
+    findings,
+)
+from nbc.harness.timing import run_timing_pass
+from nbc.harness.verdict import refuse_an_unevaluable_run, verdicts
 from nbc.pins import Pins, load_pins
+from nbc.report.caveats import verify_caveats_file
+from nbc.schema import INTERVAL_METHODS
 from nbc.schema import CANONICAL, CONDITIONS, CorpusItem, ItemScore, Score
 
 __all__ = [
@@ -75,7 +105,11 @@ __all__ = [
     "merge_shards",
     "open_baselines",
     "timing_pass",
+    "RESULTS_FILENAME",
+    "TRACES_FILENAME",
+    "full_run",
     "results_directory",
+    "traces_path",
     "scores_path",
     "score_shard",
     "shard_path",
@@ -84,6 +118,9 @@ __all__ = [
 
 RESULTS_DIRNAME: Final[str] = "results"
 """Where the run's output lives, beside the declared `results/results.json`. Named once, here."""
+
+RESULTS_FILENAME: Final[str] = "results.json"
+"""The published file. Named once, here, beside the scores it is computed from."""
 
 SCORES_FILENAME: Final[str] = "scores.jsonl"
 """The merged file every later story in this epic reads. One name, in one place."""
@@ -527,6 +564,185 @@ def _describe_paths(header: ShardHeader) -> str:
     return "; ".join(path.describe() for path in sorted(header.paths, key=lambda p: p.baseline_key))
 
 
+TRACES_FILENAME: Final[str] = "traces.jsonl"
+"""One object per item, keyed by item id, and **not committed**.
+
+Its consumer is a person debugging one document; what the table needs is the per-stage edit counts,
+which are `Count` cells in the results file. `.gitignore` names it, and the README says where it
+lives and how to regenerate it, so the absence is documented rather than discovered.
+"""
+
+
+def traces_path(root: str | Path | None = None) -> Path:
+    return results_directory(root) / TRACES_FILENAME
+
+
+def full_run(
+    pins: Pins,
+    *,
+    root: str | Path | None = None,
+    shards: int = 1,
+) -> dict[str, object]:
+    """The six steps, in the declared order, ending at `results/results.json`.
+
+    The order is `results.STEPS` and each boundary was paid for. The preflight runs before the pins
+    are read and therefore before `onnxruntime` is imported -- a preflight that fires after the
+    runtime is imported is checking a floor the import already crashed through. The pins and the
+    caveats section are verified before any inference, because eighty-five hours of scoring that
+    ends at a missing caveats section is eighty-five hours spent to learn something a file read
+    would have said. The corpus is built only when it is **wholly** absent, because a partial one
+    is the state where a rebuild writes half-new rows against a manifest describing the old ones.
+
+    The trace file is written from the timing pass rather than the scoring pass, and that is not
+    where it looks like it belongs. Story 4.2 turned tracing off in the scoring pass because the
+    edits were per-item memory with no consumer, and the scoring pass is **sharded**, so an item
+    scored under two baselines lives in two shards and would write its trace twice. The timing pass
+    canonicalizes every item exactly once with tracing on -- it refuses a context that has it off --
+    so the trace exists there, once per item, and is streamed out through a callback rather than
+    accumulated. Verified while writing this: tracing changes only whether edits are recorded, not
+    the canonical text, the depth, or the ceiling flag, so no published score moves either way.
+    """
+    started = time.perf_counter_ns()
+    steps: list[str] = []
+
+    # (0) and (1). `platform.preflight` before `load_pins`, and both before anything opens a model.
+    platform.preflight()
+    steps.append(STEP_PREFLIGHT)
+    # The pins arrive already loaded, because `main` loads them before dispatching and reloading
+    # them here would have made the parameter decorative -- which it was, in the first version of
+    # this function, so a caller handing in one set of pins was silently measured against another.
+    caveats = verify_caveats_file()
+    steps.append(STEP_VERIFY)
+
+    # (2). Wholly absent, or wholly present. Anything between aborts.
+    presence = corpus_presence(root)
+    if any(presence.values()) and not all(presence.values()):
+        missing = sorted(name for name, there in presence.items() if not there)
+        raise ResultsIncomplete(
+            f"the corpus is partially present: {missing} are absent while the others are not. A "
+            f"rebuild here would write half-new rows against a manifest that describes the old "
+            f"ones, so the run stops rather than choosing which half to trust"
+        )
+    if not any(presence.values()):
+        raise ResultsIncomplete(
+            "no corpus is present. Build it with `python -m nbc.corpus.build build-corpus` before "
+            "measuring; this command does not build one for you, because a build is a decision "
+            "about which rows exist and a measurement is not"
+        )
+    steps.append(STEP_BUILD)
+
+    # (3). The scoring pass, through the same function the sharded CLI calls.
+    merge_shards(pins, shards=shards, root=root)
+    steps.append(STEP_MEASURE)
+
+    # (4). The dedicated cost pass, which also streams the trace file out.
+    manifest, items = read_corpus(pins, root)
+    context = default_context()
+    baselines = open_baselines(pins)
+    traces_at = traces_path(root)
+    traces_at.parent.mkdir(parents=True, exist_ok=True)
+    with open(traces_at, "w", encoding="utf-8", newline="\n") as handle:
+        report = run_timing_pass(
+            items,
+            context,
+            baselines,
+            expected_keys=[baseline.key for baseline in pins.baselines],
+            on_trace=lambda item, result: handle.write(
+                json.dumps(
+                    {
+                        "item_id": item.id,
+                        "stages": [edit.stage for edit in result.edits],
+                        "edits": [
+                            {
+                                "stage": edit.stage,
+                                "span": list(edit.span),
+                                "before": edit.before,
+                                "after": edit.after,
+                                "depth": edit.depth,
+                            }
+                            for edit in result.edits
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            ),
+        )
+    steps.append(STEP_TIME)
+
+    # (5). Aggregate, evaluate, and write. Nothing here computes a cell.
+    scores = read_scores(scores_path(root))
+    traces = read_traces(traces_at)
+    produced = aggregate_cells(scores, pins, traces)
+    limits = findings(produced)
+    decided = verdicts(produced, report, pins.benign_frame.confirmatory_cell)
+
+    refuse_an_incomplete_table(
+        completeness_problems(produced, _required_window_policies(pins))
+    )
+    refuse_an_unevaluable_run(decided)
+
+    results = ResultsFile(
+        run=RunBlock(
+            {
+                "build_id": manifest.build_id,
+                "corpus_files": [
+                    {"name": entry.name, "sha256": entry.sha256, "rows": entry.rows}
+                    for entry in manifest.files
+                ],
+                # `dataclasses.asdict` rather than a method, because `DeclaredPath` has none and
+                # the alternative found while writing this -- a `hasattr` fallback to `str()` --
+                # would have put a Python repr in a published file the first time the type changed.
+                "declared_path": dataclasses.asdict(declared_path(pins)),
+                "caveats": caveats.as_run_fields(),
+                "confirmatory_cell": pins.benign_frame.confirmatory_cell.as_run_fields(),
+                "timing": report.as_json_object(),
+                "summary": {
+                    "choice": SUMMARY_CHOICE,
+                    "rejected": dict(REJECTED_SUMMARIES),
+                    "rejected_justifications": dict(REJECTED_JUSTIFICATIONS),
+                    "findings": [limit.as_json_object() for limit in limits],
+                },
+                "interval_methods": list(INTERVAL_METHODS),
+                "steps": steps + [STEP_AGGREGATE],
+                "total_wall_ns": time.perf_counter_ns() - started,
+            }
+        ),
+        cells=produced,
+        verdict=decided,
+    )
+    path = results_directory(root) / RESULTS_FILENAME
+    path.write_text(render_results(results), encoding="utf-8")
+    steps.append(STEP_AGGREGATE)
+
+    return {
+        "results": str(path),
+        "cells": len(produced),
+        "verdicts": [v.outcome for v in decided],
+        "findings": len(limits),
+        "steps": steps,
+    }
+
+
+def _required_window_policies(pins: Pins) -> dict[str, list[str]]:
+    """Which window policies each baseline's table must cover.
+
+    Read off the pins rather than assumed, so a baseline that starts declaring a second policy
+    starts demanding a second column on the same day.
+
+    **Vacuous today, and said rather than left to be discovered.** `tokenization.WINDOW_POLICIES`
+    has exactly one member and every pinned baseline declares it, so this returns one policy per
+    baseline and the completeness assertion's window-policy branch cannot fire on a real run. The
+    branch stays because the axis is protected and the requirement is real the day a publisher
+    protocol is declared, and `tests/harness/test_results.py` fires it on a synthetic two-policy
+    input so it is a gate somebody has seen work rather than a branch nobody has run.
+    """
+    required: dict[str, list[str]] = {}
+    for baseline in pins.baselines:
+        required[baseline.key] = sorted({baseline.window_policy})
+    return required
+
+
 def timing_pass(pins: Pins, *, root: str | Path | None = None) -> dict[str, object]:
     """Read the corpus, build the one context, open the baselines, and hand all three to the pass.
 
@@ -614,6 +830,21 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     subcommands.add_parser(
+        "all",
+        help=(
+            "the whole run: preflight, verify the pins and the caveats, refuse a partial corpus, "
+            "merge the scores, run the timing pass, aggregate, evaluate the four conditions and "
+            "write results/results.json. Not sharded -- score the shards first"
+        ),
+    )
+    subcommands.add_parser(
+        "report",
+        help=(
+            "render the table from results/results.json and inject it into the README. Story 5.1 "
+            "owns the renderer; this aborts rather than emitting an empty table"
+        ),
+    )
+    subcommands.add_parser(
         "timing",
         help=(
             "measure the canonicalization layer's cost and each baseline's inference latency in "
@@ -638,6 +869,16 @@ def main(argv: list[str] | None = None) -> int:
             report = score_shard(pins, shards=args.shards, shard=args.shard, root=args.root)
         elif args.subcommand == "timing":
             report = timing_pass(pins, root=args.root)
+        elif args.subcommand == "all":
+            report = full_run(pins, shards=args.shards or 1, root=args.root)
+        elif args.subcommand == "report":
+            raise ResultsIncomplete(
+                "the renderer is story 5.1 -- 'the table is a pure function of the results file' -- "
+                "and it has not landed. `all` produces results/results.json, which is that "
+                "function's input. This aborts rather than writing an empty table into the README, "
+                "because an empty rendered block and a rendered block are indistinguishable to a "
+                "reader who did not run the command"
+            )
         else:
             report = merge_shards(pins, shards=args.shards, root=args.root)
     except NbcError as abort:

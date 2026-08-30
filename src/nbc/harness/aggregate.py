@@ -52,7 +52,7 @@ they arrive with 4-7 and are not quietly approximated here.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -68,9 +68,11 @@ from nbc.harness.stats import (
 from nbc.pins import Baseline, Pins
 from nbc.schema import (
     AXIS_BENIGN_CLASS,
+    PIPELINE_STAGES,
     CENSUS_CEILING_HIT,
     CENSUS_KINDS,
     CENSUS_WINDOW_OVERFLOW,
+    edit_census_of,
     POPULATION_SINGLE_WINDOW,
     AXIS_CANON_ON,
     AXIS_CHAIN_CLASS,
@@ -107,10 +109,12 @@ __all__ = [
     "census_cells",
     "chain_delta_cells",
     "classify",
+    "edit_census_cells",
     "false_positive_cells",
     "key_for",
     "pooling_problems",
     "read_scores",
+    "read_traces",
     "recall_cells",
     "windows_matched_delta_cells",
 ]
@@ -213,6 +217,78 @@ def read_scores(path: Path) -> tuple[ItemScore, ...]:
             f"table over no scores is not a table"
         )
     return tuple(scores)
+
+
+def read_traces(path: Path) -> dict[str, tuple[str, ...]]:
+    """`results/traces.jsonl` as a mapping from item id to the stage of every edit it recorded.
+
+    Only the stages are kept. The spans and the before/after text are what a person debugging one
+    document needs; what the **table** needs is how many documents each stage touched, and carrying
+    the rest through this module would put a corpus of prompt injections in memory to count four
+    integers.
+
+    The trace file is written by the measurement pass and is not committed, so a missing one is an
+    ordinary state rather than an abort: `edit_census_cells` over an empty mapping produces no
+    census, which is what "this run has no traces" should look like.
+    """
+    if not path.exists():
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise CellsInvalid(f"the trace file at {path} could not be read: {error}") from error
+
+    traces: dict[str, tuple[str, ...]] = {}
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except ValueError as error:
+            raise CellsInvalid(f"{path}:{number} is not a JSON object: {error}") from error
+        if not isinstance(payload, dict) or "item_id" not in payload:
+            raise CellsInvalid(f"{path}:{number} carries no item_id")
+        stages = payload.get("stages", [])
+        if not isinstance(stages, list) or not all(isinstance(s, str) for s in stages):
+            raise CellsInvalid(f"{path}:{number} carries a malformed stage list: {stages!r}")
+        unknown = [s for s in stages if s not in PIPELINE_STAGES]
+        if unknown:
+            raise CellsInvalid(
+                f"{path}:{number} names stages {unknown!r}, which the canonicalization pipeline "
+                f"does not declare; a census over a stage nobody ran is a column with no subject"
+            )
+        traces[str(payload["item_id"])] = tuple(stages)
+    return traces
+
+
+def edit_census_cells(
+    scores: Sequence[ItemScore], pins: Pins, traces: Mapping[str, tuple[str, ...]]
+) -> tuple[Count, ...]:
+    """How many documents each pipeline stage edited, per cell, as a `Count` with no interval.
+
+    A census and not an estimate, for the reason the ceiling-hit census is one: this is a property
+    of the corpus as canonicalized, complete, and an interval on it would invite a reader to
+    generalise something with no population to generalise to.
+
+    Emitted only for canon-on keys. The raw condition does not run the layer, so a stage edit count
+    of zero there would be a true number about a pass that never happened -- which is the same trap
+    the ceiling census avoids by skipping the raw half rather than counting its nulls.
+    """
+    if not traces:
+        return ()
+
+    produced: list[Count] = []
+    for key, members in sorted(_grouped(scores, pins).items(), key=lambda p: _sort_key(p[0])):
+        if key.canon_on is not True:
+            continue
+        for stage in PIPELINE_STAGES:
+            touched = sum(
+                1 for score in members if stage in traces.get(score.item_id, ())
+            )
+            produced.append(
+                Count(touched, len(members), key, census=edit_census_of(stage))
+            )
+    return tuple(produced)
 
 
 # --- the cell key -----------------------------------------------------------------------------------
@@ -732,7 +808,11 @@ def chain_delta_cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Delta, .
     return tuple(produced)
 
 
-def cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Cell, ...]:
+def cells(
+    scores: Sequence[ItemScore],
+    pins: Pins,
+    traces: Mapping[str, tuple[str, ...]] | None = None,
+) -> tuple[Cell, ...]:
     """Every cell the scores file supports. **The only producer.**
 
     Ordered by key so two runs over one file emit the same sequence: the results file 4-7 writes is
@@ -749,6 +829,7 @@ def cells(scores: Sequence[ItemScore], pins: Pins) -> tuple[Cell, ...]:
         *chain_delta_cells(scores, pins),
         *auc_delta_cells(scores, pins),
         *windows_matched_delta_cells(scores, pins),
+        *edit_census_cells(scores, pins, traces or {}),
     ]
     return tuple(sorted(produced, key=lambda cell: (_kind_of(cell), _sort_key(cell.key))))
 

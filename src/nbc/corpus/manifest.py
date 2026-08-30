@@ -58,6 +58,7 @@ __all__ = [
     "build_id",
     "confirmatory_cell_problems",
     "content_hash",
+    "corpus_presence",
     "corpus_directory",
     "files_for",
     "lfs_pointer_problem",
@@ -420,6 +421,19 @@ def parse(text: str) -> Manifest:
         files=tuple(files),
         reports=document.get("reports", {}) if isinstance(document.get("reports"), dict) else {},
     )
+
+
+def corpus_presence(root: str | Path | None = None) -> dict[str, bool]:
+    """Which corpus files exist on disk, by name. Neither read nor verified -- only present.
+
+    Lives here because this is one of the two modules AD-1 lets name a corpus file, and story 4.7's
+    entrypoint needs the answer to decide whether to build: it builds only when the corpus is
+    **wholly** absent, and a partial corpus aborts. A partial corpus is the state where a rebuild
+    writes half-new rows while the manifest still describes the old ones, so "some files exist" has
+    to be distinguishable from "none do" without opening either.
+    """
+    directory = corpus_directory(root)
+    return {name: (directory / name).exists() for name in CORPUS_FILENAMES}
 
 
 def read_corpus(

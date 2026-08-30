@@ -61,6 +61,7 @@ __all__ = [
     "Count",
     "DELTA_AUC_STRUCTURAL",
     "Delta",
+    "EDIT_CENSUS_PREFIX",
     "Edit",
     "FALSIFICATION_CONDITIONS",
     "FAMILIES",
@@ -76,6 +77,7 @@ __all__ = [
     "OUTCOME_NOT_TRIGGERED",
     "OUTCOME_TRIGGERED",
     "PERMITTED_SPANS",
+    "PIPELINE_STAGES",
     "POPULATIONS",
     "POPULATION_ALL",
     "POPULATION_SINGLE_WINDOW",
@@ -89,6 +91,7 @@ __all__ = [
     "VERDICT_OUTCOMES",
     "Verdict",
     "WILSON_SCORE",
+    "edit_census_of",
 ]
 
 
@@ -1107,12 +1110,34 @@ class Rate:
 CENSUS_CEILING_HIT: Final[str] = "ceiling_hit"
 CENSUS_WINDOW_OVERFLOW: Final[str] = "window_overflow"
 
-CENSUS_KINDS: Final[tuple[str, ...]] = (CENSUS_CEILING_HIT, CENSUS_WINDOW_OVERFLOW)
+PIPELINE_STAGES: Final[tuple[str, ...]] = ("invisible", "confusables", "nfkc", "decode")
+"""The canonicalization layer's stages, in order, spelled here because this module is a leaf.
+
+`canon/pipeline.py` declares the same four as `PIPELINE` and owns the order; it imports this module,
+so this module cannot import it back. `tests/harness/test_results.py` asserts the two agree, which
+is the comparison that makes a second spelling safe rather than a second source of truth -- the same
+arrangement `CHAIN_CLASSES_FOR_KEYS` uses.
+"""
+
+EDIT_CENSUS_PREFIX: Final[str] = "edits_"
+
+CENSUS_KINDS: Final[tuple[str, ...]] = (
+    CENSUS_CEILING_HIT,
+    CENSUS_WINDOW_OVERFLOW,
+    *(f"{EDIT_CENSUS_PREFIX}{stage}" for stage in PIPELINE_STAGES),
+)
 """The censuses this table reports, closed.
 
-Per-stage edit counts belong here too and are not: they come off `results/traces.jsonl`, which
-story 4-7 writes.
+The per-stage edit counts are built from `PIPELINE_STAGES` rather than listed, so a fifth stage is
+covered here the day it is declared instead of being silently left out of the table.
 """
+
+
+def edit_census_of(stage: str) -> str:
+    """The census name for one pipeline stage. One place, because three modules spell it."""
+    if stage not in PIPELINE_STAGES:
+        raise ValueError(f"stage must be one of {PIPELINE_STAGES}, got {stage!r}")
+    return f"{EDIT_CENSUS_PREFIX}{stage}"
 
 
 @dataclass(frozen=True, slots=True)

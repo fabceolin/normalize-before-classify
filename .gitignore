@@ -28,6 +28,11 @@ models/
 out/
 scratch/
 
+# The per-item trace is one object per corpus row and its consumer is a person debugging one
+# document, not a reader recomputing the table. What the table needs is the per-stage edit counts,
+# which are Count cells inside results/results.json. The README says how to regenerate this.
+results/traces.jsonl
+
 # OS / editor
 .DS_Store
 *.swp
