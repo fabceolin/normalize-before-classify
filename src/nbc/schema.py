@@ -30,14 +30,34 @@ from typing import Final
 __all__ = [
     "ATTACK",
     "AUC_STRUCTURAL",
+    "AXIS_BASELINE",
+    "AXIS_BENIGN_CLASS",
+    "AXIS_CANON_ON",
+    "AXIS_CHAIN_CLASS",
+    "AXIS_DRESSING_CHAIN",
+    "AXIS_FAMILY",
+    "AXIS_WINDOW_POLICY",
+    "Auc",
     "BENIGN",
     "BENIGN_CLASSES",
     "CANONICAL",
+    "CELL_AXES",
+    "CHAIN_CLASSES_FOR_KEYS",
     "CONDITIONS",
+    "CONTRAST_ARGUMENT_REQUIRED",
+    "CONTRAST_ATTACKS_VS_BENIGN_CLASS",
+    "CONTRAST_BOUND_VS_HELD_OUT",
+    "CONTRAST_CANON_ON_VS_OFF",
+    "CONTRAST_CLEAN_VS_CHAIN",
+    "CONTRAST_KINDS",
     "CanonContext",
     "CanonResult",
+    "CellKey",
+    "Contrast",
     "CorpusItem",
+    "Count",
     "DELTA_AUC_STRUCTURAL",
+    "Delta",
     "Edit",
     "FAMILIES",
     "FAMILY_ATTACK",
@@ -47,8 +67,12 @@ __all__ = [
     "ItemScore",
     "LABELS",
     "NEWCOMBE_PAIRED",
+    "PERMITTED_SPANS",
+    "PROTECTED_AXES",
     "PairedCount",
     "RAW",
+    "REQUIRED_SPANS",
+    "Rate",
     "Score",
     "StageResult",
     "WILSON_SCORE",
@@ -708,3 +732,424 @@ class PairedCount:
 
     def as_json_object(self) -> dict[str, object]:
         return {"a": self.a, "b": self.b, "c": self.c, "d": self.d}
+
+
+# --- the cells of the table -----------------------------------------------------------------------
+
+AXIS_BASELINE: Final[str] = "baseline"
+AXIS_DRESSING_CHAIN: Final[str] = "dressing_chain"
+AXIS_CHAIN_CLASS: Final[str] = "chain_class"
+AXIS_WINDOW_POLICY: Final[str] = "window_policy"
+AXIS_CANON_ON: Final[str] = "canon_on"
+AXIS_FAMILY: Final[str] = "family"
+AXIS_BENIGN_CLASS: Final[str] = "benign_class"
+
+CELL_AXES: Final[tuple[str, ...]] = (
+    AXIS_BASELINE,
+    AXIS_DRESSING_CHAIN,
+    AXIS_CHAIN_CLASS,
+    AXIS_WINDOW_POLICY,
+    AXIS_CANON_ON,
+    AXIS_FAMILY,
+    AXIS_BENIGN_CLASS,
+)
+"""Every coordinate a published cell has, and the whole of them."""
+
+PROTECTED_AXES: Final[tuple[str, ...]] = (
+    AXIS_BENIGN_CLASS,
+    AXIS_CHAIN_CLASS,
+    AXIS_WINDOW_POLICY,
+)
+"""AD-11's three, and the three reasons are different rather than one rule with three names.
+
+`benign_class`: a pooled benign number hides the failure the reader came for -- a layer that is
+safe on chat and destructive on code reads as a small average.
+
+`chain_class`: a held-out result averaged into bound ones destroys the only evidence of
+generalization this artifact has, and destroys it by producing a number that looks fine.
+
+`window_policy`: a sensitivity check averaged into the headline makes the headline neither policy.
+
+Aggregating across one of these is refused where the value would be written down, in `CellKey`,
+rather than checked afterwards by a function somebody has to remember to call.
+"""
+
+CONTRAST_CANON_ON_VS_OFF: Final[str] = "canon_on_vs_off"
+CONTRAST_CLEAN_VS_CHAIN: Final[str] = "clean_vs"
+CONTRAST_BOUND_VS_HELD_OUT: Final[str] = "bound_vs_held_out"
+CONTRAST_ATTACKS_VS_BENIGN_CLASS: Final[str] = "attacks_vs"
+
+CONTRAST_KINDS: Final[tuple[str, ...]] = (
+    CONTRAST_CANON_ON_VS_OFF,
+    CONTRAST_CLEAN_VS_CHAIN,
+    CONTRAST_BOUND_VS_HELD_OUT,
+    CONTRAST_ATTACKS_VS_BENIGN_CLASS,
+)
+"""The whole of the comparisons this table makes.
+
+Aggregating across an axis is forbidden; comparing across one is required, and the difference
+between the two is this field. Without it a `Delta` between canon-on and canon-off has two equally
+defensible homes -- filed under `canon_on = true` or under `canon_on = false` -- and two compliant
+implementations put it in different cells. The contrast is authoritative and the axis it spans
+reads `null`.
+"""
+
+CONTRAST_ARGUMENT_REQUIRED: Final[Mapping[str, bool]] = MappingProxyType(
+    {
+        CONTRAST_CANON_ON_VS_OFF: False,
+        CONTRAST_CLEAN_VS_CHAIN: True,
+        CONTRAST_BOUND_VS_HELD_OUT: False,
+        CONTRAST_ATTACKS_VS_BENIGN_CLASS: True,
+    }
+)
+"""Which kinds name the other side. `clean_vs_<chain>` and `attacks_vs_<benign_class>` do."""
+
+REQUIRED_SPANS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        CONTRAST_CANON_ON_VS_OFF: frozenset({AXIS_CANON_ON}),
+        CONTRAST_CLEAN_VS_CHAIN: frozenset({AXIS_DRESSING_CHAIN}),
+        CONTRAST_BOUND_VS_HELD_OUT: frozenset({AXIS_CHAIN_CLASS, AXIS_DRESSING_CHAIN}),
+        CONTRAST_ATTACKS_VS_BENIGN_CLASS: frozenset({AXIS_FAMILY, AXIS_BENIGN_CLASS}),
+    }
+)
+"""The axes a comparison of that kind must span, because its two sides differ on them."""
+
+PERMITTED_SPANS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        CONTRAST_CANON_ON_VS_OFF: frozenset({AXIS_CANON_ON}),
+        # A held-out chain compared against `clean` also straddles `chain_class`, because `clean`
+        # is bound. Whether it does is a fact about the registries and is decided by
+        # `matrix.chain_class` at the call site, not by a literal here -- this module is a leaf and
+        # cannot see the registries. So the axis is permitted and not required.
+        CONTRAST_CLEAN_VS_CHAIN: frozenset({AXIS_DRESSING_CHAIN, AXIS_CHAIN_CLASS}),
+        CONTRAST_BOUND_VS_HELD_OUT: frozenset({AXIS_CHAIN_CLASS, AXIS_DRESSING_CHAIN}),
+        CONTRAST_ATTACKS_VS_BENIGN_CLASS: frozenset({AXIS_FAMILY, AXIS_BENIGN_CLASS}),
+    }
+)
+"""The most a comparison of that kind may span. Anything beyond it is pooling wearing a label."""
+
+
+@dataclass(frozen=True, slots=True)
+class Contrast:
+    """A declared comparison, and the axes its two sides differ on.
+
+    `spans` is carried rather than looked up, because one kind's answer depends on data this module
+    cannot see: `clean_vs_<chain>` spans `chain_class` when the chain is held out and not when it is
+    bound, and which one it is comes from the chain registries. Carrying it and validating it
+    against `REQUIRED_SPANS` and `PERMITTED_SPANS` keeps the decision at the call site that has the
+    registry while keeping the record unable to claim a span nobody allows.
+    """
+
+    kind: str
+    argument: str | None = None
+    spans: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if self.kind not in CONTRAST_KINDS:
+            raise ValueError(f"contrast kind must be one of {CONTRAST_KINDS}, got {self.kind!r}")
+
+        needs_argument = CONTRAST_ARGUMENT_REQUIRED[self.kind]
+        if needs_argument and not (isinstance(self.argument, str) and self.argument):
+            raise ValueError(
+                f"contrast {self.kind!r} names the other side and must carry an argument, "
+                f"got {self.argument!r}"
+            )
+        if not needs_argument and self.argument is not None:
+            raise ValueError(
+                f"contrast {self.kind!r} takes no argument, got {self.argument!r}; a name that "
+                f"means nothing to a reader is a name that will come to mean two things"
+            )
+        if self.kind == CONTRAST_ATTACKS_VS_BENIGN_CLASS and self.argument not in BENIGN_CLASSES:
+            raise ValueError(
+                f"contrast {self.kind!r} names {self.argument!r}, which is not one of "
+                f"{BENIGN_CLASSES}"
+            )
+
+        spans = frozenset(self.spans)
+        if not spans <= frozenset(CELL_AXES):
+            raise ValueError(f"contrast spans {sorted(spans - set(CELL_AXES))}, which are not axes")
+        required = REQUIRED_SPANS[self.kind]
+        if not required <= spans:
+            raise ValueError(
+                f"contrast {self.kind!r} must span {sorted(required)}; it declares {sorted(spans)}"
+            )
+        permitted = PERMITTED_SPANS[self.kind]
+        if not spans <= permitted:
+            raise ValueError(
+                f"contrast {self.kind!r} may span at most {sorted(permitted)}; it declares "
+                f"{sorted(spans - permitted)} as well, which is aggregation wearing a label"
+            )
+        object.__setattr__(self, "spans", spans)
+
+    @property
+    def name(self) -> str:
+        """How the contrast appears in a results file: `canon_on_vs_off`, `clean_vs_base64`."""
+        return self.kind if self.argument is None else f"{self.kind}_{self.argument}"
+
+    def as_json_object(self) -> dict[str, object]:
+        return {"kind": self.kind, "argument": self.argument, "spans": sorted(self.spans)}
+
+
+CHAIN_CLASSES_FOR_KEYS: Final[tuple[str, ...]] = ("bound", "held_out")
+"""The two halves of the table, spelled here because this module is a leaf.
+
+`corpus/matrix.py` declares the same pair as `CHAIN_CLASSES` and decides which one a chain belongs
+to; it imports this module, so this module cannot import it back. `tests/harness/test_aggregate.py`
+asserts the two tuples are equal, which is the comparison that makes a second spelling safe.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class CellKey:
+    """What a published number is about. The pooling rule is a precondition of it existing.
+
+    A protected axis is `None` on this key **only** when a `Contrast` declares the cell spans it.
+    That is the whole enforcement: `benign_class = None` on a benign cell with no contrast is not a
+    cell that gets flagged later, it is a value that cannot be written down.
+
+    `family` is on the key for a reason worth stating, because it looks redundant beside
+    `benign_class`. Without it, `benign_class = None` means both "this cell is about attacks, which
+    have no benign class" and "somebody averaged b_code into b_chat" -- the two readings this whole
+    story exists to keep apart. With it, the pair is checked exactly as `CorpusItem` and `ItemScore`
+    already check it: the third copy of one rule, deliberately the same rule.
+    """
+
+    baseline: str | None
+    dressing_chain: str | None
+    chain_class: str | None
+    window_policy: str | None
+    canon_on: bool | None
+    family: str | None
+    benign_class: str | None = None
+    contrast: Contrast | None = None
+
+    def __post_init__(self) -> None:
+        if self.contrast is not None and not isinstance(self.contrast, Contrast):
+            raise ValueError(f"contrast must be a Contrast, got {self.contrast!r}")
+        spans = self.contrast.spans if self.contrast is not None else frozenset()
+
+        for axis in CELL_AXES:
+            value = getattr(self, axis)
+            if axis in spans:
+                if value is not None:
+                    raise ValueError(
+                        f"{axis} is spanned by contrast {self.contrast.name!r} and must be null "
+                        f"on that cell, got {value!r}; the contrast is authoritative"
+                    )
+                continue
+            if axis == AXIS_BENIGN_CLASS:
+                continue  # decided below, as a pair with family
+            if axis == AXIS_CANON_ON:
+                if not isinstance(value, bool):
+                    raise ValueError(f"canon_on must be a bool, got {value!r}")
+                continue
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"{axis} must be a non-empty string, got {value!r}"
+                    + (
+                        f"; {axis} is one of AD-11's protected axes and a cell that leaves it "
+                        f"unnamed is a cell aggregated across it"
+                        if axis in PROTECTED_AXES
+                        else ""
+                    )
+                )
+
+        if AXIS_FAMILY not in spans:
+            if self.family not in FAMILIES:
+                raise ValueError(f"family must be one of {FAMILIES}, got {self.family!r}")
+            if self.family == FAMILY_ATTACK:
+                if self.benign_class is not None:
+                    raise ValueError(
+                        f"an attack cell has no benign class, got {self.benign_class!r}"
+                    )
+            elif AXIS_BENIGN_CLASS not in spans and self.benign_class not in BENIGN_CLASSES:
+                raise ValueError(
+                    f"a benign cell must name one of {BENIGN_CLASSES}, got {self.benign_class!r}; "
+                    f"a false-positive rate over both classes at once is the number FR3.1 exists "
+                    f"to prevent"
+                )
+
+        if self.chain_class is not None and self.chain_class not in CHAIN_CLASSES_FOR_KEYS:
+            raise ValueError(
+                f"chain_class must be one of {CHAIN_CLASSES_FOR_KEYS}, got {self.chain_class!r}"
+            )
+
+    def as_json_object(self) -> dict[str, object]:
+        payload: dict[str, object] = {axis: getattr(self, axis) for axis in CELL_AXES}
+        payload["contrast"] = None if self.contrast is None else self.contrast.name
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class Rate:
+    """An estimate: `k` of `n`, with the interval the method named in it produced.
+
+    The epic writes this type as `Rate(k, n, lo, hi)`. It carries an `Interval` instead, with `lo`
+    and `hi` as properties, because story 4.1 made an interval unable to exist without the name of
+    the method that produced it -- and flattening it to two floats here would undo that in the first
+    module to consume it, invisibly, since two floats look exactly like an interval.
+
+    `lo` and `hi` are fractions in [0,1]. Percentages are a rendering decision and a record that is
+    sometimes 0.83 and sometimes 83.0 is a record with two units.
+    """
+
+    k: int
+    n: int
+    interval: Interval
+    key: CellKey
+
+    def __post_init__(self) -> None:
+        _refuse_a_bad_tally(self.k, self.n)
+        if not isinstance(self.interval, Interval):
+            raise ValueError(f"interval must be an Interval, got {self.interval!r}")
+        if not 0.0 <= self.interval.lo <= self.interval.hi <= 1.0:
+            raise ValueError(
+                f"a rate's interval lies in [0,1] as a fraction, got {self.interval!r}"
+            )
+
+    @property
+    def lo(self) -> float:
+        return self.interval.lo
+
+    @property
+    def hi(self) -> float:
+        return self.interval.hi
+
+    @property
+    def value(self) -> float:
+        return self.k / self.n
+
+    def as_json_object(self) -> dict[str, object]:
+        return {
+            "kind": "rate",
+            "key": self.key.as_json_object(),
+            "k": self.k,
+            "n": self.n,
+            "value": self.value,
+            "interval": self.interval.as_json_object(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Count:
+    """A census: `k` of `n`, and **no interval, with no field to put one in**.
+
+    A ceiling hit is not a sample from a population of possible ceiling hits. It is a property of
+    the corpus as built, complete, and the corpus is not a draw this run could have made
+    differently. An interval beside it would invite a reader to generalise something that has no
+    population to generalise to.
+
+    Saying that in a docstring while leaving an `interval` field defaulting to `None` would last
+    until the first person who found the gap untidy. There is no field.
+    """
+
+    k: int
+    n: int
+    key: CellKey
+
+    def __post_init__(self) -> None:
+        _refuse_a_bad_tally(self.k, self.n)
+
+    def as_json_object(self) -> dict[str, object]:
+        return {"kind": "count", "key": self.key.as_json_object(), "k": self.k, "n": self.n}
+
+
+@dataclass(frozen=True, slots=True)
+class Auc:
+    """A threshold-free estimate: rank separation, with its structural-component interval."""
+
+    value: float
+    interval: Interval
+    n_positive: int
+    n_negative: int
+    key: CellKey
+
+    def __post_init__(self) -> None:
+        if isinstance(self.value, bool) or not isinstance(self.value, (int, float)):
+            raise ValueError(f"an AUC is a number, got {self.value!r}")
+        value = float(self.value)
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"an AUC lies in [0,1], got {value!r}")
+        object.__setattr__(self, "value", value)
+        if not isinstance(self.interval, Interval):
+            raise ValueError(f"interval must be an Interval, got {self.interval!r}")
+        for name in ("n_positive", "n_negative"):
+            count = getattr(self, name)
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise ValueError(f"{name} counts items and must be a positive int, got {count!r}")
+
+    def as_json_object(self) -> dict[str, object]:
+        return {
+            "kind": "auc",
+            "key": self.key.as_json_object(),
+            "value": self.value,
+            "interval": self.interval.as_json_object(),
+            "n_positive": self.n_positive,
+            "n_negative": self.n_negative,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Delta:
+    """A difference between two conditions, with an interval the difference produced.
+
+    **Never a subtraction of two `Rate`s.** Two rates measured on the same items are correlated, and
+    an interval assembled from theirs is wrong in the anti-conservative direction on exactly the
+    paired comparison N1 reads. The interval here comes from `stats.newcombe_paired_interval` over
+    the full 2x2, or from `stats.delta_auc` over the structural components -- and the method name
+    riding on the `Interval` is what tells a reader which.
+
+    The `key`'s spanned axis is `null` and its `contrast` says why. A `Delta` with no contrast is
+    refused here rather than left to mean whatever the reader assumes.
+    """
+
+    value: float
+    interval: Interval
+    key: CellKey
+
+    def __post_init__(self) -> None:
+        if isinstance(self.value, bool) or not isinstance(self.value, (int, float)):
+            raise ValueError(f"a delta is a number, got {self.value!r}")
+        object.__setattr__(self, "value", float(self.value))
+        if not isinstance(self.interval, Interval):
+            raise ValueError(f"interval must be an Interval, got {self.interval!r}")
+        if self.interval.method == WILSON_SCORE:
+            raise ValueError(
+                "a delta's interval is not a Wilson interval; Wilson estimates one proportion, and "
+                "a difference built from two of them inherits neither their pairing nor their "
+                "covariance"
+            )
+        if self.key.contrast is None:
+            raise ValueError(
+                "a Delta carries a contrast: without it, a difference between canon-on and "
+                "canon-off has two equally defensible homes and lands in different cells in two "
+                "compliant implementations"
+            )
+
+    @property
+    def contrast(self) -> Contrast:
+        """The comparison this cell is. Authoritative over the axis it spans, which reads null."""
+        assert self.key.contrast is not None  # refused at construction
+        return self.key.contrast
+
+    def as_json_object(self) -> dict[str, object]:
+        return {
+            "kind": "delta",
+            "key": self.key.as_json_object(),
+            "contrast": self.contrast.as_json_object(),
+            "value": self.value,
+            "interval": self.interval.as_json_object(),
+        }
+
+
+def _refuse_a_bad_tally(k: object, n: object) -> None:
+    for name, value in (("k", k), ("n", n)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} counts items and must be an int, got {value!r}")
+        if value < 0:
+            raise ValueError(f"{name} must not be negative, got {value!r}")
+    assert isinstance(k, int) and isinstance(n, int)
+    if n == 0:
+        raise ValueError("a cell over no items is not a cell; there is nothing it is about")
+    if k > n:
+        raise ValueError(f"k must not exceed n, got k={k} and n={n}")

@@ -24,9 +24,13 @@ from nbc.corpus.matrix import (
     CLEAN_CHAIN_NAME,
     CORPUS_CLASSES,
     DECODED_LINKS,
+    HELDOUT_CHAINS,
+    PAYLOAD_ID_HEX,
     CorpusMatrixInvalid,
     chain_problems,
     encoding_depth,
+    item_id,
+    parse_item_id,
     render_chain,
     validate,
 )
@@ -330,3 +334,67 @@ def test_the_abort_refuses_to_be_raised_with_no_problem() -> None:
     """An abort that names nothing is an abort a reader cannot act on."""
     with pytest.raises(ValueError):
         raise CorpusMatrixInvalid()
+
+
+# --- the id, and its inverse ----------------------------------------------------------------------
+
+A_PAYLOAD = "0" * PAYLOAD_ID_HEX
+"""A payload of the right shape. Its value never matters; its shape is what `parse_item_id` checks."""
+
+
+def every_declared_chain() -> list[tuple[str, ...]]:
+    """Every chain either registry declares, so a chain added to one is covered without an edit."""
+    return [
+        tuple(chain)
+        for registry in (CHAINS, HELDOUT_CHAINS)
+        for chains in registry.values()
+        for chain in chains
+    ]
+
+
+@pytest.mark.parametrize("chain", every_declared_chain())
+def test_an_id_parses_back_into_the_chain_it_was_built_from(chain: tuple[str, ...]) -> None:
+    """Story 4.2 commits no dressing chain on a score, so the table's dressing axis comes back out
+    of the id. That could be a split on `::` and `+`; it is the declared inverse instead, and this
+    is the round trip that makes the pair a pair.
+
+    Parametrised over the registries rather than over a hand-written list, so a chain added to
+    either one is covered without anybody remembering to extend this test.
+
+    The limit, declared: both sides read `CHAIN_SEPARATOR` and `ID_SEPARATOR`, so a round trip
+    cannot notice a wrong separator -- it would be wrong symmetrically. What does notice is the
+    validation, which checks the recovered links against the registries and the payload against
+    `PAYLOAD_ID_HEX`; those are the sides that come from somewhere else.
+    """
+    assert parse_item_id(item_id(A_PAYLOAD, chain)) == (A_PAYLOAD, chain)
+
+
+def test_the_clean_chain_round_trips_to_the_empty_chain() -> None:
+    """`render_chain` writes the empty chain as the literal `clean`, so the inverse has to read it
+    back as empty rather than as a one-link chain named `clean`."""
+    rendered = item_id(A_PAYLOAD, CLEAN_CHAIN)
+    assert rendered.endswith(CLEAN_CHAIN_NAME)
+    assert parse_item_id(rendered) == (A_PAYLOAD, ())
+
+
+@pytest.mark.parametrize(
+    "value,why",
+    [
+        ("no-separator-at-all", "an id with no separator is not an id"),
+        (f"a::b::{CLEAN_CHAIN_NAME}", "two separators leave the payload ambiguous"),
+        (f"NOTHEX{'0' * (PAYLOAD_ID_HEX - 6)}::{CLEAN_CHAIN_NAME}", "a payload that is not hex"),
+        (f"{'0' * (PAYLOAD_ID_HEX - 1)}::{CLEAN_CHAIN_NAME}", "a payload one character short"),
+        (f"{A_PAYLOAD}::", "an id that names no chain, not even clean"),
+        (f"{A_PAYLOAD}::a-dressing-nobody-declared", "a chain no registry declares"),
+    ],
+)
+def test_a_malformed_id_is_refused_rather_than_split(value: str, why: str) -> None:
+    """Each shape separately, because a parser that caught only the first would let the rest
+    through and would hand the table a dressing axis nobody declared."""
+    with pytest.raises(CorpusMatrixInvalid):
+        parse_item_id(value)
+
+
+def test_a_non_string_id_is_refused() -> None:
+    with pytest.raises(CorpusMatrixInvalid):
+        parse_item_id(None)  # type: ignore[arg-type]

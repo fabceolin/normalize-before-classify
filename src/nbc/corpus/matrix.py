@@ -59,6 +59,7 @@ __all__ = [
     "encoding_depth",
     "id_collisions",
     "item_id",
+    "parse_item_id",
     "payload_id",
     "render_chain",
     "validate",
@@ -352,6 +353,65 @@ def chain_class(
         f"chain_class is part of the cell key (AD-2) and no function aggregates across it "
         f"(AD-11), so a chain belonging to neither half has no cell to be reported in"
     )
+
+
+def parse_item_id(
+    value: str,
+    chains: Mapping[str, Sequence[Sequence[str]]] = CHAINS,
+    heldout: Mapping[str, Sequence[Sequence[str]]] = HELDOUT_CHAINS,
+) -> tuple[str, tuple[str, ...]]:
+    """The inverse of `item_id`: recover the payload id and the full chain from an id.
+
+    Story 4.2 commits one score per (item, baseline, condition) and `ItemScore` carries no dressing
+    chain, so the dressing axis of the table has to come back out of the id. That could be a split
+    on `::` and `+`, and this repository has a name for what goes wrong when a structure is
+    recovered by matching text. So it lives here, beside its inverse, and it **validates**: exactly
+    one separator, a payload of `PAYLOAD_ID_HEX` lowercase hex characters, and links every one of
+    which some registry declares.
+
+    What makes the inverse well defined is already recorded above: `validate` refuses a dressing
+    name containing `CHAIN_SEPARATOR`, so a rendered chain splits back into the links it was built
+    from and cannot be two different chains at once. This function consumes that guarantee rather
+    than assuming it, by checking the links it recovers against the registries.
+
+    `clean` round-trips to the empty chain, which is what `render_chain` produced for it.
+    """
+    if not isinstance(value, str):
+        raise CorpusMatrixInvalid(f"an item id is a string, got {value!r}")
+
+    parts = value.split(ID_SEPARATOR)
+    if len(parts) != 2:
+        raise CorpusMatrixInvalid(
+            f"item id {value!r} does not carry exactly one {ID_SEPARATOR!r}; it has "
+            f"{len(parts) - 1}, and an id is <payload_id>{ID_SEPARATOR}<chain>"
+        )
+    payload, rendered = parts
+
+    if len(payload) != PAYLOAD_ID_HEX or any(
+        character not in "0123456789abcdef" for character in payload
+    ):
+        raise CorpusMatrixInvalid(
+            f"item id {value!r} has payload {payload!r}, which is not "
+            f"{PAYLOAD_ID_HEX} lowercase hex characters of SHA-256"
+        )
+
+    if not rendered:
+        raise CorpusMatrixInvalid(f"item id {value!r} names no chain, not even {CLEAN_CHAIN_NAME!r}")
+
+    chain: tuple[str, ...] = () if rendered == CLEAN_CHAIN_NAME else tuple(
+        rendered.split(CHAIN_SEPARATOR)
+    )
+
+    declared = declared_links(chains) | declared_links(heldout)
+    unknown = [link for link in chain if link not in declared]
+    if unknown:
+        raise CorpusMatrixInvalid(
+            f"item id {value!r} names {unknown!r}, which no registry declares; the declared links "
+            f"are {sorted(declared)}. A cell keyed on a dressing nobody declared is a column that "
+            f"came out of a file rather than out of AD-20's one constant"
+        )
+
+    return payload, chain
 
 
 def encoding_depth(chain: Sequence[str]) -> int:
