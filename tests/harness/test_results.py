@@ -21,6 +21,9 @@ from nbc.canon.pipeline import PIPELINE
 from nbc.corpus.matrix import CHAIN_CLASS_BOUND, CHAIN_CLASS_HELD_OUT, CLEAN_CHAIN_NAME
 from nbc.errors import declared_exit_codes
 from nbc.harness.results import (
+    PROFILE_FULL,
+    PROFILE_SMOKE,
+    PROFILES,
     RESULT_KEYS,
     SCHEMA_VERSION,
     STEPS,
@@ -37,6 +40,7 @@ from nbc.harness.results import (
     completeness_problems,
     refuse_an_incomplete_table,
     render_results,
+    smoke_sample,
 )
 from nbc.schema import (
     AUC_STRUCTURAL,
@@ -439,3 +443,153 @@ def test_the_trace_file_is_gitignored() -> None:
 
     ignored = (Path(__file__).resolve().parents[2] / ".gitignore").read_text(encoding="utf-8")
     assert TRACES_FILENAME in ignored
+
+
+# --- the smoke profile ------------------------------------------------------------------------------
+
+
+def a_corpus_item(index: int, *, benign_class: str | None = None, chain: tuple[str, ...] = ()):  # type: ignore[no-untyped-def]
+    from nbc.corpus.matrix import item_id
+    from nbc.schema import ATTACK, BENIGN, CorpusItem
+
+    attack = benign_class is None
+    return CorpusItem(
+        id=item_id(f"{index:016x}", chain),
+        source="test",
+        family=FAMILY_ATTACK if attack else FAMILY_BENIGN,
+        benign_class=None if attack else benign_class,
+        dressing=chain,
+        text="x",
+        label=ATTACK if attack else BENIGN,
+    )
+
+
+def a_corpus() -> list[object]:
+    """Two families, both benign classes and two chains -- every group the assertion demands."""
+    rows: list[object] = [a_corpus_item(i) for i in range(8)]
+    rows += [a_corpus_item(100 + i, benign_class=BENIGN_CLASSES[0]) for i in range(8)]
+    rows += [
+        a_corpus_item(200 + i, benign_class=BENIGN_CLASSES[1], chain=("base64",))
+        for i in range(8)
+    ]
+    return rows
+
+
+def test_the_smoke_sample_covers_every_group() -> None:
+    """Per cell and not a total, because the smoke run executes the same completeness assertion: a
+    total drawn from the whole corpus can miss a class or a chain and abort at that assertion, which
+    is a gate going red because of the sampling rather than because of the code."""
+    sampled = smoke_sample(a_corpus(), 3)
+    groups = {(row.family, row.benign_class, row.dressing) for row in sampled}  # type: ignore[attr-defined]
+    assert len(groups) == 3
+    assert len(sampled) == 9
+
+
+def test_the_smoke_sample_does_not_depend_on_how_the_corpus_was_read() -> None:
+    """Content-derived, the same argument story 4.2 made about shard membership: a sample taken by
+    row position would score a different set on a re-read and two smoke runs would not compare."""
+    forward = [row.id for row in smoke_sample(a_corpus(), 3)]  # type: ignore[attr-defined]
+    backward = [row.id for row in smoke_sample(list(reversed(a_corpus())), 3)]  # type: ignore[attr-defined]
+    assert forward == backward
+
+
+def test_a_group_smaller_than_the_sample_contributes_all_of_it() -> None:
+    """Not an error: raising would make a smoke run's success depend on the corpus being large
+    enough in every cell, which is a different requirement from the one being checked."""
+    sampled = smoke_sample(a_corpus(), 100)
+    assert len(sampled) == len(a_corpus())
+
+
+def test_a_sample_of_nothing_is_refused() -> None:
+    with pytest.raises(ResultsIncomplete) as caught:
+        smoke_sample(a_corpus(), 0)
+    assert "not a sample" in str(caught.value)
+
+
+def test_the_profile_vocabulary_is_the_two() -> None:
+    assert PROFILES == (PROFILE_FULL, PROFILE_SMOKE)
+
+
+def test_the_declared_smoke_size_is_a_positive_int() -> None:
+    """Its own named key in the pins file, so a run that says it was a smoke run says how small a
+    one -- checked against the committed declaration rather than a fixture."""
+    from nbc.pins import load_pins
+
+    smoke = load_pins(None).smoke
+    assert isinstance(smoke.items_per_cell, int)
+    assert smoke.items_per_cell >= 1
+    assert smoke.as_run_fields() == {"items_per_cell": smoke.items_per_cell}
+
+
+def test_a_smoke_run_refuses_the_published_results_directory() -> None:
+    """A smoke table is structurally identical to the published one with a small n as the only
+    tell, so the command refuses to write one over the other."""
+    from nbc.harness.run import full_run
+    from nbc.pins import load_pins
+
+    with pytest.raises(ResultsIncomplete) as caught:
+        full_run(load_pins(None), profile=PROFILE_SMOKE)
+    assert "may not write into the repository" in str(caught.value)
+
+
+def test_a_profile_outside_the_vocabulary_is_refused() -> None:
+    from nbc.harness.run import full_run
+    from nbc.pins import load_pins
+
+    with pytest.raises(ResultsIncomplete) as caught:
+        full_run(load_pins(None), profile="quick")
+    assert "must be one of" in str(caught.value)
+
+
+def test_a_full_run_into_the_published_root_is_not_refused_for_that_reason(tmp_path: Path) -> None:
+    """The input that keeps the smoke guard from being a guard on every run: a full profile writing
+    to the repository is exactly what a published run does."""
+    from nbc.harness.run import full_run
+    from nbc.pins import load_pins
+
+    with pytest.raises(ResultsIncomplete) as caught:
+        full_run(load_pins(None), profile=PROFILE_FULL, root=tmp_path)
+    assert "may not write into the repository" not in str(caught.value)
+
+
+def test_all_three_corpus_reads_apply_the_profile() -> None:
+    """The defect the tag workflow found: `--profile` reached `full_run` and not `score_shard`, so
+    a smoke job would have scored the entire corpus -- about eighty-five hours on a runner -- and
+    then failed the merge, which computes its demand set over whatever corpus it was handed.
+
+    Read from the syntax tree: every call to `read_corpus` in the entrypoint is followed by the one
+    helper that applies the profile, so a fourth pass added later cannot quietly read the whole
+    corpus.
+    """
+    import ast
+
+    source = (SRC / "nbc" / "harness" / "run.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    reads = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "read_corpus"
+    ]
+    applies = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_items_for_profile"
+    ]
+    assert len(reads) >= 3, reads
+    # The timing subcommand reads the corpus too and measures the whole of it on purpose, so the
+    # count is not required to match; what is required is that no read is left without one nearby.
+    for line in reads:
+        assert any(abs(line - other) <= 3 for other in applies) or _is_the_timing_pass(source, line), (
+            f"run.py:{line} reads the corpus without applying the profile"
+        )
+
+
+def _is_the_timing_pass(source: str, line: int) -> bool:
+    """`timing_pass` measures the whole corpus deliberately: a cost per document is a property of
+    the layer, not of how many documents a profile chose to score."""
+    before = "\n".join(source.splitlines()[:line])
+    return before.rfind("def timing_pass(") > before.rfind("def full_run(")

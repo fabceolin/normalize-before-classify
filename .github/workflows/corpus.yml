@@ -1,0 +1,139 @@
+# The corpus determinism proof, on a tag, because that is where its cost is proportionate.
+#
+# "The corpus is reproducible from the pins" is the load-bearing sentence under AD-1 and under the
+# whole decision to commit the corpus rather than have every reader rebuild it. Nothing had ever
+# rebuilt it and compared.
+#
+# WHY THIS IS NOT IN ci.yml, which is where story 4.8's criterion puts it. That workflow checks out
+# with `lfs: false` on all three jobs, and the reason is a measurement recorded there: the objects
+# cost about 130 MB per job per push against a 1 GB monthly allowance, billed to the repository
+# owner, so three jobs would spend the month in under three pushes. Its comment already names the
+# right home for a job that does need the corpus -- "a tag, not every push" -- and this is that job.
+#
+# The cost of the split, stated rather than left to be discovered: a corpus that stopped rebuilding
+# identically is caught at the next tag and not at the next push. That is the price of not spending
+# the month's bandwidth on every commit, and it is paid knowingly.
+#
+# This workflow never writes the published artifacts either. The rebuild goes into a scratch root
+# and the comparison is `cmp`; the dirty-tree gate at the end is what proves the working tree came
+# out as it went in.
+
+name: corpus
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual, so the determinism claim can be checked without cutting a tag for it.
+  workflow_dispatch:
+
+env:
+  UV_VERSION: "0.12.5"
+
+jobs:
+  rebuild:
+    name: the corpus rebuilds identically
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # ON here, and only here. This is the one job whose subject is the corpus itself, so it
+          # is the one job that may spend the bandwidth. Every job in ci.yml stays off.
+          lfs: true
+
+      - name: Install the pinned uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Sync the frozen environment
+        run: uv sync --frozen --extra build --group dev
+
+      - name: Prove the checkout actually fetched the objects
+        # Without this the next step could pass over LFS POINTERS -- 134-byte text files that
+        # `verify-corpus` would refuse for a different reason, or that a rebuild would "match" if
+        # anybody ever compared pointers to pointers. A pointer is a few hundred bytes; the corpus
+        # is over a hundred megabytes, so the size is the tell.
+        run: |
+          for name in data/*.jsonl; do
+            bytes=$(wc -c < "$name")
+            echo "$name: $bytes bytes"
+            if [ "$bytes" -lt 100000 ]; then
+              echo "::error::$name is $bytes bytes, which is an LFS pointer rather than the file"
+              exit 1
+            fi
+          done
+
+      - name: Verify the committed corpus against its manifest
+        # Exit 0 is the corpus on disk being the one the manifest describes. This is the step
+        # ci.yml cannot run, and asserting exit 22 there is the shape of its absence.
+        run: uv run python -m nbc.corpus.build verify-corpus
+
+      - name: Rebuild the corpus into a scratch root and diff it
+        # AD-1's determinism claim, as a gate. The rebuild writes nowhere near the working tree, and
+        # `cmp` is byte-for-byte: a rebuild that produced the same rows in a different order is a
+        # different file and this says so, which is the point -- the stable order is part of the
+        # claim, not an implementation detail.
+        run: |
+          scratch="$RUNNER_TEMP/rebuild"
+          mkdir -p "$scratch"
+          uv run python -m nbc.corpus.build --root "$scratch" build-corpus
+          for name in data/*.jsonl; do
+            base=$(basename "$name")
+            if ! cmp -s "$name" "$scratch/data/$base"; then
+              echo "::error::$base differs from its rebuild; the corpus is not reproducible from the pins"
+              cmp "$name" "$scratch/data/$base" || true
+              exit 1
+            fi
+            echo "$base: identical"
+          done
+
+      - name: Run the command at the declared smoke profile, into a scratch root
+        # The whole entrypoint, end to end, on a corpus small enough to finish on a runner. The
+        # sample size is `smoke.items_per_cell` in pins.toml -- a declaration, not a flag somebody
+        # picked -- and `--root` points away from the repository, which the command also refuses to
+        # do on its own: a smoke table is structurally identical to the published one with a small
+        # n as the only tell.
+        run: |
+          scratch="$RUNNER_TEMP/smoke"
+          mkdir -p "$scratch"
+          cp pins.toml "$scratch/pins.toml"
+          mkdir -p "$scratch/data"
+          cp data/*.jsonl data/manifest.json data/ATTRIBUTION.md "$scratch/data/" 2>/dev/null || true
+          set +e
+          uv run python -m nbc.harness.run --root "$scratch" --profile smoke --shards 1 score-shard --shard 0
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the smoke scoring pass exited $status"
+            exit 1
+          fi
+          uv run python -m nbc.harness.run --root "$scratch" --profile smoke all
+
+      - name: Prove the smoke run wrote nothing into the published paths
+        # The gate the criterion asks for by name. A smoke run that overwrote results/results.json
+        # would replace the headline table with a sample of it, and the small n would be the only
+        # tell a reader had.
+        run: |
+          test ! -e results/results.json || {
+            echo "::error::the smoke run wrote the published results file"; exit 1; }
+          test -f "$RUNNER_TEMP/smoke/results/results.json" || {
+            echo "::error::the smoke run produced no results file in its own root"; exit 1; }
+          uv run python - <<'PY'
+          import json, os, pathlib
+          payload = json.loads(
+              (pathlib.Path(os.environ["RUNNER_TEMP"]) / "smoke/results/results.json").read_text()
+          )
+          assert tuple(payload) == ("schema_version", "run", "cells", "verdict"), tuple(payload)
+          assert payload["run"]["profile"] == "smoke", payload["run"]["profile"]
+          assert payload["run"]["profile_items_per_cell"] >= 1
+          print("profile:", payload["run"]["profile"], payload["run"]["profile_items_per_cell"])
+          PY
+
+      - name: Refuse a dirty tree
+        # Untracked files count: `git diff` cannot see a file that did not exist before the run,
+        # which is the shape a stray write actually takes.
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain)" || {
+            echo "::error::the run left files behind:"; git status --porcelain; exit 1; }

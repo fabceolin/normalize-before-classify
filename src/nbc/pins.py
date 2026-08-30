@@ -101,6 +101,7 @@ __all__ = [
     "BenignCodeFrame",
     "BenignCodeRepository",
     "BenignFrame",
+    "SmokeProfile",
     "Acceptance",
     "ConfirmatoryCell",
     "FRAME_ID_FIELD",
@@ -1192,6 +1193,26 @@ class ConfirmatoryCell:
 
 
 @dataclass(frozen=True, slots=True)
+class SmokeProfile:
+    """How small the smoke run's corpus is, declared rather than passed.
+
+    A smoke run produces a table that is structurally identical to the published one, with a small
+    `n` as the only tell. Declaring the size here means a run that says it was a smoke run also says
+    how small a one, and `run.profile` in the results file carries both.
+
+    Per cell rather than a total, and the reason is that the smoke run executes the same
+    completeness assertion as the full one: a total drawn from the whole corpus can miss a benign
+    class or a chain and abort at that assertion, which is a gate going red because of the sampling
+    rather than because of the code.
+    """
+
+    items_per_cell: int
+
+    def as_run_fields(self) -> dict[str, object]:
+        return {"items_per_cell": self.items_per_cell}
+
+
+@dataclass(frozen=True, slots=True)
 class BenignFrame:
     """FR5.1's sampling frame: fixed, hashed and declared before anything is measured.
 
@@ -1370,6 +1391,7 @@ class Pins:
     attack_datasets: tuple[AttackDataset, ...]
     exclusion_sources: tuple[ExclusionSource, ...]
     benign_frame: BenignFrame
+    smoke: SmokeProfile
     path: Path
 
     def remote_artifacts(self) -> tuple[RemoteArtifact, ...]:
@@ -2767,6 +2789,15 @@ def load_pins(root: Path | str | None = None) -> Pins:
     )
     benign_frame = _read_benign_frame(reader, document, baselines)
 
+    smoke_table = reader.table(document, "smoke", "")
+    smoke_items = reader.integer(smoke_table, "items_per_cell", "smoke")
+    if smoke_items < 1:
+        reader.note(
+            f"smoke.items_per_cell is {smoke_items}; a sample of nothing is not a sample, and a "
+            f"smoke run at zero would pass every gate by having no rows left to fail one"
+        )
+    smoke = SmokeProfile(items_per_cell=max(smoke_items, 1))
+
     _note_duplicates(reader, "baseline", [b.key for b in baselines], "key")
     _note_duplicates(reader, "attack_dataset", [d.key for d in attack_datasets], "key")
     _note_duplicates(reader, "exclusion_source", [s.key for s in exclusion_sources], "key")
@@ -2899,6 +2930,7 @@ def load_pins(root: Path | str | None = None) -> Pins:
         attack_datasets=attack_datasets,
         exclusion_sources=exclusion_sources,
         benign_frame=benign_frame,
+        smoke=smoke,
         path=path,
     )
 

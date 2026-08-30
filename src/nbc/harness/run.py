@@ -69,6 +69,9 @@ from nbc.corpus.manifest import corpus_presence
 from nbc.harness.aggregate import cells as aggregate_cells
 from nbc.harness.aggregate import read_scores, read_traces
 from nbc.harness.results import (
+    PROFILE_FULL,
+    PROFILE_SMOKE,
+    PROFILES,
     RESULT_KEYS,
     STEP_AGGREGATE,
     STEP_BUILD,
@@ -82,6 +85,7 @@ from nbc.harness.results import (
     completeness_problems,
     refuse_an_incomplete_table,
     render_results,
+    smoke_sample,
 )
 from nbc.harness.summary import (
     REJECTED_JUSTIFICATIONS,
@@ -310,6 +314,7 @@ def score_shard(
     shard: int,
     root: str | Path | None = None,
     opener: BaselineOpener | None = None,
+    profile: str = PROFILE_FULL,
 ) -> dict[str, object]:
     """Score every key this shard owns that is not already scored, and report what it did.
 
@@ -319,7 +324,8 @@ def score_shard(
     a different split therefore aborts instead of producing one file with two provenances in it.
     """
     _check_split(shards, shard)
-    manifest, items = read_corpus(pins, root)
+    manifest, all_items = read_corpus(pins, root)
+    items = _items_for_profile(all_items, pins, profile)
     baseline_keys = [baseline.key for baseline in pins.baselines]
     demanded = _demanded(items, baseline_keys, shards=shards, shard=shard)
     mine = [key for key in expected_keys(items, baseline_keys) if shard_of(key, shards) == shard]
@@ -450,7 +456,7 @@ def score_shard(
 
 
 def merge_shards(
-    pins: Pins, *, shards: int, root: str | Path | None = None
+    pins: Pins, *, shards: int, root: str | Path | None = None, profile: str = PROFILE_FULL
 ) -> dict[str, object]:
     """Verify the shard files add up to one pass over the corpus and write the merged scores file.
 
@@ -458,7 +464,8 @@ def merge_shards(
     the shape a downstream story reads without complaint.
     """
     _check_split(shards, 0)
-    manifest, items = read_corpus(pins, root)
+    manifest, all_items = read_corpus(pins, root)
+    items = _items_for_profile(all_items, pins, profile)
     baseline_keys = [baseline.key for baseline in pins.baselines]
     expected = expected_keys(items, baseline_keys)
 
@@ -582,6 +589,7 @@ def full_run(
     *,
     root: str | Path | None = None,
     shards: int = 1,
+    profile: str = PROFILE_FULL,
 ) -> dict[str, object]:
     """The six steps, in the declared order, ending at `results/results.json`.
 
@@ -602,6 +610,19 @@ def full_run(
     accumulated. Verified while writing this: tracing changes only whether edits are recorded, not
     the canonical text, the depth, or the ceiling flag, so no published score moves either way.
     """
+    if profile not in PROFILES:
+        raise ResultsIncomplete(
+            f"profile must be one of {PROFILES}, got {profile!r}; a run whose profile is not one of "
+            f"the two cannot say which run produced its table"
+        )
+    if profile == PROFILE_SMOKE and _is_the_published_root(root):
+        raise ResultsIncomplete(
+            "a smoke run may not write into the repository's own results directory. Its table is "
+            "structurally identical to the published one with a small n as the only tell, so "
+            "overwriting the published file would replace the headline table with a sample of it. "
+            "Pass --root pointing somewhere else"
+        )
+
     started = time.perf_counter_ns()
     steps: list[str] = []
 
@@ -632,11 +653,12 @@ def full_run(
     steps.append(STEP_BUILD)
 
     # (3). The scoring pass, through the same function the sharded CLI calls.
-    merge_shards(pins, shards=shards, root=root)
+    merge_shards(pins, shards=shards, root=root, profile=profile)
     steps.append(STEP_MEASURE)
 
     # (4). The dedicated cost pass, which also streams the trace file out.
-    manifest, items = read_corpus(pins, root)
+    manifest, all_items = read_corpus(pins, root)
+    items = _items_for_profile(all_items, pins, profile)
     context = default_context()
     baselines = open_baselines(pins)
     traces_at = traces_path(root)
@@ -704,6 +726,11 @@ def full_run(
                     "findings": [limit.as_json_object() for limit in limits],
                 },
                 "interval_methods": list(INTERVAL_METHODS),
+                "profile": profile,
+                "profile_items_per_cell": (
+                    None if profile == PROFILE_FULL else pins.smoke.items_per_cell
+                ),
+                "profile_items": len(items),
                 "steps": steps + [STEP_AGGREGATE],
                 "total_wall_ns": time.perf_counter_ns() - started,
             }
@@ -722,6 +749,40 @@ def full_run(
         "findings": len(limits),
         "steps": steps,
     }
+
+
+def _items_for_profile(items: Sequence[CorpusItem], pins: Pins, profile: str) -> tuple[CorpusItem, ...]:
+    """The corpus a run at `profile` measures over.
+
+    In one place because THREE passes read the corpus -- the shard walk, the merge and the full run
+    -- and a profile applied to some of them is worse than a profile applied to none: the merge
+    would compute a demand set over the whole corpus and refuse a shard file that scored the sample,
+    naming a coverage failure that is really a disagreement about what the corpus is.
+
+    Found by writing the tag workflow: `--profile` reached `full_run` and not `score_shard`, so the
+    smoke job would have scored the entire corpus -- about eighty-five hours on a runner -- and then
+    failed the merge.
+    """
+    if profile not in PROFILES:
+        raise ResultsIncomplete(
+            f"profile must be one of {PROFILES}, got {profile!r}; a run whose profile is not one of "
+            f"the two cannot say which run produced its table"
+        )
+    if profile == PROFILE_FULL:
+        return tuple(items)
+    return tuple(smoke_sample(items, pins.smoke.items_per_cell))  # type: ignore[arg-type]
+
+
+def _is_the_published_root(root: str | Path | None) -> bool:
+    """Whether this run would write into the repository's own results directory.
+
+    `None` means the repository root, which is what every published run uses. A path that resolves
+    to the same directory is the same thing spelled differently, so the comparison is on the
+    resolved directory rather than on the argument.
+    """
+    if root is None:
+        return True
+    return results_directory(root).resolve() == results_directory(None).resolve()
 
 
 def _required_window_policies(pins: Pins) -> dict[str, list[str]]:
@@ -829,6 +890,17 @@ def main(argv: list[str] | None = None) -> int:
             f"{RESULTS_DIRNAME}/{SCORES_FILENAME}. Writes nothing if any check fails"
         ),
     )
+    parser.add_argument(
+        "--profile",
+        choices=list(PROFILES),
+        default=PROFILE_FULL,
+        help=(
+            "which run this is. `smoke` samples the declared number of items per cell from "
+            "pins.toml and refuses to write into the repository's own results directory, because "
+            "its table is structurally identical to the published one with a small n as the only "
+            "tell"
+        ),
+    )
     subcommands.add_parser(
         "all",
         help=(
@@ -866,11 +938,19 @@ def main(argv: list[str] | None = None) -> int:
         platform.preflight()
         pins = load_pins(args.root)
         if args.subcommand == "score-shard":
-            report = score_shard(pins, shards=args.shards, shard=args.shard, root=args.root)
+            report = score_shard(
+                pins,
+                shards=args.shards,
+                shard=args.shard,
+                root=args.root,
+                profile=args.profile,
+            )
         elif args.subcommand == "timing":
             report = timing_pass(pins, root=args.root)
         elif args.subcommand == "all":
-            report = full_run(pins, shards=args.shards or 1, root=args.root)
+            report = full_run(
+                pins, shards=args.shards or 1, root=args.root, profile=args.profile
+            )
         elif args.subcommand == "report":
             raise ResultsIncomplete(
                 "the renderer is story 5.1 -- 'the table is a pure function of the results file' -- "
@@ -880,7 +960,9 @@ def main(argv: list[str] | None = None) -> int:
                 "reader who did not run the command"
             )
         else:
-            report = merge_shards(pins, shards=args.shards, root=args.root)
+            report = merge_shards(
+                pins, shards=args.shards, root=args.root, profile=args.profile
+            )
     except NbcError as abort:
         print(abort, file=sys.stderr)
         return exit_code_for(abort)

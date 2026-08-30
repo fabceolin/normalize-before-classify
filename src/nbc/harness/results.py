@@ -41,6 +41,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final
 
+from nbc.corpus.matrix import parse_item_id, render_chain
 from nbc.errors import NbcError
 from nbc.schema import (
     BENIGN_CLASSES,
@@ -55,6 +56,9 @@ from nbc.schema import (
 )
 
 __all__ = [
+    "PROFILES",
+    "PROFILE_FULL",
+    "PROFILE_SMOKE",
     "RESULT_KEYS",
     "SCHEMA_VERSION",
     "STEPS",
@@ -62,7 +66,9 @@ __all__ = [
     "ResultsIncomplete",
     "RunBlock",
     "completeness_problems",
+    "refuse_an_incomplete_table",
     "render_results",
+    "smoke_sample",
 ]
 
 SCHEMA_VERSION: Final[int] = 1
@@ -109,6 +115,67 @@ half-new rows while the manifest still describes the old ones.
 *Time after measure and before aggregate* -- the timing pass is N3's right-hand side, and a run that
 aggregated first would evaluate a condition against a number it had not taken yet.
 """
+
+
+PROFILE_FULL: Final[str] = "full"
+PROFILE_SMOKE: Final[str] = "smoke"
+PROFILES: Final[tuple[str, ...]] = (PROFILE_FULL, PROFILE_SMOKE)
+"""Which run produced a table, closed.
+
+A smoke run at a small sample produces a table that is **structurally identical** to the published
+one -- same columns, same intervals, same verdicts -- with a small `n` as the only tell. `profile`
+goes into the run block so the README's claim about which run produced the table is generated from
+the file rather than asserted beside it.
+"""
+
+
+def smoke_sample(items: Sequence[object], items_per_cell: int) -> tuple[object, ...]:
+    """The first `items_per_cell` items of every cell group, by item id.
+
+    **Per cell, not a total**, because a smoke run executes the same completeness assertion as a
+    full one: a total drawn from the whole corpus can miss a benign class or a chain and abort at
+    that assertion, which is a gate going red because of the sampling rather than because of the
+    code.
+
+    **Sorted by item id, which is content-derived**, so the sample is a function of the corpus and
+    not of how the file was read. The same argument story 4.2 made about shard membership: a sample
+    taken by row position would score a different set on a re-read, and two smoke runs would not be
+    comparable.
+
+    A group smaller than the size contributes all of it. That is not a special case to tolerate --
+    it is the honest answer, and raising instead would make a smoke run's success depend on the
+    corpus being large enough in every cell.
+    """
+    if items_per_cell < 1:
+        raise ResultsIncomplete(
+            f"a smoke sample of {items_per_cell} items per cell is not a sample; a run with no "
+            f"rows passes every gate by having nothing left to fail one"
+        )
+
+    groups: dict[tuple[str, str, str], list[object]] = {}
+    for item in items:
+        groups.setdefault(_sample_group(item), []).append(item)
+
+    sampled: list[object] = []
+    for _, members in sorted(groups.items()):
+        members.sort(key=lambda row: str(getattr(row, "id", "")))
+        sampled.extend(members[:items_per_cell])
+    return tuple(sampled)
+
+
+def _sample_group(item: object) -> tuple[str, str, str]:
+    """What the completeness assertion demands be represented: a family, a class, and a chain.
+
+    The chain comes off the item id through `matrix.parse_item_id`, the declared inverse, rather
+    than off a field -- a `CorpusItem` carries its dressing, but reading it here would make the
+    sampler and the aggregator disagree the day one of them changed which they trusted.
+    """
+    _, chain = parse_item_id(str(getattr(item, "id", "")))
+    return (
+        str(getattr(item, "family", "")),
+        str(getattr(item, "benign_class", "")),
+        render_chain(chain),
+    )
 
 
 class ResultsIncomplete(NbcError, exit_code=34):

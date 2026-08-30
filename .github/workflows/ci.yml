@@ -169,6 +169,51 @@ jobs:
             exit 1
           fi
 
+      - name: Prove the full command stops at the right step
+        # Story 4.7's ordering, proved by WHICH abort arrives rather than by reading the function.
+        # With no corpus present the run reaches step 2 and stops there: 34 is ResultsIncomplete
+        # telling the reader to build one. 22 would mean it got to the corpus read without noticing
+        # the absence, and 2 is a usage error, which is what a typo in this very step produces.
+        #
+        # A run that actually measures needs a corpus, and that belongs on corpus.yml beside the
+        # rebuild -- for the same bandwidth reason every checkout here sets `lfs: false`.
+        run: |
+          set +e
+          uv run python -m nbc.harness.run all
+          status=$?
+          set -e
+          if [ "$status" -ne 34 ]; then
+            echo "::error::expected exit 34 (ResultsIncomplete) from an absent corpus, got $status"
+            exit 1
+          fi
+
+      - name: Prove a smoke run refuses the published results directory
+        # A smoke table is structurally identical to the published one with a small n as the only
+        # tell, so the command refuses to write one over the other. 34 is ResultsIncomplete; 2 is a
+        # usage error.
+        run: |
+          set +e
+          uv run python -m nbc.harness.run --profile smoke all
+          status=$?
+          set -e
+          if [ "$status" -ne 34 ]; then
+            echo "::error::expected exit 34 when a smoke run targets the published root, got $status"
+            exit 1
+          fi
+
+      - name: Prove the profile vocabulary is closed
+        # A third profile would produce a table whose provenance the results file cannot state.
+        # argparse refuses an undeclared choice with exit 2.
+        run: |
+          set +e
+          uv run python -m nbc.harness.run --profile quick all
+          status=$?
+          set -e
+          if [ "$status" -ne 2 ]; then
+            echo "::error::--profile accepted a value outside the declared vocabulary"
+            exit 1
+          fi
+
       - name: Verify the layer is inside its declared size budget
         # NFR5, made falsifiable. Checks three things against each other in one pass: the budget
         # the README states, the budget `SizeBudget` declares, and the layer as measured. Editing

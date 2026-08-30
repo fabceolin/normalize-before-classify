@@ -782,6 +782,23 @@ evidence = "hub API answered 200 with this sha, unauthenticated; canonical id is
 # sources is not a frame. That rule is enforced where the realized count exists, in
 # `corpus/benign.py`, in both directions.
 
+[smoke]
+# The smoke profile's sample size, declared here rather than passed as a flag, so a run that says
+# it was a smoke run says how small a one -- and a reader comparing two tables can tell a
+# twenty-item cell from a five-hundred-item one without counting.
+#
+# **Per cell, not a total.** A smoke run is the same command over a smaller corpus, so it runs the
+# same completeness assertion: every baseline x chain x canon_on column needs a recall, a
+# false-positive rate per benign class and an AUC per class. A total sample drawn from the whole
+# corpus can miss a class or a chain and abort at that assertion -- a gate going red because of the
+# sampling rather than because of the code, which is the worst kind of red. Per-cell sampling
+# guarantees every group the assertion demands is represented.
+#
+# 3 because two is the smallest sample an interval can be computed over and three is the smallest
+# that can disagree with itself. It is not a statistical choice: nothing measured under this
+# profile is published, and `run.profile` in the results file says so.
+items_per_cell = 3
+
 [benign_frame]
 declared_on = "2026-08-29"
 

@@ -287,6 +287,7 @@ def _document(
     datasets: list[dict[str, Any]] | None = None,
     exclusion_sources: list[dict[str, Any]] | None = None,
     benign_frame: dict[str, Any] | None = None,
+    smoke_items_per_cell: int = 3,
 ) -> dict[str, Any]:
     resolved_baselines = (
         baselines
@@ -315,6 +316,11 @@ def _document(
         if exclusion_sources is not None
         else _derived_exclusions(resolved_baselines, resolved_datasets),
         "benign_frame": benign_frame if benign_frame is not None else _benign_frame(),
+        # Story 4.8's smoke sample size, which `load_pins` requires. Defaulted here rather than
+        # spelled at every call site: fifty-two tests build a document to check something else
+        # entirely, and each of them restating a smoke size would be fifty-two places for it to
+        # drift from the one the file declares.
+        "smoke": {"items_per_cell": smoke_items_per_cell},
     }
 
 
@@ -370,6 +376,8 @@ def write_pins(root: Path, document: dict[str, Any]) -> Path:
         _write_table(lines, "exclusion_source", entry, array=True)
     if "benign_frame" in document:
         _write_table(lines, "benign_frame", document["benign_frame"], array=False)
+    if "smoke" in document:
+        _write_table(lines, "smoke", document["smoke"], array=False)
     path = root / PINS_FILENAME
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

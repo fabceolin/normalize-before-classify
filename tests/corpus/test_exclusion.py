@@ -31,6 +31,7 @@ from nbc.corpus.exclusion import (
 )
 from nbc.errors import NbcError, declared_exit_codes
 from nbc.pins import (
+    SmokeProfile,
     BENIGN_CODE_ELIGIBILITY_DECODE_CANDIDATE,
     DRAW_SEEDED_RANDOM,
     EXCLUSION_AVAILABLE,
@@ -109,6 +110,9 @@ def _pins(sources: tuple[ExclusionSource, ...], *, required: tuple[str, ...] = (
         attack_datasets=(),
         exclusion_sources=sources,
         benign_frame=_frame(),
+        # Nothing in this file reads it either; `Pins` requires one for the same reason it requires
+        # a frame, and a stand-in here is the record's shape rather than a claim about a smoke run.
+        smoke=SmokeProfile(items_per_cell=1),
         path=None,  # type: ignore[arg-type]
     )
 
