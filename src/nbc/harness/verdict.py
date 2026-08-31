@@ -750,8 +750,13 @@ def evaluate_n4(cells: Sequence[object]) -> Verdict:
         keys=tuple(delta.key for delta in generalization_set + bound),
         reason=reason
         + (
+            # Named distinctly and joined as prose: `excluded` holds one delta per baseline, so
+            # interpolating the list itself published `['rot13', 'rot13']` -- a Python repr, and a
+            # chain repeated once per baseline as though two encodings had been excluded. The
+            # exclusion is a property of the encoding's probe declaration, not of a baseline.
             f" Excluded from the trigger and reported anyway: "
-            f"{sorted(str(d.key.dressing_chain) for d in excluded)}, whose held-out encoding "
+            f"{', '.join(sorted({str(d.key.dressing_chain) for d in excluded}))}, whose held-out "
+            f"encoding "
             f"declares probes = {PROBE_NONE!r} -- the layer has nothing to engage there, so no "
             f"recovery is expected and counting it would make N4 trigger for a reason that is not "
             f"generalization failure."

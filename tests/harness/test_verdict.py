@@ -763,3 +763,47 @@ def test_the_new_abort_declares_exit_code_33_and_declares_it_once() -> None:
     assert declared_exit_codes()[33] is VerdictNotEvaluable
     assert VerdictNotEvaluable.exit_code == 33
 
+
+def test_n4_names_an_excluded_chain_once_however_many_baselines_ran() -> None:
+    """The defect the first real run published: the excluded chains were interpolated as the list
+    itself, so the reason carried `['rot13', 'rot13']` -- a Python repr, and one entry per baseline
+    as though two encodings had been excluded rather than one measured twice. The exclusion is a
+    property of the encoding's probe declaration; a baseline does not change it.
+    """
+    cells = [
+        canon_delta(0.40, 0.05, baseline="primary", chain=BOUND_CHAIN),
+        canon_delta(0.40, 0.05, baseline="second", chain=BOUND_CHAIN),
+        canon_delta(0.00, 0.05, baseline="primary", chain=HELD_OUT_CHAIN,
+                    chain_class=CHAIN_CLASS_HELD_OUT),
+        canon_delta(0.00, 0.05, baseline="primary", chain=PROBES_NONE_CHAIN,
+                    chain_class=CHAIN_CLASS_HELD_OUT),
+        canon_delta(0.00, 0.05, baseline="second", chain=PROBES_NONE_CHAIN,
+                    chain_class=CHAIN_CLASS_HELD_OUT),
+    ]
+    verdict = evaluate_n4(cells)
+    assert verdict.reason.count(PROBES_NONE_CHAIN) == 1, verdict.reason
+    assert f"anyway: {PROBES_NONE_CHAIN}, whose" in verdict.reason
+
+
+def test_no_verdict_publishes_a_python_container_repr(declared) -> None:
+    """The class the line above is one instance of. A reason is prose a reader is handed; a list,
+    set, tuple or dict repr in it is a value that escaped its rendering, and every such escape has
+    so far also carried a duplicate or an internal name with it. Checked over a run that exercises
+    every clause the four conditions can append, the excluded one included.
+    """
+    cells, timing = a_complete_run(declared)
+    cells = cells + [
+        canon_delta(0.00, 0.05, baseline="primary", chain=PROBES_NONE_CHAIN,
+                    chain_class=CHAIN_CLASS_HELD_OUT),
+        canon_delta(0.00, 0.05, baseline="second", chain=PROBES_NONE_CHAIN,
+                    chain_class=CHAIN_CLASS_HELD_OUT),
+    ]
+    produced = verdicts(cells, timing, declared, NO_LIMITS)
+    for verdict in produced:
+        # Brackets and braces only. A parenthesised quoted value is prose this project writes on
+        # purpose -- N1 names its cell as `benign_class='b_code'` -- so `('` and `')` are not tells.
+        for repr_token in ("['", "']", '["', '"]', "{'", "'}"):
+            assert repr_token not in verdict.reason, (
+                f"{verdict.condition} publishes {repr_token!r} in its reason, which is a container "
+                f"repr and not prose: {verdict.reason}"
+            )
