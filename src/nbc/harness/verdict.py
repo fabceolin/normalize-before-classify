@@ -30,9 +30,22 @@ one and the choice would be ours rather than the reader's.
 **This module computes no comparison.** `harness/aggregate.py` is the only producer of cells, so
 the two things this story needed and did not have -- the windows-matched companion, and the
 difference of two independent estimates -- were added there and in `harness/stats.py` rather than
-here. It also does not re-derive `harness/summary.py`'s limits: saturation, resolution, sign
-disagreement, the bound-chain definitional effect and the windowing divergence are findings, and a
-verdict that restated one would give the results file two ways to say the same thing.
+here. It also does not re-derive `harness/summary.py`'s limits: saturation, a pinned rate,
+resolution, sign disagreement, the bound-chain definitional effect and the windowing divergence are
+findings, and a verdict that restated one would give the results file two ways to say the same
+thing. **It does READ one of them.** N1 takes `summary.findings` and reads the `rate_pinned`
+findings that land on its pre-registered cell, because a condition whose input had no room to move
+has to say so; reading a finding is the opposite of restating it.
+
+**There is no `_includes_zero` helper here, and its absence is deliberate.** An interval has three
+positions against zero -- wholly above, straddling, wholly below -- and a predicate that answers
+"does it include zero" collapses the two exclusions into one. That collapse is the only defect this
+module has ever shipped, three times: N1's message called `[-0.196, -0.135]` "includes zero"; N2
+counted 10 pairs where the encoded attack was detected BETTER than the clean one as degradation and
+published "14 of 14"; N4 counted a chain where the layer DESTROYS recall among the chains that
+recover. Every decision here reads `interval.lo > 0.0` or `interval.hi < 0.0` directly, so the
+direction is visible at the site that depends on it, and each of the three sites has a test that
+feeds it an interval lying wholly below zero.
 
 **It writes no file.** `results.json` is 4-7's.
 """
@@ -52,6 +65,10 @@ from nbc.corpus.matrix import (
 )
 from nbc.errors import NbcError
 from nbc.harness.stats import mover_difference_interval
+
+# One direction only: `summary` knows nothing about verdicts, and this module reads its findings
+# rather than deriving them. A limit with two producers is a limit that will be stated two ways.
+from nbc.harness.summary import FINDING_RATE_PINNED, SummaryFinding
 from nbc.schema import (
     CENSUS_CEILING_HIT,
     CONTRAST_CANON_ON_VS_OFF,
@@ -105,10 +122,6 @@ class VerdictNotEvaluable(NbcError, exit_code=33):
     """
 
 
-def _includes_zero(delta: Delta) -> bool:
-    return delta.interval.lo <= 0.0 <= delta.interval.hi
-
-
 def _half_width(delta: Delta) -> float:
     """The minimum detectable effect for a cell, taken from its own interval.
 
@@ -140,7 +153,61 @@ def _matches(key: CellKey, *, baseline: str, chain: str) -> bool:
     return key.baseline == baseline and key.dressing_chain == chain
 
 
-def evaluate_n1(cells: Sequence[object], confirmatory) -> Verdict:  # type: ignore[no-untyped-def]
+def _pair_as_json(cell: Delta) -> dict[str, object]:
+    """One (baseline, chain) recall delta, as N2 records it."""
+    return {
+        "baseline": cell.key.baseline,
+        "chain": cell.contrast.argument if cell.contrast is not None else None,
+        "value": cell.value,
+        "interval": cell.interval.as_json_object(),
+    }
+
+
+def _finding_family(finding: SummaryFinding) -> str | None:
+    """The family the two keys of a `rate_pinned` finding agree on.
+
+    They always agree -- the finding pairs one cell's two canon states -- so disagreement means
+    something upstream paired two different cells, and `None` makes that unmatchable rather than
+    silently attributed to whichever key came first.
+    """
+    families = {key.family for key in finding.keys}
+    return families.pop() if len(families) == 1 else None
+
+
+def _pinned_rates_on(
+    limits: Sequence[SummaryFinding], confirmatory
+) -> tuple[SummaryFinding, ...]:  # type: ignore[no-untyped-def]
+    """The `rate_pinned` findings that land on one of the two rates N1 subtracts.
+
+    Read from `summary.findings` rather than recomputed from the cells. The rule the whole
+    results file follows is that a limit has one producer: a verdict that derived its own
+    saturation would give the file two places to say the same thing, and they would diverge on the
+    first day somebody changed one.
+    """
+    return tuple(
+        finding
+        for finding in limits
+        if finding.kind == FINDING_RATE_PINNED
+        and any(
+            _matches(key, baseline=confirmatory.baseline, chain=confirmatory.dressing_chain)
+            and key.population == POPULATION_ALL
+            and (
+                key.family == FAMILY_ATTACK
+                or (
+                    key.family == FAMILY_BENIGN
+                    and key.benign_class == confirmatory.benign_class
+                )
+            )
+            for key in finding.keys
+        )
+    )
+
+
+def evaluate_n1(
+    cells: Sequence[object],
+    confirmatory,  # type: ignore[no-untyped-def]
+    limits: Sequence[SummaryFinding],
+) -> Verdict:
     """N1, on the pre-registered cell alone: does the cost exceed the recovery?
 
     `D = ΔFPR − Δrecall`, and it triggers iff `D`'s interval lies **wholly above zero** -- the layer
@@ -153,6 +220,19 @@ def evaluate_n1(cells: Sequence[object], confirmatory) -> Verdict:  # type: igno
     valid because they are computed over **disjoint item sets** -- benign items of one class and
     attack items. That disjointness is what independence means here and it is why this is the one
     place in the project that combines two intervals as if uncorrelated.
+
+    **`limits` is the saturation limb, and it is the one input this condition needed and did not
+    have.** The first full run's pre-registered cell had a false-positive rate of 500 of 500 in
+    both canon states: `ΔFPR = +0.000000` was a **ceiling**, not a cost of zero, and with `ΔFPR`
+    identically zero by construction `D > 0` required `Δrecall < 0` -- the condition could not have
+    fired there on any behaviour of the layer short of the layer actively destroying recall. The
+    outcome `not_triggered` is correct and unchanged; what it MEANS is not, and a condition that
+    could not fire has to say so rather than let a reader take `not_triggered` for evidence. It is
+    passed in rather than derived, from `summary.findings`, whose `rate_pinned` findings are the
+    one producer of that fact. It is **required and not defaulted to `()`**, deliberately: a caller
+    that forgot it would publish the same silently-unqualified sentence this limb exists to stop,
+    and the whole point of the defect is that nothing failed when the prose went wrong. A missing
+    argument is a `TypeError` at the call site.
     """
     wanted = (
         f"baseline={confirmatory.baseline!r} chain={confirmatory.dressing_chain!r} "
@@ -236,6 +316,42 @@ def evaluate_n1(cells: Sequence[object], confirmatory) -> Verdict:  # type: igno
             "one that does not."
         )
 
+    # The saturation limb. `not_triggered` on a cell where one of the two rates had no room is not
+    # the same statement as `not_triggered` on a cell that could have gone either way, and the
+    # outcome vocabulary has no fourth value to put the difference in. So it goes in the sentence,
+    # ahead of the exploratory count, where a reader meets it before they form an impression.
+    pinned = _pinned_rates_on(limits, confirmatory)
+    pinned_fpr = [f for f in pinned if _finding_family(f) == FAMILY_BENIGN]
+    pinned_recall = [f for f in pinned if _finding_family(f) == FAMILY_ATTACK]
+
+    if pinned_fpr and pinned_recall:
+        saturation = (
+            " SATURATION: both rates this condition subtracts are pinned in both canon states, so "
+            "D is identically zero by construction. This cell decided nothing about the layer."
+        )
+    elif pinned_fpr:
+        saturation = (
+            " SATURATION: the false-positive rate on this cell is pinned in both canon states, so "
+            "ΔFPR is zero by construction rather than by measurement -- it had nowhere to move. D "
+            "= ΔFPR − Δrecall can then exceed zero only if Δrecall is NEGATIVE, so the condition "
+            "could not have triggered here on any behaviour of the layer short of the layer "
+            "actively destroying recall. Read this `not_triggered` as 'the pre-registered cell "
+            "turned out to be uninformative', which was not knowable before the corpus existed, "
+            "and not as 'the cost did not exceed the recovery'."
+        )
+    elif pinned_recall:
+        saturation = (
+            " SATURATION: attack recall on this cell is pinned in both canon states, so Δrecall "
+            "is zero by construction rather than by measurement and D reduces to ΔFPR alone. The "
+            "condition still separates a cost from none, but it is no longer weighing that cost "
+            "against a recovery, which is what it was written to do."
+        )
+    else:
+        saturation = ""
+
+    if pinned:
+        saturation += " Pinned: " + "; ".join(finding.statement for finding in pinned)
+
     return Verdict(
         condition="N1",
         outcome=OUTCOME_TRIGGERED if triggered else OUTCOME_NOT_TRIGGERED,
@@ -246,6 +362,7 @@ def evaluate_n1(cells: Sequence[object], confirmatory) -> Verdict:  # type: igno
             f"{fpr_delta.value - recall_delta.value:+.6f}, interval "
             f"[{interval.lo:+.6f}, {interval.hi:+.6f}]. "
             + standing
+            + saturation
             + f" {len(exploratory)} other canon deltas were scanned and are exploratory: a "
             f"triggered one among them is reported as exploratory and is never the verdict."
         ),
@@ -258,6 +375,21 @@ def evaluate_n1(cells: Sequence[object], confirmatory) -> Verdict:  # type: igno
             "difference": fpr_delta.value - recall_delta.value,
             "difference_interval": interval.as_json_object(),
             "exploratory_cells_scanned": len(exploratory),
+            # A machine-readable form of the limb above, so story 5.1 renders it beside the cell
+            # without parsing a sentence. `False` here is the whole point of the field: a reader
+            # or a renderer can tell "did not fire" from "could not have fired".
+            "cell_could_decide": not pinned,
+            "pinned_rates": [
+                {
+                    "family": _finding_family(finding),
+                    "measures": finding.computed.get("measures"),
+                    "pinned_at": finding.computed.get("pinned_at"),
+                    "k_canon_off": finding.computed.get("k_canon_off"),
+                    "k_canon_on": finding.computed.get("k_canon_on"),
+                    "n": finding.computed.get("n_canon_off"),
+                }
+                for finding in pinned
+            ],
             "minimum_detectable_effect": interval.width / 2,
         },
     )
@@ -266,10 +398,15 @@ def evaluate_n1(cells: Sequence[object], confirmatory) -> Verdict:  # type: igno
 def evaluate_n2(cells: Sequence[object]) -> Verdict:
     """N2: are the dressings actually defeating the classifier before the layer runs?
 
-    Triggers iff, for **every** baseline and **every** encoded bound chain, the `clean_vs_<chain>`
-    recall delta at canon-off has an interval including zero -- which would mean the dressings never
-    hurt in the first place and the experiment has no degradation to recover. The verdict **names
-    the pair** that kept it from triggering, because "not every pair" is unactionable.
+    Triggers iff **no** baseline-and-encoded-bound-chain pair has a `clean_vs_<chain>` recall
+    delta at canon-off whose interval lies **wholly above zero** -- which would mean the dressings
+    never hurt in the first place and the experiment has no degradation to recover. The verdict
+    **names the pair** that kept it from triggering, because "not every pair" is unactionable.
+
+    **Above zero, not merely away from it.** The delta is `recall(clean) - recall(chain)`, so the
+    two exclusions are opposite findings and only one of them is degradation. A pair below zero is
+    the baseline detecting the encoded attack better than the clean one, and it is reported beside
+    the trigger rather than counted into it.
 
     "Encoded" is `matrix.encoding_depth(chain) > 0`, derived rather than listed: a chain of
     homoglyphs costs the layer no decode budget and is not what this condition is about.
@@ -297,27 +434,53 @@ def evaluate_n2(cells: Sequence[object]) -> Verdict:
             computed={"pairs_examined": 0, "minimum_detectable_effect": None},
         )
 
-    kept_out = [cell for cell in pairs if not _includes_zero(cell)]
-    triggered = not kept_out
+    # Three positions, not two -- and here it is the code that decides, not the prose that
+    # describes. `clean_vs_<chain>` is recall(clean) - recall(chain), so an interval lying wholly
+    # ABOVE zero is the dressing degrading the classifier, and one lying wholly BELOW zero is the
+    # opposite finding: the baseline detects the ENCODED attack better than the clean one. The
+    # PRD's quantifier is explicit -- "a single baseline-and-chain pair whose interval excludes
+    # zero above it is enough not to trigger" -- and testing exclusion alone counted both
+    # directions as degradation. The first real run published "14 of 14 pairs have an interval
+    # excluding zero", which reads as "the dressings degraded the classifier everywhere"; the
+    # measurement was 4 of 14, with 10 running the other way. The other way is the interesting
+    # half, so it is named rather than dropped.
+    degraded = [cell for cell in pairs if cell.interval.lo > 0.0]
+    improved = [cell for cell in pairs if cell.interval.hi < 0.0]
+    triggered = not degraded
     widest = max(_half_width(cell) for cell in pairs)
+
+    def named(selected: Sequence[Delta]) -> str:
+        return ", ".join(
+            f"{cell.key.baseline}/{cell.contrast.argument} "
+            f"[{cell.interval.lo:+.6f}, {cell.interval.hi:+.6f}]"
+            for cell in sorted(
+                selected, key=lambda c: (str(c.key.baseline), str(c.contrast.argument))
+            )
+        )
+
+    backwards = (
+        f" In {len(improved)} of the {len(pairs)} pairs the interval lies wholly BELOW zero: "
+        f"there the baseline detects the encoded attack better than the clean one, which is not "
+        f"degradation for the layer to recover but the premise of the experiment running the "
+        f"other way. Named because a reader given only the count above cannot tell they exist: "
+        f"{named(improved)}."
+        if improved
+        else ""
+    )
 
     if triggered:
         reason = (
-            f"every one of the {len(pairs)} (baseline, encoded bound chain) pairs has a "
-            f"clean-versus-chain recall interval including zero at canon-off: the dressings did "
-            f"not degrade the classifier, so there is no degradation for the layer to recover."
-        )
+            f"not one of the {len(pairs)} (baseline, encoded bound chain) pairs has a "
+            f"clean-versus-chain recall interval lying wholly above zero at canon-off: the "
+            f"dressings did not degrade the classifier, so there is no degradation for the layer "
+            f"to recover."
+        ) + backwards
     else:
-        named = ", ".join(
-            f"{cell.key.baseline}/{cell.contrast.argument} "
-            f"[{cell.interval.lo:+.6f}, {cell.interval.hi:+.6f}]"
-            for cell in sorted(kept_out, key=lambda c: (str(c.key.baseline), str(c.contrast.argument)))
-        )
         reason = (
-            f"{len(kept_out)} of {len(pairs)} pairs have an interval excluding zero, so the "
-            f"dressings did degrade the classifier somewhere. The pairs that kept this from "
-            f"triggering: {named}"
-        )
+            f"{len(degraded)} of {len(pairs)} pairs have an interval lying wholly above zero, so "
+            f"the dressings did degrade the classifier somewhere. The pairs that kept this from "
+            f"triggering: {named(degraded)}"
+        ) + backwards
 
     return Verdict(
         condition="N2",
@@ -326,15 +489,11 @@ def evaluate_n2(cells: Sequence[object]) -> Verdict:
         reason=reason,
         computed={
             "pairs_examined": len(pairs),
-            "pairs_excluding_zero": [
-                {
-                    "baseline": cell.key.baseline,
-                    "chain": cell.contrast.argument,
-                    "value": cell.value,
-                    "interval": cell.interval.as_json_object(),
-                }
-                for cell in kept_out
-            ],
+            # Two lists, each named for the direction it is in. The single `pairs_excluding_zero`
+            # these replace held both directions under a name that reads as one, and it is the
+            # number the published sentence was counting.
+            "pairs_degrading_above_zero": [_pair_as_json(cell) for cell in degraded],
+            "pairs_improving_below_zero": [_pair_as_json(cell) for cell in improved],
             "minimum_detectable_effect": widest,
         },
     )
@@ -444,11 +603,23 @@ def evaluate_n3(timing) -> Verdict:  # type: ignore[no-untyped-def]
 def evaluate_n4(cells: Sequence[object]) -> Verdict:
     """N4: does the layer only recover what it was built against?
 
-    Triggers iff, for **every** held-out chain the layer can engage (`probes != none`) **and** the
-    over-ceiling chain, the recovery interval includes zero, **while** the bound-chain recovery
-    interval excludes zero and lies above it. That pairing is the whole condition: a layer that
-    recovers nothing anywhere has not generalized badly, it has not worked, and the bound half is
-    what tells the two apart.
+    Triggers iff **no** held-out chain the layer can engage (`probes != none`) and no over-ceiling
+    chain has a recovery interval lying **wholly above zero**, **while** at least one bound-chain
+    recovery interval does. That pairing is the whole condition: a layer that recovers nothing
+    anywhere has not generalized badly, it has not worked, and the bound half is what tells the two
+    apart.
+
+    **Above zero, in both limbs.** Recovery has a direction, and a chain whose interval lies wholly
+    below zero is the layer COSTING recall there -- evidence for this condition rather than against
+    it. The bound limb always read the sign; the generalization limb, two lines above it, read only
+    that the interval excluded zero, so a chain the layer made worse was counted among the chains
+    that kept N4 from triggering.
+
+    **The verdict also says which side of the generalization set recovered.** A held-out chain is
+    an encoding the layer was not written against; an over-ceiling chain is a bound encoding
+    applied past the recursion budget, which is the same decoder further down. "Not confined to
+    what it was built against" is a claim about the first, and a run whose only recovery is on the
+    second has demonstrated no reach.
 
     A `probes: none` chain is **excluded from the trigger and reported anyway**. `rot13` gives the
     layer nothing to engage -- no alphabet marker, no entropy signature -- so no recovery is
@@ -509,33 +680,68 @@ def evaluate_n4(cells: Sequence[object]) -> Verdict:
             },
         )
 
-    recovering = [delta for delta in generalization_set if not _includes_zero(delta)]
-    bound_recovers = [
-        delta for delta in bound if not _includes_zero(delta) and delta.interval.lo > 0.0
-    ]
+    # Three positions, not two, for the third time in this module. The bound limb below has
+    # always checked the sign; this limb, two lines above it, did not -- so a chain where the
+    # layer DESTROYS recall was counted among the chains that "kept this from triggering".
+    # `testsavantai-bert-small` on `base64x4` measured -0.0333 with interval
+    # [-0.0451, -0.0240] and was published as recovery. Recovery is `lo > 0.0`, in both limbs, for
+    # the same reason: the condition is about the layer reaching chains it was not built against,
+    # and a chain it made worse is evidence for the condition rather than against it.
+    recovering = [delta for delta in generalization_set if delta.interval.lo > 0.0]
+    degrading = [delta for delta in generalization_set if delta.interval.hi < 0.0]
+    bound_recovers = [delta for delta in bound if delta.interval.lo > 0.0]
     triggered = not recovering and bool(bound_recovers)
+
+    # Which side of the generalization set a recovering chain came from is the whole reading of
+    # this condition. A held-out chain is an encoding the layer was not written against; an
+    # over-ceiling chain is a bound encoding applied past the recursion budget -- the same decoder,
+    # further down. A verdict that reports "the layer is not confined to what it was built against"
+    # on the strength of the second alone is claiming generalization from a chain that is not one.
+    held_out_names = frozenset(str(delta.key.dressing_chain) for delta in held_out)
+    recovering_held_out = [
+        delta for delta in recovering if str(delta.key.dressing_chain) in held_out_names
+    ]
 
     if triggered:
         reason = (
-            f"every one of the {len(generalization_set)} held-out and over-ceiling chains has a "
-            f"recovery interval including zero, while {len(bound_recovers)} of {len(bound)} bound "
-            f"chains recover with an interval above zero. The layer recovers what it was built "
-            f"against and does not generalize."
+            f"not one of the {len(generalization_set)} held-out and over-ceiling chains recovers "
+            f"with an interval above zero, while {len(bound_recovers)} of {len(bound)} bound "
+            f"chains do. The layer recovers what it was built against and does not generalize."
         )
     elif recovering:
-        named = ", ".join(
-            sorted(str(delta.key.dressing_chain) for delta in recovering)
+        named = ", ".join(sorted(str(delta.key.dressing_chain) for delta in recovering))
+        reach = (
+            (
+                f" None of them is a held-out encoding: the recovery is on chains the layer WAS "
+                f"written against, applied past the recursion ceiling, so this run demonstrates "
+                f"no reach beyond the encodings it was built for."
+            )
+            if not recovering_held_out
+            else (
+                f" {len(recovering_held_out)} of them held-out encodings "
+                f"({', '.join(sorted(str(d.key.dressing_chain) for d in recovering_held_out))}), "
+                f"which is reach beyond what the layer was built against; any others are bound "
+                f"encodings applied past the recursion ceiling."
+            )
         )
         reason = (
             f"{len(recovering)} of {len(generalization_set)} held-out or over-ceiling chains "
-            f"recover with an interval excluding zero, so the layer is not confined to what it was "
-            f"built against. The chains that kept this from triggering: {named}"
-        )
+            f"recover with an interval above zero, so this condition does not trigger. The chains "
+            f"that kept it from triggering: {named}."
+        ) + reach
     else:
         reason = (
             f"no bound chain recovers with an interval above zero, so there is nothing for the "
             f"held-out result to be worse than: a layer that recovers nowhere has not generalized "
             f"badly, it has not worked."
+        )
+
+    if degrading:
+        reason += (
+            f" {len(degrading)} of the {len(generalization_set)} chains have an interval lying "
+            f"wholly BELOW zero -- there the layer costs recall rather than recovering it, and "
+            f"before the sign was checked those were counted as recovery: "
+            f"{', '.join(sorted(str(d.key.dressing_chain) + '/' + str(d.key.baseline) for d in degrading))}."
         )
 
     return Verdict(
@@ -556,9 +762,22 @@ def evaluate_n4(cells: Sequence[object]) -> Verdict:
             "generalization_chains": sorted(
                 str(d.key.dressing_chain) for d in generalization_set
             ),
+            "held_out_chains": sorted(str(d.key.dressing_chain) for d in held_out),
+            "over_ceiling_chains": sorted(str(d.key.dressing_chain) for d in over_ceiling),
             "bound_chains": sorted(str(d.key.dressing_chain) for d in bound),
             "chains_recovering_off_distribution": sorted(
                 str(d.key.dressing_chain) for d in recovering
+            ),
+            # The half of `generalization_set` that used to be counted into the line above. A
+            # chain whose interval lies wholly below zero is the layer costing recall there.
+            "chains_degrading_off_distribution": sorted(
+                str(d.key.dressing_chain) for d in degrading
+            ),
+            # Whether any recovery at all was on an encoding the layer was not written against.
+            # `chains_recovering_off_distribution` alone cannot answer it, and it is the question
+            # the condition is about.
+            "held_out_chains_recovering": sorted(
+                str(d.key.dressing_chain) for d in recovering_held_out
             ),
             "excluded_probes_none": sorted(str(d.key.dressing_chain) for d in excluded),
             "minimum_detectable_effect": (
@@ -568,15 +787,24 @@ def evaluate_n4(cells: Sequence[object]) -> Verdict:
     )
 
 
-def verdicts(cells: Sequence[object], timing, confirmatory) -> tuple[Verdict, ...]:  # type: ignore[no-untyped-def]
+def verdicts(  # type: ignore[no-untyped-def]
+    cells: Sequence[object],
+    timing,
+    confirmatory,
+    limits: Sequence[SummaryFinding],
+) -> tuple[Verdict, ...]:
     """All four, in declared order, and **no abort** whatever they say.
 
     Producing and gating are separate on purpose: a caller sees every verdict before any of them
     stops the run, and both paths are reachable from a test. `refuse_an_unevaluable_run` is the
     gate.
+
+    `limits` is `summary.findings(cells)`, and it reaches N1 alone today. It is on this signature
+    rather than on N1's caller because the ordering it implies is real: the limits are computed
+    before the verdicts, and a verdict reading a finding is the direction this module allows.
     """
     produced = (
-        evaluate_n1(cells, confirmatory),
+        evaluate_n1(cells, confirmatory, limits),
         evaluate_n2(cells),
         evaluate_n3(timing),
         evaluate_n4(cells),

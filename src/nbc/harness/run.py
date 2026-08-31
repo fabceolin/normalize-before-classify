@@ -702,7 +702,10 @@ def full_run(
     traces = read_traces(traces_at)
     produced = aggregate_cells(scores, pins, traces)
     limits = findings(produced)
-    decided = verdicts(produced, report, pins.benign_frame.confirmatory_cell)
+    # `limits` before `verdicts` is an ordering, not a convenience: N1 reads the `rate_pinned`
+    # findings that land on its pre-registered cell to say whether that cell could decide the
+    # condition at all.
+    decided = verdicts(produced, report, pins.benign_frame.confirmatory_cell, limits)
 
     refuse_an_incomplete_table(
         completeness_problems(produced, _required_window_policies(pins))

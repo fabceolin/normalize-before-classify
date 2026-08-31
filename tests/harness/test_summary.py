@@ -18,10 +18,12 @@ import pytest
 from nbc.corpus.matrix import CHAIN_CLASS_BOUND, CHAIN_CLASS_HELD_OUT, CLEAN_CHAIN_NAME
 from nbc.errors import declared_exit_codes
 from nbc.harness.stats import AucSample, roc_auc
+from nbc.pins import load_pins
 from nbc.harness.summary import (
     ACCEPTED_JUSTIFICATION,
     FINDING_BOUND_CHAIN,
     FINDING_KINDS,
+    FINDING_RATE_PINNED,
     FINDING_RESOLUTION,
     FINDING_SATURATION,
     FINDING_SIGN_DISAGREEMENT,
@@ -34,6 +36,7 @@ from nbc.harness.summary import (
     SummaryUnsupported,
     bound_chain_findings,
     findings,
+    rate_pinned_findings,
     resolution_findings,
     saturation_findings,
     sign_disagreement_findings,
@@ -47,6 +50,7 @@ from nbc.schema import (
     CONTRAST_CANON_ON_VS_OFF,
     DELTA_AUC_STRUCTURAL,
     FAMILY_ATTACK,
+    FAMILY_BENIGN,
     NEWCOMBE_PAIRED,
     POPULATION_SINGLE_WINDOW,
     WILSON_SCORE,
@@ -61,6 +65,17 @@ from nbc.schema import (
 
 BASELINE = "primary"
 POLICY = "shared"
+
+_PINS = load_pins(None)
+BENIGN_N: int = _PINS.benign_frame.sample_size_items
+ATTACK_N: int = _PINS.attack_datasets[0].draw.sample_size_positives
+"""The per-class draw sizes, read from `pins.toml` rather than written down.
+
+`tests/test_pins.py` refuses either as a literal in a test, and it is right to: a sample size
+spelled here is a second place it lives, and it goes stale the moment the draw is re-declared while
+still reading as the size the corpus was built to. The pinned-rate tests below need a realistic
+`n` -- `k == n` at `n = 4` would pass while saying nothing -- so they take it from the declaration.
+"""
 
 AUC_CONTRAST = Contrast(CONTRAST_ATTACKS_VS_BENIGN_CLASS, "b_code", frozenset({AXIS_FAMILY}))
 CANON_CONTRAST = Contrast(CONTRAST_CANON_ON_VS_OFF, None, frozenset({AXIS_CANON_ON}))
@@ -321,6 +336,95 @@ def test_the_bound_chain_finding_reads_the_field_and_not_a_chain_name() -> None:
     assert finding.computed["chain_class"] == CHAIN_CLASS_BOUND
 
 
+# --- a pinned rate -----------------------------------------------------------------------------------
+
+
+def rate_at(
+    k: int, n: int = BENIGN_N, *, canon_on: bool, family: str = FAMILY_BENIGN
+) -> Rate:
+    """One published proportion at one canon state, on a cell the two states share."""
+    value = k / n
+    return Rate(
+        k=k,
+        n=n,
+        interval=Interval(max(0.0, value - 0.01), min(1.0, value + 0.01), WILSON_SCORE),
+        key=CellKey(
+            baseline=BASELINE,
+            dressing_chain=CLEAN_CHAIN_NAME,
+            chain_class=CHAIN_CLASS_BOUND,
+            window_policy=POLICY,
+            canon_on=canon_on,
+            family=family,
+            benign_class="b_code" if family == FAMILY_BENIGN else None,
+            contrast=None,
+        ),
+    )
+
+
+def test_a_rate_at_the_ceiling_in_both_canon_states_is_reported() -> None:
+    """The measurement that produced this finding: on the pre-registered N1 cell the false-positive
+    rate on `b_code` was the whole benign draw with the layer off AND with it on.
+
+    `ΔFPR = +0.000000` there is a **ceiling effect**, not a cost of zero, and the two read the same
+    in a table. Every benign code item was already a false positive before the layer ran; the rate
+    had nowhere to go.
+    """
+    (finding,) = rate_pinned_findings(
+        [rate_at(BENIGN_N, canon_on=False), rate_at(BENIGN_N, canon_on=True)]
+    )
+    assert finding.kind == FINDING_RATE_PINNED
+    assert finding.computed["pinned_at"] == 1.0
+    assert finding.computed["k_canon_off"] == BENIGN_N
+    assert finding.computed["n_canon_off"] == BENIGN_N
+    assert len(finding.keys) == 2, "both canon states are named"
+    assert "nowhere to move" in finding.statement
+    assert "b_code" in finding.statement
+
+
+def test_a_rate_at_the_floor_in_both_canon_states_is_reported() -> None:
+    """The other end. A rate at zero in both states has the same problem in the other direction."""
+    (finding,) = rate_pinned_findings(
+        [rate_at(0, canon_on=False), rate_at(0, canon_on=True)]
+    )
+    assert finding.computed["pinned_at"] == 0.0
+    assert "floor at 0" in finding.statement
+
+
+def test_a_rate_that_moved_between_the_canon_states_is_not_pinned() -> None:
+    """The input that keeps this from being a finding attached to every rate in the table."""
+    assert rate_pinned_findings(
+        [
+            rate_at(BENIGN_N * 3 // 4, canon_on=False),
+            rate_at(BENIGN_N * 4 // 5, canon_on=True),
+        ]
+    ) == ()
+
+
+def test_a_rate_pinned_at_opposite_ends_is_not_pinned() -> None:
+    """0 with the layer off and 1 with it on is a rate that moved as far as a rate can. Calling
+    that "pinned" would report the largest effect in the table as an absence of one."""
+    assert rate_pinned_findings(
+        [rate_at(0, canon_on=False), rate_at(BENIGN_N, canon_on=True)]
+    ) == ()
+
+
+def test_a_rate_with_only_one_canon_state_produces_no_finding() -> None:
+    """The claim is about both states. One state pinned says nothing about the delta."""
+    assert rate_pinned_findings([rate_at(BENIGN_N, canon_on=True)]) == ()
+
+
+def test_an_attack_recall_rate_pinned_in_both_states_names_what_it_measures() -> None:
+    """Both families reach this finding, and the statement has to say which rate it is about: the
+    limb it feeds in N1 differs by family, because ΔFPR and Δrecall enter D with opposite signs."""
+    (finding,) = rate_pinned_findings(
+        [
+            rate_at(ATTACK_N, ATTACK_N, canon_on=False, family=FAMILY_ATTACK),
+            rate_at(ATTACK_N, ATTACK_N, canon_on=True, family=FAMILY_ATTACK),
+        ]
+    )
+    assert finding.computed["measures"] == "attack recall"
+
+
 # --- the whole set -----------------------------------------------------------------------------------
 
 
@@ -398,6 +502,8 @@ def test_findings_returns_every_kind_in_a_stable_order() -> None:
         auc_delta(0.12),
         *windows_matched_pair(-0.03, 0.30),
         Count(1, 2, recall_delta(0.0).key),
+        rate_at(BENIGN_N, canon_on=False),
+        rate_at(BENIGN_N, canon_on=True),
     ]
     produced = findings(cells)
     kinds = [finding.kind for finding in produced]

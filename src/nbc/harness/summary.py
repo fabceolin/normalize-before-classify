@@ -1,4 +1,4 @@
-"""The threshold-free summary, the two rejections behind it, and the four limits it does not escape.
+"""The threshold-free summary, the two rejections behind it, and the limits it does not escape.
 
 Every number in this table so far is defensible only at one operating point. The sharpest objection
 this artifact faces is not "your recall is wrong" -- it is **"your layer did not make attacks
@@ -22,9 +22,9 @@ prevalence, and this corpus's prevalence is **constructed**: the attack and beni
 to declared sizes. A PR number would therefore report a substantial amount of the corpus recipe
 back to the reader as if it were a property of the layer.
 
-**And the summary does not escape the corpus's problems -- it inherits them.** Four limits, each
+**And the summary does not escape the corpus's problems -- it inherits them.** Six limits, each
 emitted as a record attached to the cells it applies to rather than as prose in a file the reader
-reaches afterwards:
+reaches afterwards. The last of them was declared after the first real run, and is marked as such:
 
 *Saturation.* A shift that runs into the ceiling at `p = 1` manufactures ties, and ties move AUC
 **down**. Measured 2026-08-30: four attacks and four benign items separated perfectly at AUC 1.00,
@@ -45,6 +45,23 @@ would discard exactly the information the requirement was added to surface.
 bound chain the layer-on AUC **is** the clean AUC and ΔAUC comes out large and positive for
 definitional reasons, whatever the layer does. The threshold-free summary inherits the
 by-construction problem there rather than solving it.
+
+*Windows-matched divergence.* A document over one window is scored as the maximum over its windows,
+so the layer can move a cell by changing how many windows a document needs rather than by changing
+what the classifier sees. Where a cell and its single-window companion disagree by more than the
+companion's own half-width, the finding carries both numbers, because a reader who sees one cannot
+tell a windowing artifact from a real effect.
+
+*A pinned rate.* **Declared 2026-08-31, after the first full run, which is the only reason it is
+here rather than with the other five.** A proportion at `k = 0` or `k = n` with the layer off *and*
+with it on has nowhere to move, so the canon-on-versus-off delta computed from it is zero by
+construction. The first run's pre-registered N1 cell had a false-positive rate of **500 of 500 in
+both canon states**, published `ΔFPR = +0.000000`, and that read as "the layer cost nothing" when it
+meant "this cell could not have shown a cost". Nothing in the corpus design anticipated it: §3.1 of
+the PRD forbids a *bound* confirmatory cell because recovery there is total by contract, and the
+restriction it chose closes that door -- the degeneracy arrived through the other side of the
+subtraction, on the benign half, which no clause named. It is a distinct kind rather than a second
+`saturation` statement because `verdict.evaluate_n1` filters on the kind to grow a saturation limb.
 
 **This module is pure and reads cells, not scores.** `harness/aggregate.py` is the only reader of
 the score file and the only producer of cells; a summary that computed its own comparison would
@@ -72,6 +89,7 @@ from nbc.schema import (
     Auc,
     CellKey,
     Delta,
+    Rate,
 )
 
 __all__ = [
@@ -79,6 +97,7 @@ __all__ = [
     "FINDING_BOUND_CHAIN",
     "FINDING_WINDOWS_MATCHED",
     "FINDING_KINDS",
+    "FINDING_RATE_PINNED",
     "FINDING_RESOLUTION",
     "FINDING_SATURATION",
     "FINDING_SIGN_DISAGREEMENT",
@@ -90,6 +109,7 @@ __all__ = [
     "SummaryUnsupported",
     "bound_chain_findings",
     "findings",
+    "rate_pinned_findings",
     "resolution_findings",
     "saturation_findings",
     "sign_disagreement_findings",
@@ -132,6 +152,7 @@ ACCEPTED_JUSTIFICATION: Final[str] = (
 )
 
 FINDING_SATURATION: Final[str] = "saturation"
+FINDING_RATE_PINNED: Final[str] = "rate_pinned"
 FINDING_RESOLUTION: Final[str] = "resolution"
 FINDING_SIGN_DISAGREEMENT: Final[str] = "sign_disagreement"
 FINDING_BOUND_CHAIN: Final[str] = "bound_chain_definitional"
@@ -139,12 +160,23 @@ FINDING_WINDOWS_MATCHED: Final[str] = "windows_matched_divergence"
 
 FINDING_KINDS: Final[tuple[str, ...]] = (
     FINDING_SATURATION,
+    FINDING_RATE_PINNED,
     FINDING_RESOLUTION,
     FINDING_SIGN_DISAGREEMENT,
     FINDING_BOUND_CHAIN,
     FINDING_WINDOWS_MATCHED,
 )
-"""The five limits, closed. A fifth arriving as a free string is a caveat nobody declared."""
+"""The six limits, closed. A seventh arriving as a free string is a caveat nobody declared.
+
+`rate_pinned` was declared after the first real run rather than with the other five, and the reason
+it is a **sixth kind** rather than a second statement under `saturation` is that a consumer filters
+on `kind`. `saturation` is about ties in an AUC's pairwise comparisons; `rate_pinned` is about a
+proportion sitting on 0 or 1 in **both** canon states, which makes every canon-on-versus-off delta
+computed from it identically zero by construction. They are both "something is at a ceiling" to a
+reader and two different tests to a caller, and `verdict.evaluate_n1` is the caller: it reads
+`rate_pinned` to say that its pre-registered cell could not decide N1. Putting both under one name
+would have made that read a match on the shape of a key.
+"""
 
 SATURATION_TIE_SHARE: Final[float] = 0.05
 """The tied share above which a cell carries a saturation finding.
@@ -298,6 +330,94 @@ def _column(key: CellKey) -> tuple[str, ...]:
 
 def _sortable(key: CellKey) -> tuple[str, ...]:
     return (*_column(key), str(key.benign_class))
+
+
+def _rates(cells: Iterable[object]) -> tuple[Rate, ...]:
+    return tuple(cell for cell in cells if isinstance(cell, Rate))
+
+
+def _rate_identity(key: CellKey) -> tuple[str, ...]:
+    """What identifies a rate apart from which canon state produced it.
+
+    `canon_on` is the axis being paired across and is therefore out. Everything else is in,
+    `population` included: the windows-matched companion is a different item set and pairing it
+    against the whole-population rate would compare two things that were never the same cell.
+    """
+    return (*_sortable(key), str(key.family), str(key.population))
+
+
+def _what_the_rate_measures(key: CellKey) -> str:
+    if key.family == FAMILY_ATTACK:
+        return "attack recall"
+    return f"the false-positive rate on {key.benign_class}"
+
+
+def rate_pinned_findings(cells: Sequence[object]) -> tuple[SummaryFinding, ...]:
+    """One finding per rate sitting on 0 or 1 in **both** canon states.
+
+    A proportion at `k = 0` or `k = n` with the layer off *and* with it on has nowhere to move, so
+    every canon-on-versus-off delta computed from it is identically zero **by construction rather
+    than by measurement**. The two read the same in a table and mean opposite things: one says the
+    layer cost nothing, the other says the cell could not have shown a cost.
+
+    **This is not `saturation`, which is next to it and about something else.** That finding counts
+    ties inside an AUC's pairwise comparisons and is about a summary being dragged down without any
+    ordering changing. This one is about a published rate having no room, and its consumer is
+    `verdict.evaluate_n1`, whose pre-registered cell turned out to have a false-positive rate of
+    500 of 500 in both canon states. `ΔFPR = +0.000000` there is a ceiling, and N1 -- which
+    triggers on `ΔFPR − Δrecall > 0` -- could not have fired on that cell short of the layer
+    actively destroying recall.
+
+    **Pinned at the same end in both states.** A rate that is 0 with the layer off and 1 with it on
+    has moved as far as a rate can, and calling that "pinned" would report the largest effect in
+    the table as an absence of one.
+
+    The finding is emitted whether or not any condition reads it, because it is a limit of the cell
+    set rather than a fact about N1: a reader meeting `FPR 1.0000 / 1.0000` in the rendered table
+    is owed the same sentence.
+    """
+    by_identity: dict[tuple[str, ...], dict[bool, Rate]] = {}
+    for cell in _rates(cells):
+        if cell.key.canon_on is None:
+            continue
+        by_identity.setdefault(_rate_identity(cell.key), {})[cell.key.canon_on] = cell
+
+    produced: list[SummaryFinding] = []
+    for _, states in sorted(by_identity.items()):
+        off = states.get(False)
+        on = states.get(True)
+        if off is None or on is None:
+            continue
+        if off.k == off.n and on.k == on.n:
+            pinned, end = 1.0, "ceiling at 1"
+        elif off.k == 0 and on.k == 0:
+            pinned, end = 0.0, "floor at 0"
+        else:
+            continue
+        measures = _what_the_rate_measures(off.key)
+        produced.append(
+            SummaryFinding(
+                kind=FINDING_RATE_PINNED,
+                keys=(off.key, on.key),
+                statement=(
+                    f"On this cell {measures} is pinned at the {end} in BOTH canon states: "
+                    f"{off.k} of {off.n} with the layer off and {on.k} of {on.n} with it on. The "
+                    f"canon-on-versus-off delta on this rate is {on.value - off.value:+.6f} by "
+                    f"construction and not by measurement -- the rate had nowhere to move -- so a "
+                    f"zero here is not evidence that the layer changed nothing, and any condition "
+                    f"subtracting this delta from another cannot be decided on this cell."
+                ),
+                computed={
+                    "pinned_at": pinned,
+                    "measures": measures,
+                    "k_canon_off": off.k,
+                    "n_canon_off": off.n,
+                    "k_canon_on": on.k,
+                    "n_canon_on": on.n,
+                },
+            )
+        )
+    return tuple(produced)
 
 
 def sign_disagreement_findings(cells: Sequence[object]) -> tuple[SummaryFinding, ...]:
@@ -487,6 +607,7 @@ def findings(cells: Sequence[object]) -> tuple[SummaryFinding, ...]:
 
     produced = [
         *saturation_findings(cells),
+        *rate_pinned_findings(cells),
         *resolution_findings(cells),
         *sign_disagreement_findings(cells),
         *bound_chain_findings(cells),

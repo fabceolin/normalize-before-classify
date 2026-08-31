@@ -19,6 +19,7 @@ import pytest
 from nbc.corpus.matrix import CHAIN_CLASS_BOUND, CHAIN_CLASS_HELD_OUT, CLEAN_CHAIN_NAME
 from nbc.errors import declared_exit_codes
 from nbc.harness.stats import mover_difference_interval
+from nbc.harness.summary import FINDING_RATE_PINNED, SummaryFinding, rate_pinned_findings
 from nbc.harness.timing import (
     BATCH_SIZE_ONE,
     CORPUS_CLASSES,
@@ -55,11 +56,13 @@ from nbc.schema import (
     OUTCOME_NOT_TRIGGERED,
     OUTCOME_TRIGGERED,
     POPULATION_SINGLE_WINDOW,
+    WILSON_SCORE,
     CellKey,
     Contrast,
     Count,
     Delta,
     Interval,
+    Rate,
 )
 
 POLICY = "shared"
@@ -68,6 +71,15 @@ HELD_OUT_CHAIN = "base32"
 PROBES_NONE_CHAIN = "rot13"
 
 CANON = Contrast(CONTRAST_CANON_ON_VS_OFF, None, frozenset({AXIS_CANON_ON}))
+
+BENIGN_N: int = load_pins(None).benign_frame.sample_size_items
+"""The per-class benign draw, read from `pins.toml`. `tests/test_pins.py` refuses it as a literal
+in a test, and it is right to: a sample size spelled here is a second place it lives."""
+
+NO_LIMITS: tuple[SummaryFinding, ...] = ()
+"""A run whose cell set carries no `rate_pinned` finding. Spelled rather than defaulted, because
+`evaluate_n1` requires the argument on purpose: the limb it feeds exists precisely because a
+missing input once read as an absent finding."""
 
 
 @pytest.fixture(scope="module")
@@ -209,14 +221,14 @@ def test_the_confirmatory_cell_is_declared_in_pins_and_hashed(declared) -> None:
 
 
 def test_n1_triggers_when_the_cost_exceeds_the_recovery(declared) -> None:
-    verdict = evaluate_n1(n1_cells(declared, fpr=0.30, recall=0.05), declared)
+    verdict = evaluate_n1(n1_cells(declared, fpr=0.30, recall=0.05), declared, NO_LIMITS)
     assert verdict.outcome == OUTCOME_TRIGGERED
     assert verdict.computed["difference"] == pytest.approx(0.25)
     assert verdict.computed["difference_interval"]["lo"] > 0  # type: ignore[index]
 
 
 def test_n1_does_not_trigger_when_the_interval_includes_zero(declared) -> None:
-    verdict = evaluate_n1(n1_cells(declared, fpr=0.10, recall=0.09), declared)
+    verdict = evaluate_n1(n1_cells(declared, fpr=0.10, recall=0.09), declared, NO_LIMITS)
     assert verdict.outcome == OUTCOME_NOT_TRIGGERED
     assert verdict.computed["minimum_detectable_effect"] > 0
 
@@ -232,17 +244,17 @@ def test_n1_says_which_of_the_three_positions_the_interval_is_in(declared) -> No
 
     All three positions, because a message with two branches for three cases is how that happened.
     """
-    above = evaluate_n1(n1_cells(declared, fpr=0.30, recall=0.05), declared)
+    above = evaluate_n1(n1_cells(declared, fpr=0.30, recall=0.05), declared, NO_LIMITS)
     assert above.outcome == OUTCOME_TRIGGERED
     assert "wholly above zero" in above.reason
 
-    below = evaluate_n1(n1_cells(declared, fpr=0.02, recall=0.40), declared)
+    below = evaluate_n1(n1_cells(declared, fpr=0.02, recall=0.40), declared, NO_LIMITS)
     assert below.outcome == OUTCOME_NOT_TRIGGERED
     assert below.computed["difference_interval"]["hi"] < 0  # type: ignore[index]
     assert "wholly below zero" in below.reason
     assert "includes zero" not in below.reason and "straddles zero" not in below.reason
 
-    straddling = evaluate_n1(n1_cells(declared, fpr=0.10, recall=0.09), declared)
+    straddling = evaluate_n1(n1_cells(declared, fpr=0.10, recall=0.09), declared, NO_LIMITS)
     assert straddling.outcome == OUTCOME_NOT_TRIGGERED
     interval = straddling.computed["difference_interval"]
     assert interval["lo"] < 0 < interval["hi"]  # type: ignore[index]
@@ -254,7 +266,7 @@ def test_n1_is_not_evaluable_when_its_declared_cell_is_absent(declared) -> None:
     """It is never re-pointed at another cell. A run whose cells do not contain the pre-registered
     one has not tested the pre-registered hypothesis."""
     elsewhere = canon_delta(0.5, 0.01, baseline="somebody-else", chain=CLEAN_CHAIN_NAME)
-    verdict = evaluate_n1([elsewhere], declared)
+    verdict = evaluate_n1([elsewhere], declared, NO_LIMITS)
     assert verdict.outcome == OUTCOME_NOT_EVALUABLE
     assert declared.dressing_chain in verdict.reason
 
@@ -266,7 +278,7 @@ def test_n1_counts_the_exploratory_cells_it_scanned(declared) -> None:
         canon_delta(0.4, 0.01, baseline=declared.baseline, chain=CLEAN_CHAIN_NAME),
         canon_delta(0.4, 0.01, baseline="another", chain=BOUND_CHAIN),
     ]
-    verdict = evaluate_n1(n1_cells(declared, fpr=0.30, recall=0.05) + others, declared)
+    verdict = evaluate_n1(n1_cells(declared, fpr=0.30, recall=0.05) + others, declared, NO_LIMITS)
     assert verdict.computed["exploratory_cells_scanned"] == 2
     assert "exploratory" in verdict.reason
 
@@ -279,7 +291,9 @@ def test_a_triggered_exploratory_cell_is_never_the_verdict(declared) -> None:
                     family=FAMILY_BENIGN, benign_class=declared.benign_class),
         canon_delta(0.0, 0.01, baseline=declared.baseline, chain=CLEAN_CHAIN_NAME),
     ]
-    verdict = evaluate_n1(n1_cells(declared, fpr=0.10, recall=0.09) + exploratory, declared)
+    verdict = evaluate_n1(
+        n1_cells(declared, fpr=0.10, recall=0.09) + exploratory, declared, NO_LIMITS
+    )
     assert verdict.outcome == OUTCOME_NOT_TRIGGERED
     assert verdict.computed["difference"] == pytest.approx(0.01)
 
@@ -293,8 +307,98 @@ def test_n1_ignores_the_windows_matched_companion(declared) -> None:
         family=FAMILY_BENIGN, benign_class=declared.benign_class,
         population=POPULATION_SINGLE_WINDOW,
     )
-    verdict = evaluate_n1(n1_cells(declared, fpr=0.10, recall=0.09) + [companion], declared)
+    verdict = evaluate_n1(
+        n1_cells(declared, fpr=0.10, recall=0.09) + [companion], declared, NO_LIMITS
+    )
     assert verdict.computed["delta_false_positive"] == pytest.approx(0.10)
+
+
+def pinned_rate(declared, *, k: int, canon_on: bool, family: str, n: int = BENIGN_N) -> Rate:
+    """One published rate on the confirmatory cell, at one canon state.
+
+    The interval is not the point here -- `rate_pinned` reads `k` and `n` -- but a `Rate` cannot
+    exist without one, which is the constraint story 4.1 put there on purpose.
+    """
+    value = k / n
+    return Rate(
+        k=k,
+        n=n,
+        interval=Interval(max(0.0, value - 0.01), min(1.0, value + 0.01), WILSON_SCORE),
+        key=key(
+            baseline=declared.baseline,
+            chain=declared.dressing_chain,
+            family=family,
+            benign_class=declared.benign_class if family == FAMILY_BENIGN else None,
+            contrast=None,
+            canon_on=canon_on,
+        ),
+    )
+
+
+def test_n1_says_its_cell_could_not_decide_when_the_benign_rate_is_pinned(declared) -> None:
+    """The failure the first full run walked into, and the one no clause anticipated.
+
+    On the pre-registered cell the false-positive rate on `b_code` was the whole benign draw with
+    the layer off AND with it on. `ΔFPR = +0.000000` there is a **ceiling**, not a cost of zero:
+    with ΔFPR identically zero, `D = ΔFPR − Δrecall > 0` requires `Δrecall < 0`, so N1 could not
+    have fired short of the layer actively destroying recall.
+
+    The PRD spent three paragraphs forbidding a *bound* confirmatory cell, because recovery there
+    is total by contract -- and the degeneracy arrived through the other side of the subtraction,
+    on the benign half, which no clause named. `not_triggered` is still the right outcome; what it
+    means is not what it says without this limb.
+    """
+    rates = [
+        pinned_rate(declared, k=BENIGN_N, canon_on=False, family=FAMILY_BENIGN),
+        pinned_rate(declared, k=BENIGN_N, canon_on=True, family=FAMILY_BENIGN),
+    ]
+    limits = rate_pinned_findings(rates)
+    assert [finding.kind for finding in limits] == [FINDING_RATE_PINNED]
+
+    verdict = evaluate_n1(n1_cells(declared, fpr=0.0, recall=0.166), declared, limits)
+    assert verdict.outcome == OUTCOME_NOT_TRIGGERED
+    assert verdict.computed["cell_could_decide"] is False
+    assert verdict.computed["pinned_rates"][0]["pinned_at"] == 1.0  # type: ignore[index]
+    assert "SATURATION" in verdict.reason
+    assert "nowhere to move" in verdict.reason
+    assert "Δrecall is NEGATIVE" in verdict.reason
+
+
+def test_n1_reports_no_saturation_when_neither_rate_is_pinned(declared) -> None:
+    """The limb has to be absent when it does not apply, or it becomes decoration on every cell."""
+    rates = [
+        pinned_rate(declared, k=BENIGN_N * 3 // 4, canon_on=False, family=FAMILY_BENIGN),
+        pinned_rate(declared, k=BENIGN_N * 4 // 5, canon_on=True, family=FAMILY_BENIGN),
+    ]
+    assert rate_pinned_findings(rates) == ()
+
+    verdict = evaluate_n1(
+        n1_cells(declared, fpr=0.10, recall=0.09), declared, rate_pinned_findings(rates)
+    )
+    assert verdict.computed["cell_could_decide"] is True
+    assert verdict.computed["pinned_rates"] == []
+    assert "SATURATION" not in verdict.reason
+
+
+def test_n1_ignores_a_rate_pinned_on_some_other_cell(declared) -> None:
+    """A pinned rate elsewhere in the table is a limit of that cell, not of the one N1 decides on.
+    Admitting it would qualify the headline verdict with a fact about a different column."""
+    rates = [
+        Rate(
+            k=BENIGN_N, n=BENIGN_N, interval=Interval(0.99, 1.0, WILSON_SCORE),
+            key=key(
+                baseline="somebody-else", chain=BOUND_CHAIN, family=FAMILY_BENIGN,
+                benign_class=declared.benign_class, contrast=None, canon_on=canon_on,
+            ),
+        )
+        for canon_on in (False, True)
+    ]
+    limits = rate_pinned_findings(rates)
+    assert len(limits) == 1
+
+    verdict = evaluate_n1(n1_cells(declared, fpr=0.10, recall=0.09), declared, limits)
+    assert verdict.computed["cell_could_decide"] is True
+    assert "SATURATION" not in verdict.reason
 
 
 # --- N2 ----------------------------------------------------------------------------------------------
@@ -319,7 +423,51 @@ def test_n2_names_the_pair_that_kept_it_from_triggering() -> None:
     verdict = evaluate_n2(cells)
     assert verdict.outcome == OUTCOME_NOT_TRIGGERED
     assert "secondary" in verdict.reason and BOUND_CHAIN in verdict.reason
-    assert len(verdict.computed["pairs_excluding_zero"]) == 1  # type: ignore[arg-type]
+    assert len(verdict.computed["pairs_degrading_above_zero"]) == 1  # type: ignore[arg-type]
+
+
+def test_n2_does_not_count_a_pair_below_zero_as_degradation() -> None:
+    """The second instance of the module's one defect, and the one that reached the README.
+
+    `clean_vs_<chain>` is `recall(clean) - recall(chain)`, so an interval wholly BELOW zero means
+    the baseline detected the ENCODED attack better than the clean one. Testing exclusion of zero
+    rather than position against it counted that as degradation: the first full run published
+    "14 of 14 pairs have an interval excluding zero", which reads as the dressings degrading the
+    classifier everywhere, when 10 of the 14 ran the other way.
+
+    The outcome is unchanged -- one pair above zero is still enough not to trigger -- and that is
+    exactly why no test caught it.
+    """
+    cells = [
+        clean_vs(0.40, 0.05, baseline="primary", chain=BOUND_CHAIN),
+        clean_vs(-0.17, 0.05, baseline="secondary", chain=BOUND_CHAIN),
+    ]
+    verdict = evaluate_n2(cells)
+
+    assert verdict.outcome == OUTCOME_NOT_TRIGGERED
+    assert [pair["baseline"] for pair in verdict.computed["pairs_degrading_above_zero"]] == [  # type: ignore[index,union-attr]
+        "primary"
+    ]
+    assert [pair["baseline"] for pair in verdict.computed["pairs_improving_below_zero"]] == [  # type: ignore[index,union-attr]
+        "secondary"
+    ]
+    assert "1 of 2 pairs" in verdict.reason
+    assert "wholly BELOW zero" in verdict.reason and "secondary" in verdict.reason
+
+
+def test_n2_triggers_with_only_below_zero_pairs_and_says_they_ran_the_other_way() -> None:
+    """A pair below zero excludes zero and is still not degradation, so it cannot keep N2 from
+    triggering. The trigger reads `lo > 0`, and the reader is told the pairs exist regardless."""
+    cells = [
+        clean_vs(-0.17, 0.05, baseline="primary", chain=BOUND_CHAIN),
+        clean_vs(-0.12, 0.05, baseline="secondary", chain=BOUND_CHAIN),
+    ]
+    verdict = evaluate_n2(cells)
+
+    assert verdict.outcome == OUTCOME_TRIGGERED
+    assert verdict.computed["pairs_degrading_above_zero"] == []
+    assert len(verdict.computed["pairs_improving_below_zero"]) == 2  # type: ignore[arg-type]
+    assert "In 2 of the 2 pairs" in verdict.reason
 
 
 def test_n2_ignores_an_unencoded_chain() -> None:
@@ -495,6 +643,71 @@ def test_a_chain_with_no_ceiling_hits_stays_a_bound_chain() -> None:
     assert BOUND_CHAIN in verdict.computed["bound_chains"]  # type: ignore[operator]
 
 
+def test_n4_does_not_count_a_chain_that_destroys_recall_as_one_that_recovers() -> None:
+    """The third instance of the module's one defect, and the one the bound limb already guarded.
+
+    Two lines apart, `bound_recovers` checked `lo > 0.0` and the generalization limb checked only
+    that the interval excluded zero. So a chain where the layer DESTROYS recall was counted among
+    the chains that "kept this from triggering". The first full run measured
+    `testsavantai-bert-small` on `base64x4` at Δrecall = -0.0333, interval [-0.0451, -0.0240], and
+    published it as recovery: "2 of 6" where the measurement was 1 of 6.
+
+    The outcome does not move -- one genuine recovery is still enough -- which is why 2260 tests
+    did not see it.
+    """
+    cells = [
+        canon_delta(0.40, 0.05, baseline="primary", chain=BOUND_CHAIN),
+        canon_delta(-0.20, 0.05, baseline="primary", chain=HELD_OUT_CHAIN,
+                    chain_class=CHAIN_CLASS_HELD_OUT),
+    ]
+    verdict = evaluate_n4(cells)
+
+    assert verdict.outcome == OUTCOME_TRIGGERED
+    assert verdict.computed["chains_recovering_off_distribution"] == []
+    assert verdict.computed["chains_degrading_off_distribution"] == [HELD_OUT_CHAIN]
+    assert "wholly BELOW zero" in verdict.reason
+    assert "costs recall rather than recovering it" in verdict.reason
+
+
+def test_n4_separates_a_held_out_recovery_from_an_over_ceiling_one() -> None:
+    """"The layer is not confined to what it was built against" is a claim about HELD-OUT chains.
+
+    An over-ceiling chain is a bound encoding applied past the recursion budget -- the same decoder,
+    further down -- so a verdict resting on one alone demonstrates no reach. The first full run's
+    single recovering chain was `base64x4`, and its sentence claimed generalization anyway.
+    """
+    over = "base64+base64+base64+base64"
+    cells = [
+        canon_delta(0.40, 0.05, baseline="primary", chain=BOUND_CHAIN),
+        canon_delta(0.00, 0.05, baseline="primary", chain=HELD_OUT_CHAIN,
+                    chain_class=CHAIN_CLASS_HELD_OUT),
+        canon_delta(0.17, 0.02, baseline="primary", chain=over),
+        ceiling_census(over),
+    ]
+    verdict = evaluate_n4(cells)
+
+    assert verdict.outcome == OUTCOME_NOT_TRIGGERED
+    assert verdict.computed["chains_recovering_off_distribution"] == [over]
+    assert verdict.computed["held_out_chains_recovering"] == []
+    assert "None of them is a held-out encoding" in verdict.reason
+    assert "no reach beyond the encodings it was built for" in verdict.reason
+
+
+def test_n4_says_so_when_the_recovery_is_on_a_held_out_encoding() -> None:
+    """The other side of the same branch: reach beyond the built-against set is the finding N4 is
+    written to detect, and it has to be distinguishable from an over-ceiling recovery."""
+    cells = [
+        canon_delta(0.40, 0.05, baseline="primary", chain=BOUND_CHAIN),
+        canon_delta(0.30, 0.05, baseline="primary", chain=HELD_OUT_CHAIN,
+                    chain_class=CHAIN_CLASS_HELD_OUT),
+    ]
+    verdict = evaluate_n4(cells)
+
+    assert verdict.outcome == OUTCOME_NOT_TRIGGERED
+    assert verdict.computed["held_out_chains_recovering"] == [HELD_OUT_CHAIN]
+    assert "reach beyond what the layer was built against" in verdict.reason
+
+
 def test_n4_is_not_evaluable_without_both_halves() -> None:
     only_bound = [canon_delta(0.40, 0.05, baseline="primary", chain=BOUND_CHAIN)]
     assert evaluate_n4(only_bound).outcome == OUTCOME_NOT_EVALUABLE
@@ -519,7 +732,7 @@ def a_complete_run(declared):  # type: ignore[no-untyped-def]
 
 def test_verdicts_produces_all_four_in_declared_order(declared) -> None:
     cells, timing = a_complete_run(declared)
-    produced = verdicts(cells, timing, declared)
+    produced = verdicts(cells, timing, declared, NO_LIMITS)
     assert tuple(v.condition for v in produced) == FALSIFICATION_CONDITIONS
     for verdict in produced:
         assert verdict.reason.strip()
@@ -529,7 +742,7 @@ def test_verdicts_produces_all_four_in_declared_order(declared) -> None:
 def test_a_triggered_condition_never_aborts(declared) -> None:
     """A negative result is publishable and this artifact commits to publishing it."""
     cells, timing = a_complete_run(declared)
-    produced = verdicts(cells, timing, declared)
+    produced = verdicts(cells, timing, declared, NO_LIMITS)
     assert any(v.triggered for v in produced), "this run triggers at least one"
     refuse_an_unevaluable_run(produced)  # does not raise
 
@@ -538,7 +751,7 @@ def test_an_unevaluable_condition_aborts_naming_the_missing_input(declared) -> N
     """The opposite failure, and the one that matters: a condition that reads as un-triggered when
     nobody could check it is how the whole section becomes decorative."""
     cells, _ = a_complete_run(declared)
-    produced = verdicts(cells, None, declared)
+    produced = verdicts(cells, None, declared, NO_LIMITS)
     assert [v.outcome for v in produced].count(OUTCOME_NOT_EVALUABLE) == 1
     with pytest.raises(VerdictNotEvaluable) as caught:
         refuse_an_unevaluable_run(produced)
@@ -549,3 +762,4 @@ def test_an_unevaluable_condition_aborts_naming_the_missing_input(declared) -> N
 def test_the_new_abort_declares_exit_code_33_and_declares_it_once() -> None:
     assert declared_exit_codes()[33] is VerdictNotEvaluable
     assert VerdictNotEvaluable.exit_code == 33
+
