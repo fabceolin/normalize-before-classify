@@ -221,6 +221,35 @@ def test_n1_does_not_trigger_when_the_interval_includes_zero(declared) -> None:
     assert verdict.computed["minimum_detectable_effect"] > 0
 
 
+def test_n1_says_which_of_the_three_positions_the_interval_is_in(declared) -> None:
+    """`not_triggered` is two findings, and the message used to publish one of them for both.
+
+    The first real run produced an interval of [-0.196143, -0.135035] and the sentence beside it
+    read "It includes zero" -- wrong about the two numbers printed immediately before it, and
+    understating the result while being wrong: an interval wholly BELOW zero says the layer
+    recovers more than it costs on that cell, which is a stronger statement than the condition
+    merely failing to fire.
+
+    All three positions, because a message with two branches for three cases is how that happened.
+    """
+    above = evaluate_n1(n1_cells(declared, fpr=0.30, recall=0.05), declared)
+    assert above.outcome == OUTCOME_TRIGGERED
+    assert "wholly above zero" in above.reason
+
+    below = evaluate_n1(n1_cells(declared, fpr=0.02, recall=0.40), declared)
+    assert below.outcome == OUTCOME_NOT_TRIGGERED
+    assert below.computed["difference_interval"]["hi"] < 0  # type: ignore[index]
+    assert "wholly below zero" in below.reason
+    assert "includes zero" not in below.reason and "straddles zero" not in below.reason
+
+    straddling = evaluate_n1(n1_cells(declared, fpr=0.10, recall=0.09), declared)
+    assert straddling.outcome == OUTCOME_NOT_TRIGGERED
+    interval = straddling.computed["difference_interval"]
+    assert interval["lo"] < 0 < interval["hi"]  # type: ignore[index]
+    assert "straddles zero" in straddling.reason
+    assert "wholly" not in straddling.reason
+
+
 def test_n1_is_not_evaluable_when_its_declared_cell_is_absent(declared) -> None:
     """It is never re-pointed at another cell. A run whose cells do not contain the pre-registered
     one has not tested the pre-registered hypothesis."""

@@ -213,6 +213,29 @@ def evaluate_n1(cells: Sequence[object], confirmatory) -> Verdict:  # type: igno
     )
     triggered = interval.lo > 0.0
 
+    # Three positions, not two. `not_triggered` covers a straddling interval AND one lying wholly
+    # below zero, and those are different findings: the first says the cell is inconclusive, the
+    # second says the layer clearly recovers more than it costs. The first real run produced
+    # [-0.196143, -0.135035] and the message called it "includes zero" -- a published sentence
+    # contradicting the two numbers printed beside it, and understating the result while doing so.
+    # Read off the interval rather than off `triggered`, which cannot tell the two apart.
+    if triggered:
+        standing = (
+            "It lies wholly above zero: the layer costs more on this benign class than it "
+            "recovers on this chain."
+        )
+    elif interval.hi < 0.0:
+        standing = (
+            "It lies wholly below zero: on this cell the layer recovers more in recall than it "
+            "costs in false positives, which is a stronger statement than the condition failing "
+            "to trigger."
+        )
+    else:
+        standing = (
+            "It straddles zero, so this cell does not separate a cost exceeding the recovery from "
+            "one that does not."
+        )
+
     return Verdict(
         condition="N1",
         outcome=OUTCOME_TRIGGERED if triggered else OUTCOME_NOT_TRIGGERED,
@@ -222,12 +245,7 @@ def evaluate_n1(cells: Sequence[object], confirmatory) -> Verdict:  # type: igno
             f"{fpr_delta.value:+.6f} − {recall_delta.value:+.6f} = "
             f"{fpr_delta.value - recall_delta.value:+.6f}, interval "
             f"[{interval.lo:+.6f}, {interval.hi:+.6f}]. "
-            + (
-                "It lies wholly above zero: the layer costs more on this benign class than it "
-                "recovers on this chain."
-                if triggered
-                else "It includes zero, so this cell does not show a cost exceeding the recovery."
-            )
+            + standing
             + f" {len(exploratory)} other canon deltas were scanned and are exploratory: a "
             f"triggered one among them is reported as exploratory and is never the verdict."
         ),
