@@ -96,7 +96,8 @@ from nbc.harness.summary import (
 from nbc.harness.timing import read_timing_report, run_timing_pass
 from nbc.harness.verdict import refuse_an_unevaluable_run, verdicts
 from nbc.pins import Pins, load_pins
-from nbc.report.caveats import verify_caveats_file
+from nbc.report.caveats import DEFAULT_README, verify_caveats_file
+from nbc.report.readme import render_into
 from nbc.schema import INTERVAL_METHODS
 from nbc.schema import CANONICAL, CONDITIONS, CorpusItem, ItemScore, Score
 
@@ -114,7 +115,10 @@ __all__ = [
     "full_run",
     "reaggregate",
     "refuse_a_corpus_the_scores_do_not_describe",
+    "STEP_RENDER",
+    "readme_path",
     "results_directory",
+    "results_path",
     "traces_path",
     "scores_path",
     "score_shard",
@@ -171,6 +175,21 @@ def results_directory(root: str | Path | None = None) -> Path:
 
 def scores_path(root: str | Path | None = None) -> Path:
     return results_directory(root) / SCORES_FILENAME
+
+
+def results_path(root: str | Path | None = None) -> Path:
+    """The published file the renderer reads, derived from the same root the writers use."""
+    return results_directory(root) / RESULTS_FILENAME
+
+
+def readme_path(root: str | Path | None = None) -> Path:
+    """The README the generated block is injected into, derived from the same root.
+
+    The filename is `caveats.DEFAULT_README` rather than a second spelling of `README.md`: the
+    honesty check, the size-budget check and this injection must all be talking about one file, and
+    a re-spelled name is how two of them end up talking about two.
+    """
+    return results_directory(root).parent / DEFAULT_README
 
 
 def shard_path(shards: int, shard: int, root: str | Path | None = None) -> Path:
@@ -598,7 +617,11 @@ def full_run(
     shards: int = 1,
     profile: str = PROFILE_FULL,
 ) -> dict[str, object]:
-    """The six steps, in the declared order, ending at `results/results.json`.
+    """The six steps of `results.STEPS`, in that order, ending at `results/results.json`.
+
+    It ends at the file and not at a published README: rendering the block is `report`, which is a
+    function of the file this wrote and takes no measurement. A run that also published would make
+    an eighty-five-minute measurement a publisher as a side effect.
 
     The order is `results.STEPS` and each boundary was paid for. The preflight runs before the pins
     are read and therefore before `onnxruntime` is imported -- a preflight that fires after the
@@ -639,7 +662,12 @@ def full_run(
     # The pins arrive already loaded, because `main` loads them before dispatching and reloading
     # them here would have made the parameter decorative -- which it was, in the first version of
     # this function, so a caller handing in one set of pins was silently measured against another.
-    caveats = verify_caveats_file()
+    # The README this run is held to is the one at its own root, not the one in whatever directory
+    # the command was invoked from. `verify_caveats_file()` with no argument resolves `README.md`
+    # against the working directory, so under `--root` the honesty check read one file while
+    # `report` injected into another -- the two halves of `readme_path`'s own reason for existing,
+    # pointing at different files.
+    caveats = verify_caveats_file(readme_path(root))
     steps.append(STEP_VERIFY)
 
     # (2). Wholly absent, or wholly present. Anything between aborts.
@@ -761,6 +789,17 @@ def full_run(
     }
 
 
+STEP_RENDER: Final[str] = "render"
+"""What `report` records, and it is deliberately not one of `results.STEPS`.
+
+It sat in that tuple for two stories with no code path emitting it, which said that `all` ends at a
+published table when `all` ends at a file. Rendering is an act on the results file, not a step of
+producing one -- the same shape as `STEP_REAGGREGATE` below, and declared the same way, here beside
+the command that performs it. The measuring run therefore leaves the README alone, and what stops a
+published block drifting from the file it claims to be a function of is a test that renders the
+committed file and compares it, not a step nobody takes.
+"""
+
 STEP_REAGGREGATE: Final[str] = "reaggregate"
 """What `reaggregate` records in `run.steps`, and it is deliberately not `STEP_AGGREGATE`.
 
@@ -821,7 +860,7 @@ def reaggregate(pins: Pins, *, root: str | Path | None = None) -> dict[str, obje
     started = time.perf_counter_ns()
 
     platform.preflight()
-    caveats = verify_caveats_file()
+    caveats = verify_caveats_file(readme_path(root))
 
     previous_at = results_directory(root) / RESULTS_FILENAME
     if not previous_at.exists():
@@ -1110,8 +1149,9 @@ def main(argv: list[str] | None = None) -> int:
     subcommands.add_parser(
         "report",
         help=(
-            "render the table from results/results.json and inject it into the README. Story 5.1 "
-            "owns the renderer; this aborts rather than emitting an empty table"
+            "render the table from results/results.json and replace the bytes between the "
+            "README's two RESULTS markers with it. Measures nothing and recomputes nothing -- the "
+            "block is a pure function of the results file, and no byte outside the markers moves"
         ),
     )
     subcommands.add_parser(
@@ -1155,13 +1195,13 @@ def main(argv: list[str] | None = None) -> int:
             # file, so a smoke table cannot be re-derived into a full one by passing a flag.
             report = reaggregate(pins, root=args.root)
         elif args.subcommand == "report":
-            raise ResultsIncomplete(
-                "the renderer is story 5.1 -- 'the table is a pure function of the results file' -- "
-                "and it has not landed. `all` produces results/results.json, which is that "
-                "function's input. This aborts rather than writing an empty table into the README, "
-                "because an empty rendered block and a rendered block are indistinguishable to a "
-                "reader who did not run the command"
-            )
+            # The renderer reads `results.json` and the README and nothing else -- it cannot reach
+            # back into this module to recompute a figure it failed to find, which is what makes
+            # the block a function of the file rather than of the run that happens to be in
+            # progress. Both paths are derived from `--root`, so a test never writes the
+            # repository's own README.
+            report = render_into(results_path(args.root), readme_path(args.root))
+            report["steps"] = [STEP_RENDER]
         else:
             report = merge_shards(
                 pins, shards=args.shards, root=args.root, profile=args.profile

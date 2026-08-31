@@ -87,7 +87,6 @@ STEP_BUILD: Final[str] = "build"
 STEP_MEASURE: Final[str] = "measure"
 STEP_TIME: Final[str] = "time"
 STEP_AGGREGATE: Final[str] = "aggregate"
-STEP_RENDER: Final[str] = "render"
 
 STEPS: Final[tuple[str, ...]] = (
     STEP_PREFLIGHT,
@@ -96,7 +95,6 @@ STEPS: Final[tuple[str, ...]] = (
     STEP_MEASURE,
     STEP_TIME,
     STEP_AGGREGATE,
-    STEP_RENDER,
 )
 """The order, as a declared tuple rather than as the order a function happens to be written in.
 
@@ -114,6 +112,14 @@ half-new rows while the manifest still describes the old ones.
 
 *Time after measure and before aggregate* -- the timing pass is N3's right-hand side, and a run that
 aggregated first would evaluate a condition against a number it had not taken yet.
+
+**Rendering is not one of these six**, and `render` used to be listed here without any code path
+emitting it -- a seventh step that never happened, which read as though `all` published a table it
+never touched. It is the same shape as `reaggregate`: an act on the file this run produced rather
+than a step of producing it, so it is declared beside the command that performs it
+(`run.STEP_RENDER`) and not in this tuple. The measuring run stops at the file; `report` publishes
+it, and `tests/report/test_readme.py` is what refuses a published block the committed file no
+longer renders.
 """
 
 

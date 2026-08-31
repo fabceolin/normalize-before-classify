@@ -1,0 +1,1659 @@
+"""The generated block, proved against the file it is a function of and against every way it aborts.
+
+The repository's own `results/results.json` is the happy path, and it is the only input that can
+prove completeness at scale: 1157 cells, four verdicts and 197 findings, all of which have to reach
+a reader or the render has to say which did not. Every failure is exercised against a payload built
+from a fixture, because the interesting inputs are the ones the committed file must never be.
+
+Nothing here writes into the repository's own `README.md`. Every injection goes to `tmp_path`,
+which is what `--readme` exists for: the earlier version of the report seam was tested by invoking
+the entrypoint at the repository root, and the day the subcommand stopped aborting that test would
+have published a table from inside the suite.
+"""
+
+from __future__ import annotations
+
+import ast
+import copy
+import re
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from nbc.errors import EXIT_OK, declared_exit_codes, exit_code_for
+from nbc.report import readme as renderer
+from nbc.report.caveats import RESULTS_END, RESULTS_START
+from nbc.report.readme import (
+    AXES,
+    DEFAULT_RESULTS,
+    HEADLINE_WINDOW_POLICY,
+    ReportNotRenderable,
+    SCHEMA_VERSION,
+    inject,
+    load_results,
+    main,
+    render,
+    render_into,
+)
+
+SRC = Path(__file__).resolve().parents[2] / "src"
+MODULE = SRC / "nbc" / "report" / "readme.py"
+
+
+# --- fixtures ------------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def published(repo_root: Path) -> dict[str, Any]:
+    """The committed results file, parsed. Read once; every mutating test deep-copies it."""
+    return json.loads((repo_root / DEFAULT_RESULTS).read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def payload(published: dict[str, Any]) -> dict[str, Any]:
+    return copy.deepcopy(published)
+
+
+def a_readme(before: str = "# a repository\n\nprose above.\n\n", after: str = "\nprose below.\n") -> str:
+    return f"{before}{RESULTS_START}\n{RESULTS_END}\n{after}"
+
+
+def write(directory: Path, payload: dict[str, Any], readme: str | None = None) -> tuple[Path, Path]:
+    directory.mkdir(parents=True, exist_ok=True)
+    results = directory / "results.json"
+    results.write_text(json.dumps(payload), encoding="utf-8")
+    target = directory / "README.md"
+    target.write_text(a_readme() if readme is None else readme, encoding="utf-8")
+    return results, target
+
+
+def failures_of(caught: pytest.ExceptionInfo[ReportNotRenderable]) -> str:
+    return "\n".join(caught.value.failures)
+
+
+# --- the import bound, with its own red input -----------------------------------------------------
+#
+# Modelled on tests/canon/test_import_bound.py: the scanner reads the syntax tree rather than the
+# text, and is itself checked against a module that violates the rule, because a scanner nobody has
+# seen report anything is not a scanner.
+
+ALLOWED = frozenset({"nbc.errors", "nbc.report.caveats"})
+"""The whole of what the renderer may import outside the standard library.
+
+`nbc.harness.*` would drag `onnxruntime` in and would let a renderer recompute a figure it failed
+to find; `nbc.pins` would drag `pins.toml` in. Either turns the block into a function of more than
+the results file."""
+
+
+def imported_modules(path: Path, src: Path = SRC) -> set[str]:
+    package = path.relative_to(src).with_suffix("").parts[:-1]
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = package[: len(package) - node.level + 1]
+                prefix = ".".join(base)
+                names.add(f"{prefix}.{node.module}" if node.module else prefix)
+            elif node.module:
+                names.add(node.module)
+    return names
+
+
+def offending_imports(path: Path, src: Path = SRC) -> list[str]:
+    offenders = []
+    for name in sorted(imported_modules(path, src)):
+        if name.split(".")[0] in sys.stdlib_module_names:
+            continue
+        if name in ALLOWED:
+            continue
+        offenders.append(name)
+    return offenders
+
+
+def test_the_renderer_imports_only_what_the_bound_allows() -> None:
+    assert offending_imports(MODULE) == []
+
+
+def test_the_import_scan_reports_a_module_that_breaks_the_bound(tmp_path: Path) -> None:
+    """The scanner's own red input, built under `tmp_path` and never inside the shipped package.
+
+    The first version of this test wrote the offender into `src/nbc/report/` and unlinked it in a
+    `finally`. An interrupted run would have left a module importing the harness inside the package
+    whose whole point is that it does not -- in a suite whose rule is that every write goes to
+    `tmp_path`.
+    """
+    src = tmp_path / "src"
+    offender = src / "nbc" / "report" / "_breaks_the_bound.py"
+    offender.parent.mkdir(parents=True)
+    offender.write_text(
+        "'import nbc.pins is fine inside a docstring'\n"
+        "from nbc.harness import run\n"
+        "import nbc.pins\n"
+        "import json\n",
+        encoding="utf-8",
+    )
+    assert offending_imports(offender, src) == ["nbc.harness", "nbc.pins"]
+    assert not (SRC / "nbc" / "report" / "_breaks_the_bound.py").exists()
+
+
+def test_the_renderer_does_not_import_the_inference_runtime() -> None:
+    """A renderer that opened a model would be a renderer that could recompute what it read."""
+    code = "import sys, nbc.report.readme; print('onnxruntime' in sys.modules, 'nbc.pins' in sys.modules)"
+    completed = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert completed.stdout.strip() == "False False", completed.stdout
+
+
+# --- the three restated vocabularies, bound to their owners in both directions -------------------
+#
+# The renderer may not import `nbc.harness.results`, `nbc.schema` or `nbc.pins` -- that is the whole
+# point of it -- so each of these three constants is a second spelling of somebody else's
+# declaration. A second spelling with nothing holding it to the first is a defect that surfaces at
+# the end of the next eighty-five-minute run. This test file has no import bound, so the binding
+# lives here, in the two-direction shape `src/nbc/baselines/tokenization.py:112-125` already uses:
+# neither side may hold a value the other does not.
+
+
+def test_the_schema_version_is_the_one_the_producer_writes() -> None:
+    """Bump `results.SCHEMA_VERSION` and the renderer refuses every file the producer emits."""
+    from nbc.harness.results import SCHEMA_VERSION as PRODUCED
+
+    assert renderer.SCHEMA_VERSION == PRODUCED
+
+
+def test_the_axes_are_the_fields_the_cell_key_serializes_in_that_order() -> None:
+    """`AXES` is the key's field order, and the order is load-bearing: it is the identity tuple.
+
+    Both directions at once, because it is an ordered comparison: an axis added to `CellKey`, one
+    removed, and any reordering all fail here rather than in a render that quietly groups by a
+    different coordinate.
+    """
+    import dataclasses
+
+    from nbc.schema import CellKey
+
+    assert renderer.AXES == tuple(field.name for field in dataclasses.fields(CellKey))
+
+
+def test_every_pinnable_window_policy_is_either_the_headline_or_a_declared_sensitivity_pass() -> None:
+    """Both directions: a policy `pins.toml` admits and this module places nowhere would abort every
+    render, and a policy declared here that no pin can select is a table nothing can produce."""
+    from nbc.pins import WINDOW_POLICIES
+
+    placed = {renderer.HEADLINE_WINDOW_POLICY} | set(renderer.SENSITIVITY_WINDOW_POLICIES)
+
+    unplaced = sorted(WINDOW_POLICIES - placed)
+    assert not unplaced, (
+        f"pins.toml admits window policies {unplaced} that the renderer places in no table; every "
+        f"cell measured under one would abort the render"
+    )
+    unpinnable = sorted(placed - WINDOW_POLICIES)
+    assert not unpinnable, (
+        f"the renderer declares window policies {unpinnable} that no pin can select; a section "
+        f"keyed on one is a table no run can fill"
+    )
+
+
+def test_the_headline_policy_is_the_one_the_committed_cells_were_measured_under(
+    published: dict[str, Any]
+) -> None:
+    """The binding above is against a declaration; this is against the file that exists."""
+    assert {cell["key"]["window_policy"] for cell in published["cells"]} == {
+        renderer.HEADLINE_WINDOW_POLICY
+    }
+
+
+# --- the abort itself -----------------------------------------------------------------------------
+
+
+def test_the_new_abort_declares_exit_code_36_and_declares_it_once() -> None:
+    assert declared_exit_codes()[36] is ReportNotRenderable
+    assert ReportNotRenderable.exit_code == 36
+    assert exit_code_for(ReportNotRenderable("because")) == 36
+
+
+def test_the_abort_carries_every_failure_it_found() -> None:
+    abort = ReportNotRenderable("one", "two")
+    assert abort.failures == ("one", "two")
+    assert "one" in str(abort) and "two" in str(abort)
+
+
+# --- the happy path, over the file this repository actually ships ----------------------------------
+
+
+def test_the_committed_results_file_renders_every_cell_it_holds(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """Completeness is enforced in the renderer; this asserts the committed file gets through it."""
+    results, target = write(tmp_path, published)
+    report = render_into(results, target)
+    assert report["cells_rendered"] == len(published["cells"])
+    assert report["verdicts_rendered"] == len(published["verdict"])
+    assert report["findings_rendered"] == len(published["run"]["summary"]["findings"])
+    assert report["readme_changed"] is True
+
+
+def test_the_block_replaces_only_the_bytes_between_the_markers(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    before = a_readme()
+    results, target = write(tmp_path, published, readme=before)
+    render_into(results, target)
+    after = target.read_text(encoding="utf-8")
+
+    assert after.count(RESULTS_START) == 1 and after.count(RESULTS_END) == 1
+    assert after[: after.index(RESULTS_START)] == before[: before.index(RESULTS_START)]
+    tail = len(RESULTS_END)
+    assert after[after.index(RESULTS_END) + tail :] == before[before.index(RESULTS_END) + tail :]
+    body = after[after.index(RESULTS_START) + len(RESULTS_START) : after.index(RESULTS_END)]
+    assert RESULTS_START not in body and RESULTS_END not in body
+    assert "\r" not in after
+
+
+def test_rendering_twice_leaves_the_file_byte_identical(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    first = target.read_bytes()
+    report = render_into(results, target)
+    assert target.read_bytes() == first
+    assert report["readme_changed"] is False
+
+
+def test_the_readme_keeps_its_mode_across_the_write(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """`mkstemp` creates 0600 and `os.replace` carries the temp file's mode onto the target."""
+    results, target = write(tmp_path, published)
+    os.chmod(target, 0o644)
+    render_into(results, target)
+    assert target.stat().st_mode & 0o777 == 0o644
+
+
+def test_the_block_carries_no_heading_and_no_uv_command(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """Two existing README guards the block must not break: heading anchors, and runnable commands."""
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    after = target.read_text(encoding="utf-8")
+    body = after[after.index(RESULTS_START) : after.index(RESULTS_END)]
+    assert not [line for line in body.splitlines() if line.startswith("#")]
+    assert not [line for line in body.splitlines() if line.strip().startswith("uv ")]
+    assert "```" not in body
+
+
+def bare_percentages(block: str) -> list[str]:
+    """Every `%` in `block` that is not inside a table cell carrying an interval or a denominator.
+
+    Scans the whole block, not the tables: the provenance bullets, the verdicts and the findings
+    are prose this module also writes, and a percentage there would be one with no `n` beside it in
+    a place no table guard looks.
+    """
+    loose: list[str] = []
+    for line in block.splitlines():
+        if "%" not in line:
+            continue
+        if not line.startswith("| ") or line.startswith("| ---"):
+            loose.append(line)
+            continue
+        loose += [
+            cell.strip()
+            for cell in line.strip("|").split(" | ")
+            if "%" in cell and "[" not in cell and "/" not in cell
+        ]
+    return loose
+
+
+def test_the_bare_percentage_scan_reports_a_percentage_with_no_n() -> None:
+    """The scanner's own red input, both ways: a scan nobody has seen report anything is not one."""
+    assert bare_percentages("| `a` | 12.00% [1.00%, 2.00%] 3/4 |\n") == []
+    assert bare_percentages("| `a` | 12.00% |\n") == ["12.00%"]
+    assert bare_percentages("- the layer edited 12.00% of them\n") == [
+        "- the layer edited 12.00% of them"
+    ]
+
+
+def test_no_percentage_reaches_the_block_without_its_n(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    assert bare_percentages(_block(target)) == []
+
+
+def test_a_column_renderer_that_dropped_the_denominator_is_caught_by_that_scan(
+    published: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scan run against a renderer that breaks the rule, so it is a check and not a restatement."""
+    monkeypatch.setitem(
+        renderer._COLUMN_RENDERERS, "rate", lambda cell: renderer._percent(cell.value)
+    )
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    assert bare_percentages(_block(target)) != []
+
+
+# --- the corpus the block is about ----------------------------------------------------------------
+
+
+def test_the_published_results_credit_the_corpus_the_manifest_and_the_attribution_do(
+    published: dict[str, Any], repo_root: Path
+) -> None:
+    """The README says the block, `data/manifest.json` and `data/ATTRIBUTION.md` name one corpus.
+
+    Written because the prose was about to be written without it. A sentence in the hand-written
+    README asserting something nothing verifies is the defect this repository is about, and the
+    three files are produced by three different commands.
+    """
+    manifest = json.loads((repo_root / "data" / "manifest.json").read_text(encoding="utf-8"))
+    assert published["run"]["build_id"] == manifest["build_id"]
+
+    credits = (repo_root / "data" / "ATTRIBUTION.md").read_text(encoding="utf-8")
+    assert f"`{manifest['build_id']}`" in credits
+
+    by_name = {entry["name"]: entry for entry in manifest["files"]}
+    assert {entry["name"] for entry in published["run"]["corpus_files"]} == set(by_name)
+    for entry in published["run"]["corpus_files"]:
+        assert entry["sha256"] == by_name[entry["name"]]["sha256"]
+        assert entry["rows"] == by_name[entry["name"]]["rows"]
+
+
+# --- the I/O matrix, one row at a time --------------------------------------------------------------
+
+
+def test_an_unknown_schema_version_names_the_one_it_understands(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    payload["schema_version"] = SCHEMA_VERSION + 1
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert str(SCHEMA_VERSION + 1) in str(caught.value)
+    assert str(SCHEMA_VERSION) in str(caught.value)
+
+
+def test_an_unknown_contrast_names_the_cell(payload: dict[str, Any], tmp_path: Path) -> None:
+    payload["cells"][0]["key"]["contrast"] = "clean_vs_a_chain_no_cell_carries"
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "clean_vs_a_chain_no_cell_carries" in failures_of(caught)
+
+
+def test_a_contrast_naming_a_chain_the_file_does_hold_is_accepted(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """The vocabulary is derived from the file's own chains, not from a list typed here.
+
+    Both directions in one test: retargeting a delta onto a chain the file holds is accepted, and
+    renaming that chain out of every cell makes the same contrast unknown.
+    """
+    chain = sorted({cell["key"]["dressing_chain"] for cell in payload["cells"]} - {None})[0]
+    delta = next(cell for cell in payload["cells"] if cell["kind"] == "delta")
+    delta["key"]["contrast"] = f"clean_vs_{chain}"
+    delta["contrast"] = {"kind": "clean_vs", "argument": chain, "spans": ["dressing_chain"]}
+    results, target = write(tmp_path, payload)
+    render_into(results, target)  # accepted: the chain is one the file carries
+
+    for cell in payload["cells"]:
+        if cell["key"]["dressing_chain"] == chain:
+            cell["key"]["dressing_chain"] = "renamed_out_of_the_file"
+    results, _ = write(tmp_path / "renamed", payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert f"clean_vs_{chain}" in failures_of(caught)
+
+
+def test_an_unknown_window_policy_aborts_rather_than_dropping_the_cell(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    payload["cells"][0]["key"]["window_policy"] = "publisher"
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "publisher" in failures_of(caught)
+    assert HEADLINE_WINDOW_POLICY in failures_of(caught)
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        f"{RESULTS_START}\nno end marker\n",
+        f"{RESULTS_START}\n{RESULTS_START}\n{RESULTS_END}\n",
+        f"{RESULTS_END}\nthe block is inverted\n{RESULTS_START}\n",
+        "no markers at all\n",
+    ],
+    ids=["no-end", "doubled-start", "inverted", "absent"],
+)
+def test_a_readme_whose_markers_cannot_be_located_is_left_alone(
+    payload: dict[str, Any], tmp_path: Path, broken: str
+) -> None:
+    results, target = write(tmp_path, payload, readme=broken)
+    with pytest.raises(ReportNotRenderable):
+        render_into(results, target)
+    assert target.read_text(encoding="utf-8") == broken
+
+
+def test_a_write_that_fails_leaves_the_readme_wholly_old(
+    payload: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`os.replace` is the last step, so a failure before it cannot leave a half-written file."""
+    results, target = write(tmp_path, payload)
+    before = target.read_text(encoding="utf-8")
+
+    def refuse(source: str, destination: str) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(renderer.os, "replace", refuse)
+    with pytest.raises(ReportNotRenderable) as caught:
+        render_into(results, target)
+    assert "No space left on device" in str(caught.value)
+    assert target.read_text(encoding="utf-8") == before
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["README.md", "results.json"]
+
+
+def test_a_readme_that_cannot_be_read_is_the_same_abort(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        render_into(results, tmp_path / "there-is-no-readme-here.md")
+    assert "there-is-no-readme-here.md" in str(caught.value)
+
+
+def test_per_baseline_duplicate_chain_lists_are_published_once(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """`excluded_probes_none == ["rot13", "rot13"]` is one excluded encoding, counted per baseline."""
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    block = _block(target)
+    line = next(line for line in block.splitlines() if "`held_out_chains`" in line)
+    assert line.count("`base32`") == 1
+    assert line.count("`url_percent`") == 1
+    excluded = next(line for line in block.splitlines() if "`excluded_probes_none`" in line)
+    assert excluded.count("`rot13`") == 1
+
+
+def test_two_opposed_chain_lists_are_resolvable_rather_than_a_flat_contradiction(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """N4 holds one chain in both the recovering and the degrading list.
+
+    It recovers for one baseline and degrades for the other, and the lists record only the chain.
+    Deduplicating them publishes the same name twice with opposite meanings and no way to resolve
+    it; attributing each to how many of the verdict's baselines it accounts for does resolve it.
+    """
+    verdict = next(
+        v
+        for v in published["verdict"]
+        if set(v["computed"].get("chains_recovering_off_distribution", []))
+        & set(v["computed"].get("chains_degrading_off_distribution", []))
+    )
+    baselines = len({key["baseline"] for key in verdict["keys"]})
+    assert baselines > 1, "the fixture this test rests on is gone"
+
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    block = _block(target)
+    for name in ("chains_recovering_off_distribution", "chains_degrading_off_distribution"):
+        line = next(line for line in block.splitlines() if f"`{name}`" in line)
+        assert f"on 1 of {baselines}" in line, line
+
+
+def test_only_a_verdicts_own_chain_lists_are_attributed_per_baseline(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """`declared_path.providers` is a list of strings and is not one entry per baseline.
+
+    Attributing it "per baseline" would be a sentence about a structure the value does not have --
+    and it read as `2 baseline-chain pairs: CPUExecutionProvider on 1` until this test existed.
+    """
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    line = next(l for l in _block(target).splitlines() if "declared execution path" in l)
+    assert "baseline-chain pair" not in line
+    for provider in published["run"]["declared_path"]["providers"]:
+        assert f"`{provider}`" in line
+
+
+def test_a_chain_list_counts_every_baseline_it_accounts_for(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """The denominator is the verdict's own baseline count, read from its keys, not typed here."""
+    verdict = next(v for v in payload["verdict"] if len({k["baseline"] for k in v["keys"]}) == 2)
+    verdict["computed"]["held_out_chains"] = ["base32", "base32", "url_percent"]
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    line = next(l for l in _block(target).splitlines() if "`held_out_chains`" in l)
+    assert "3 baseline-chain pairs" in line
+    assert "`base32` on 2 of 2" in line
+    assert "`url_percent` on 1 of 2" in line
+
+
+# --- freshness, which is not determinism ----------------------------------------------------------
+
+
+def published_block(readme: str) -> str:
+    """The bytes between the markers of `readme`, exactly as `inject` writes them."""
+    start = readme.index(RESULTS_START) + len(RESULTS_START)
+    return readme[start : readme.index(RESULTS_END)]
+
+
+def drift(readme: str, expected_body: str) -> str | None:
+    """Why the published block is not what the results file renders, or `None` when it is.
+
+    One function, used by the freshness check and by the red input that proves the freshness check
+    can fail. The comparison itself has to be the thing under test, or the red input is a test of
+    `str.replace` and stays green however weak the comparison becomes.
+    """
+    if published_block(readme) == "\n" + expected_body:
+        return None
+    return (
+        "the published block is not what the committed results file renders today. Run "
+        "`python -m nbc.report.readme --readme README.md` and commit the result"
+    )
+
+
+def test_the_shipped_readme_carries_the_block_the_committed_results_render(
+    repo_root: Path,
+) -> None:
+    """The committed README's block, against the committed results file, rendered here and now.
+
+    Byte-identical output across two runs proves the renderer is a function of its input; it proves
+    nothing about whether the block on disk is that function's *current* output. Falsifying the
+    corpus `build_id` inside the published block left the whole suite green, which is the exact
+    state this test refuses: a README that presents itself as a pure function of `results.json`
+    while describing a different file.
+
+    Two ways to go red, both correct: `results/results.json` changed and nobody ran
+    `python -m nbc.report.readme`, or somebody edited between the markers by hand.
+    """
+    expected = render(load_results(repo_root / DEFAULT_RESULTS))
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+    reason = drift(readme, expected)
+    assert reason is None, reason
+
+
+def test_the_freshness_check_notices_a_block_edited_by_hand(repo_root: Path) -> None:
+    """Its own red input, run through the comparison the check above runs -- three edits of it."""
+    published = load_results(repo_root / DEFAULT_RESULTS)
+    expected = render(published)
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+    assert drift(readme, expected) is None, "the fixture this test rests on is gone"
+
+    block = published_block(readme)
+    for tampered in (
+        readme.replace(published.run["build_id"], "0" * 64, 1),
+        readme.replace(block, block + "an added line\n", 1),
+        readme.replace(block, "\n", 1),
+    ):
+        assert tampered != readme, "the fixture this test rests on is gone"
+        assert drift(tampered, expected) is not None
+
+
+def test_the_freshness_check_notices_a_results_file_nobody_re_rendered(
+    repo_root: Path, tmp_path: Path
+) -> None:
+    """The other direction: the file moved and the block did not."""
+    payload = json.loads((repo_root / DEFAULT_RESULTS).read_text(encoding="utf-8"))
+    payload["run"]["profile_items"] = int(payload["run"]["profile_items"]) + 1
+    moved = tmp_path / "results.json"
+    moved.write_text(json.dumps(payload), encoding="utf-8")
+
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+    assert drift(readme, render(load_results(moved))) is not None
+
+
+def test_the_saturated_confirmatory_limb_renders_from_computed_not_from_the_reason(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """`cell_could_decide` exists so the block states it without parsing a sentence for it."""
+    verdict = next(v for v in payload["verdict"] if "cell_could_decide" in v["computed"])
+    verdict["reason"] = "a sentence that says nothing about saturation at all"
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    block = _block(target)
+    assert "`cell_could_decide`: no" in block
+    assert "`pinned_rates`" in block
+
+
+def test_a_reaggregated_run_says_the_latencies_came_from_another_invocation(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    payload["run"]["reaggregated"] = {
+        "from_steps": ["verify", "build", "reaggregate"],
+        "inherited": ["timing"],
+        "note": "carried forward unchanged.",
+    }
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    block = _block(target)
+    assert "not measured by the invocation that produced the cells" in block
+    for step in ("verify", "build", "reaggregate"):
+        assert f"`{step}`" in block
+
+
+def test_a_run_that_was_not_reaggregated_makes_no_such_claim(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    payload["run"].pop("reaggregated", None)
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    assert "not measured by the invocation that produced the cells" not in _block(target)
+
+
+def test_a_file_with_no_single_window_cell_loses_the_section_and_its_lead_in(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """The lead-in travels with the table. A promise of a comparison over an empty table is worse
+    than silence, and a guard counting lines against a builder that always emits a header, a rule
+    and a methods line can never fire."""
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    lead_in = "over the items that occupy one window"
+    assert lead_in in _block(target)
+
+    payload["cells"] = [
+        cell for cell in payload["cells"] if cell["key"]["population"] != "single_window"
+    ]
+    payload["run"]["summary"]["findings"] = [
+        finding
+        for finding in payload["run"]["summary"]["findings"]
+        if all(key["population"] != "single_window" for key in finding["keys"])
+    ]
+    results, target = write(tmp_path / "second", payload)
+    render_into(results, target)
+    assert lead_in not in _block(target)
+
+
+def test_the_sensitivity_section_is_absent_when_every_cell_is_the_headline_policy(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    assert {cell["key"]["window_policy"] for cell in published["cells"]} == {
+        HEADLINE_WINDOW_POLICY
+    }
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    assert "sensitivity pass" not in _block(target)
+
+
+def test_a_declared_sensitivity_pass_renders_beside_the_headline_and_never_into_it(
+    payload: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second half of the same rule: a declared pass renders, in its own table.
+
+    `pins.toml` admits one policy today, so the declared set is empty and the section is
+    unreachable on any file a run can produce. Declaring one here is what makes the branch
+    something that has been seen to work rather than something that reads as though it would.
+    """
+    monkeypatch.setattr(renderer, "SENSITIVITY_WINDOW_POLICIES", frozenset({"publisher"}))
+    extra = copy.deepcopy(next(cell for cell in payload["cells"] if cell["kind"] == "rate"))
+    extra["key"]["window_policy"] = "publisher"
+    payload["cells"].append(extra)
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    block = _block(target)
+    assert "sensitivity pass" in block
+    headline = block[block.index("The rates, per benign class") : block.index("sensitivity pass")]
+    assert "publisher" not in headline
+
+
+def test_a_results_file_that_is_not_utf8_aborts_rather_than_crashing(tmp_path: Path) -> None:
+    """`UnicodeDecodeError` is a `ValueError`, not an `OSError`, and would escape a narrower catch."""
+    results = tmp_path / "results.json"
+    results.write_bytes(b'{"schema_version": 1, "run": "\xff\xfe"}')
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "UTF-8" in str(caught.value)
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_json_is_named_rather_than_published(tmp_path: Path, constant: str) -> None:
+    """`json.loads` accepts all three by default, and each would reach a reader as `nan%`."""
+    results = tmp_path / "results.json"
+    results.write_text(
+        '{"schema_version": 1, "run": {"build_id": "x", "corpus_files": [], "value": '
+        + constant
+        + "}, \"cells\": [], \"verdict\": []}",
+        encoding="utf-8",
+    )
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert constant.lstrip("-") in str(caught.value)
+
+
+def test_a_float_literal_that_overflows_to_infinity_is_refused(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """`1e400` is finite text and an infinite float, so `parse_constant` never sees it."""
+    results = tmp_path / "results.json"
+    cell = copy.deepcopy(next(c for c in payload["cells"] if c["kind"] == "rate"))
+    payload["cells"] = [cell]
+    text = json.dumps(payload).replace(json.dumps(cell["value"]), "1e400", 1)
+    results.write_text(text, encoding="utf-8")
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "not finite" in failures_of(caught)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        (lambda cell: cell["interval"].pop("method"), "carries no method"),
+        (lambda cell: cell["interval"].pop("lo"), "carries no lo"),
+        (lambda cell: cell.__setitem__("interval", 3), "not an object"),
+        (lambda cell: cell["key"].pop("population"), "carries no population"),
+        (lambda cell: cell.pop("n"), "carries no n"),
+    ],
+    ids=["no-method", "no-lo", "interval-scalar", "no-axis", "no-n"],
+)
+def test_a_malformed_cell_is_an_abort_and_never_a_key_error(
+    payload: dict[str, Any], tmp_path: Path, mutate: Any, expected: str
+) -> None:
+    mutate(next(cell for cell in payload["cells"] if cell["kind"] == "rate"))
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert expected in failures_of(caught)
+
+
+def test_a_timing_statistic_missing_a_percentile_is_an_abort(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    payload["run"]["timing"]["layer_ns"]["overall"].pop("p50_ns")
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "carries no p50_ns" in failures_of(caught)
+
+
+def test_a_corpus_entry_missing_its_digest_is_an_abort(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    payload["run"]["corpus_files"][0].pop("sha256")
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "carries no sha256" in failures_of(caught)
+
+
+def test_a_cell_no_table_claims_aborts_naming_it(payload: dict[str, Any], tmp_path: Path) -> None:
+    """Completeness is enforced here, never asserted in a test against today's file.
+
+    The claim predicates all require the headline population; a cell in a population none of them
+    names is legal, is measured, and would be invisible to a reader. It must stop the render.
+    """
+    orphan = copy.deepcopy(next(cell for cell in payload["cells"] if cell["kind"] == "rate"))
+    orphan["key"]["population"] = "a_population_no_section_claims"
+    payload["cells"].append(orphan)
+    results, target = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        render_into(results, target)
+    assert "in no table" in failures_of(caught)
+    assert "a_population_no_section_claims" in failures_of(caught)
+
+
+def test_two_cells_at_one_identity_abort_rather_than_the_second_being_dropped(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    payload["cells"].append(copy.deepcopy(payload["cells"][0]))
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "one identity is one measurement" in failures_of(caught)
+
+
+def test_a_rate_and_a_count_at_the_same_nine_axes_are_not_a_duplicate(
+    published: dict[str, Any]
+) -> None:
+    """A rate and a window-overflow census share all nine axes and are different measurements.
+
+    Identity is the nine axes plus the kind and the census; nine alone would report one of the two
+    as a duplicate of the other and the committed file would not render at all.
+    """
+    rates = {
+        tuple(cell["key"][axis] for axis in AXES)
+        for cell in published["cells"]
+        if cell["kind"] == "rate"
+    }
+    counts = {
+        tuple(cell["key"][axis] for axis in AXES)
+        for cell in published["cells"]
+        if cell["kind"] == "count"
+    }
+    assert rates & counts
+
+
+@pytest.mark.parametrize(
+    ("kind", "value"),
+    [("rate", -0.5), ("rate", 1.5), ("auc", -0.01), ("delta", 1.5), ("delta", -1.5)],
+    ids=["rate-negative", "rate-above-one", "auc-negative", "delta-high", "delta-low"],
+)
+def test_a_value_outside_the_range_its_kind_can_take_is_refused(
+    payload: dict[str, Any], tmp_path: Path, kind: str, value: float
+) -> None:
+    """`_fixed` returned `abs(value)`, so a malformed rate of `-0.5` published as `50.00%`.
+
+    There is no honest rendering of an out-of-range value, so it is refused rather than made
+    presentable.
+    """
+    next(cell for cell in payload["cells"] if cell["kind"] == kind)["value"] = value
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "no honest way to render it" in failures_of(caught)
+
+
+def test_a_magnitude_is_rendered_with_its_own_sign() -> None:
+    assert renderer._fixed(0.25, 4) == "0.2500"
+    assert renderer._fixed(-0.25, 4) == "-0.2500"
+
+
+def test_an_interval_bound_outside_the_estimands_range_is_still_rendered(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """A structural-components interval can legitimately reach past the estimand's range."""
+    auc = next(cell for cell in payload["cells"] if cell["kind"] == "auc")
+    auc["value"] = 0.02
+    auc["interval"] = {"lo": -0.05, "hi": 0.09, "method": "auc-structural-components"}
+    payload["run"]["summary"]["findings"] = []
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    assert "[-0.0500, 0.0900]" in _block(target)
+
+
+@pytest.mark.parametrize(
+    ("axis", "value"),
+    [("family", ["attack"]), ("benign_class", {"a": 1})],
+    ids=["list", "object"],
+)
+def test_a_non_scalar_axis_value_on_a_cell_key_aborts_rather_than_crashing(
+    payload: dict[str, Any], tmp_path: Path, axis: str, value: Any
+) -> None:
+    """It reached `dict.get(cell.identity)` as an unhashable key: exit 1 with a traceback.
+
+    An axis is what a measurement is stored and looked up under, so one that cannot be a dictionary
+    key leaves the process as a `TypeError` rather than as a report -- which falsified the promise
+    that every failure to render is one abort.
+    """
+    payload["cells"][0]["key"][axis] = value
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "non-scalar axis value" in failures_of(caught)
+    assert axis in failures_of(caught)
+
+
+def test_a_non_scalar_axis_value_on_a_finding_key_aborts_rather_than_crashing(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """The same coordinate, on the other side: it reached the anchor lookup instead."""
+    payload["run"]["summary"]["findings"][0]["keys"][0]["benign_class"] = {"a": 1}
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "non-scalar axis value" in failures_of(caught)
+
+
+def test_a_finding_kind_carrying_a_pre_formatted_figure_is_refused(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """`finding["kind"]` was the one file-supplied string reaching the reader unguarded.
+
+    It published raw nanoseconds at exit 0, two lines from the same figures this module renders as
+    durations -- while `_stored_text`'s own docstring said every string that reaches the reader
+    goes through it.
+    """
+    payload["run"]["summary"]["findings"][0]["kind"] = "a_kind_taking_18394582 ns"
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "pre-formatted figure" in failures_of(caught)
+
+
+def test_a_computed_field_name_carrying_a_figure_is_refused(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """A field name reaches the reader exactly as a value does, so it is exempt from nothing."""
+    payload["verdict"][0]["computed"]["took_18394582 ns"] = 1
+    results, target = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        render_into(results, target)
+    assert "pre-formatted figure" in failures_of(caught)
+
+
+def test_a_cell_of_a_kind_this_renderer_has_no_column_for_aborts(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """Four kinds, four renderers. A fifth would be rendered by nothing and dropped in silence."""
+    payload["cells"][0]["kind"] = "a_kind_with_no_column"
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "no column for" in failures_of(caught)
+
+
+def test_an_inverted_interval_is_refused(payload: dict[str, Any], tmp_path: Path) -> None:
+    rate = next(cell for cell in payload["cells"] if cell["kind"] == "rate")
+    rate["interval"] = {"lo": 0.9, "hi": 0.1, "method": "wilson-score"}
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "inverted" in failures_of(caught)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('["not an object at the top level"]', "not an object"),
+        ('{"schema_version": 1, "run": 3, "cells": [], "verdict": []}', "run is int"),
+        (
+            '{"schema_version": 1, "run": {"build_id": "x", "corpus_files": []}, '
+            '"cells": 3, "verdict": []}',
+            "cells is int",
+        ),
+    ],
+    ids=["top-level-list", "run-scalar", "cells-scalar"],
+)
+def test_a_top_level_of_the_wrong_shape_is_an_abort(
+    tmp_path: Path, text: str, expected: str
+) -> None:
+    results = tmp_path / "results.json"
+    results.write_text(text, encoding="utf-8")
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert expected in failures_of(caught) or expected in str(caught.value)
+
+
+def test_a_verdict_missing_a_field_is_an_abort(payload: dict[str, Any], tmp_path: Path) -> None:
+    payload["verdict"][0].pop("computed")
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "carries no computed" in failures_of(caught)
+
+
+def test_a_finding_key_missing_an_axis_is_an_abort(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    payload["run"]["summary"]["findings"][0]["keys"][0].pop("population")
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "carries no population" in failures_of(caught)
+
+
+def test_two_cells_that_would_share_one_slot_abort_rather_than_one_being_dropped(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """Distinct identities, one table slot. The second would never be rendered, silently."""
+    twin = copy.deepcopy(next(cell for cell in payload["cells"] if cell["kind"] == "rate"))
+    twin["key"]["contrast"] = "canon_on_vs_off"
+    payload["cells"].append(twin)
+    results, target = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        render_into(results, target)
+    assert "in one slot" in failures_of(caught)
+
+
+def test_a_readme_that_is_not_utf8_is_the_same_abort(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    results, target = write(tmp_path, payload)
+    target.write_bytes(b"# a repository\n\xff\xfe\n")
+    with pytest.raises(ReportNotRenderable) as caught:
+        render_into(results, target)
+    assert "UTF-8" in str(caught.value)
+
+
+def test_column_labels_fall_back_to_axis_equals_value_when_the_short_form_collides() -> None:
+    """Two coordinate tuples must never print one heading, whatever the file happens to hold."""
+    columns = [(None, "x"), ("x", None)]
+    labels = renderer._column_labels(columns, ("family", "benign_class"))
+    assert len(set(labels)) == 2
+    assert all("=" in label for label in labels)
+
+
+@pytest.mark.parametrize(
+    "figure",
+    ["0.2000%", "18394582 ns", "1000000.0 ns", "18.39 ms", "1.50 min", "+16.58 pp", "82.35 s"],
+    ids=["percent", "ns", "float-ns", "ms", "min", "pp", "s"],
+)
+def test_stored_prose_carrying_a_pre_formatted_figure_is_refused(
+    payload: dict[str, Any], tmp_path: Path, figure: str
+) -> None:
+    """Every unit this module writes, not percentages alone.
+
+    N3's stored reason published `18394582 ns` and `1000000.0 ns` two lines above the same figures
+    rendered as `18.39 ms` and `1.00 ms`. A guard written against `%` saw none of it.
+    """
+    payload["run"]["reaggregated"] = {
+        "from_steps": ["build"],
+        "inherited": ["timing"],
+        "note": f"the layer took {figure} on this corpus.",
+    }
+    results, target = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        render_into(results, target)
+    assert "pre-formatted figure" in failures_of(caught)
+
+
+@pytest.mark.parametrize(
+    "harmless",
+    ["a device of compute capability 8.6", "declared on 2026-08-29", "500 of 500 items"],
+    ids=["compute-capability", "date", "bare-count"],
+)
+def test_a_stored_number_in_no_unit_this_module_writes_is_left_alone(
+    payload: dict[str, Any], tmp_path: Path, harmless: str
+) -> None:
+    """The guard is about figures a reader would take for this module's output, not about digits.
+
+    A CUDA compute capability is `8.6` and would abort a guard written against every decimal, on
+    the committed file, for a number nothing here renders.
+    """
+    payload["run"]["reaggregated"] = {
+        "from_steps": ["build"],
+        "inherited": ["timing"],
+        "note": harmless,
+    }
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    assert harmless in _block(target)
+
+
+def test_a_string_inside_a_computed_block_goes_through_the_same_guard(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """The guard is about what reaches a reader, not about which field it arrived in."""
+    payload["verdict"][0]["computed"]["binding_ceiling"] = "the absolute, 1000000.0 ns"
+    results, target = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        render_into(results, target)
+    assert "pre-formatted figure" in failures_of(caught)
+
+
+def test_an_axis_value_carrying_a_formatted_figure_is_refused(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """Axis values become row and column labels, which is a string reaching a reader."""
+    payload["cells"][0]["key"]["dressing_chain"] = "a_chain_taking_18394582 ns"
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "pre-formatted figure" in failures_of(caught)
+
+
+def test_no_verdict_reason_is_published(published: dict[str, Any], tmp_path: Path) -> None:
+    """The evaluator's sentence stays in `results.json`.
+
+    It carries figures the evaluator formatted -- N3's reads `18394582 ns` against `1000000.0 ns`,
+    two lines above the same numbers rendered here as `18.39 ms` and `1.00 ms`. Three spellings of
+    two figures in one document is the drift the block exists to end, so verdicts render from
+    `computed` exactly as findings do.
+    """
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    block = _block(target)
+    for verdict in published["verdict"]:
+        sentence = " ".join(verdict["reason"].split())
+        assert sentence not in block
+        assert sentence.split(".")[0] not in block
+        assert f"`{verdict['condition']}`" in block
+        assert f"`{verdict['outcome']}`" in block
+
+
+# --- the anchoring mechanism, which names no kind ---------------------------------------------------
+
+
+def test_a_finding_kind_this_module_has_never_heard_of_renders_beside_its_cells(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """Anchoring is by `keys` alone. No `kind` is named anywhere in the module, so a kind invented
+    here renders without a line being changed there."""
+    cell = next(c for c in payload["cells"] if c["kind"] == "auc")
+    payload["run"]["summary"]["findings"] = [
+        {
+            "kind": "a_kind_invented_by_a_test",
+            "keys": [dict(cell["key"])],
+            "statement": "prose the block prefers not to print",
+            "computed": {"an_invented_figure": 0.125},
+        }
+    ]
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    block = _block(target)
+    assert "`a_kind_invented_by_a_test`" in block
+    assert "`an_invented_figure` 0.125000" in block
+
+    anchored = [
+        line
+        for line in block.splitlines()
+        if line.startswith("| ") and " [1]" in line and f"`{cell['key']['baseline']}`" in line
+    ]
+    assert anchored, "the finding did not render beside the cell it names"
+
+
+def test_a_finding_never_marks_a_measurement_at_a_coordinate_it_shares(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """The defect this replaced: a `rate_pinned` finding stamped on seven census counts, 21 times.
+
+    Cells are stored under `(kind, census, nine axes)` and the anchor was keyed on the nine alone,
+    so a finding about a false-positive rate marked every count that shares the rate's coordinates.
+    A finding carries no `kind`, so a shared coordinate anchors nowhere and says so.
+    """
+    shared = next(
+        cell
+        for cell in payload["cells"]
+        if cell["kind"] == "rate"
+        and any(
+            other["kind"] == "count" and other["key"] == cell["key"]
+            for other in payload["cells"]
+        )
+    )
+    payload["run"]["summary"]["findings"] = [
+        {
+            "kind": "a_kind_naming_a_shared_coordinate",
+            "keys": [dict(shared["key"])],
+            "statement": "",
+            "computed": {"figure": 1},
+        }
+    ]
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    block = _block(target)
+    assert " [1]" not in block
+    assert "not anchored" in block
+
+
+def test_the_committed_block_puts_no_marker_on_a_census_count(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """The published symptom, asserted against the file that produced it."""
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    block = _block(target)
+    censuses = block[block.index("What the layer did to the text") :]
+    censuses = censuses[: censuses.index("\n\n**")]
+    marked = [line for line in censuses.splitlines() if line.startswith("| ") and "[" in line]
+    assert marked == []
+
+
+def test_every_marker_in_the_block_names_a_finding_the_block_lists(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """The block's own generated sentence, held to account: a bracket a reader cannot resolve is
+    the sentence being false."""
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    block = _block(target)
+    used = {
+        int(number)
+        for line in block.splitlines()
+        if line.startswith("| ")
+        for number in re.findall(r"\[(\d+)\]", line)
+    }
+    listed = {int(number) for number in re.findall(r"^- \*\*\[(\d+)\]\*\*", block, re.M)}
+    assert used <= listed
+    assert listed == set(range(1, len(published["run"]["summary"]["findings"]) + 1))
+
+
+def test_findings_are_numbered_in_the_order_they_are_printed(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """File order ran the printed list [151]-[190], [19]-[21], [22]-[125]: a reader seeing [19]
+    beside a figure had nowhere to look."""
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    printed = [
+        int(number)
+        for number in re.findall(r"^- \*\*\[(\d+)\]\*\*", _block(target), re.M)
+    ]
+    assert printed == sorted(printed)
+    assert printed == list(range(1, len(printed) + 1))
+
+
+def test_the_module_names_no_finding_kind_anywhere(published: dict[str, Any]) -> None:
+    """The mechanism is one mechanism, or it is six special cases waiting to be seven.
+
+    Read as string constants rather than as substrings: `resolution` is also an ordinary English
+    word, and a substring scan would be asserting that the module's prose avoids it rather than
+    that its code never branches on a kind.
+    """
+    kinds = {finding["kind"] for finding in published["run"]["summary"]["findings"]}
+    assert len(kinds) > 1, "the fixture this test rests on is gone"
+    literals = {
+        node.value
+        for node in ast.walk(ast.parse(MODULE.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert kinds & literals == set()
+
+
+def test_a_finding_naming_two_cells_anchors_at_both(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    pair = [c for c in payload["cells"] if c["kind"] == "auc"][:2]
+    payload["run"]["summary"]["findings"] = [
+        {
+            "kind": "a_kind_naming_two_cells",
+            "keys": [dict(pair[0]["key"]), dict(pair[1]["key"])],
+            "statement": "",
+            "computed": {"figure": 1},
+        }
+    ]
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    block = _block(target)
+    assert sum(1 for line in block.splitlines() if line.startswith("| ") and " [1]" in line) >= 1
+    assert block.count(" [1]") >= 2
+
+
+# --- rows and columns nothing filled ------------------------------------------------------------------
+
+
+def _table(lines: list[str], row_axes: int) -> tuple[list[str], list[list[str]]]:
+    """The data columns of a built section: its labels, and its rows, both without the row axes."""
+    def cells(line: str) -> list[str]:
+        return [cell.strip() for cell in line.strip().strip("|").split(" | ")]
+
+    return cells(lines[3])[row_axes:], [cells(line)[row_axes:] for line in lines[5:]]
+
+
+def test_no_row_and_no_column_of_the_block_is_entirely_missing(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """A row of em dashes reads as measured-and-lost rather than never-measured.
+
+    Asserted on the data columns, by offset from `len(section.row_axes)`. The test this replaced
+    sliced a fixed `[3:]`, which on a four-axis table started on the last *label* column and could
+    never see a row of dashes at all.
+    """
+    results, _ = write(tmp_path, published)
+    loaded = load_results(results)
+    anchors = renderer._finding_notes(loaded.findings, loaded.cells)
+
+    checked = 0
+    for section in renderer._sections(loaded.cells):
+        failures: list[str] = []
+        lines, _ = renderer._build_section(section, loaded.cells, anchors, failures)
+        assert failures == []
+        if not lines:
+            continue
+        checked += 1
+        labels, rows = _table(lines, len(section.row_axes))
+        assert labels, section.name
+        for row in rows:
+            assert set(row) != {"--"}, f"{section.name}: a row with nothing measured in it"
+        for column in range(len(labels)):
+            values = {row[column] for row in rows}
+            assert values != {"--"}, f"{section.name}: column {labels[column]} is empty"
+    assert checked >= 5, "the fixture this test rests on is gone"
+
+
+def test_a_row_exists_only_because_a_cell_fills_it(payload: dict[str, Any]) -> None:
+    """The reason the property above holds, rather than a filter that claims to make it hold.
+
+    Rows and columns are the coordinates the claimed cells carry, so a row coordinate exists only
+    because some cell has it -- and that cell's column coordinate is in the columns, so it fills a
+    slot in that row. Two cells sharing neither coordinate is the sharpest case: the grid has holes,
+    and still no row and no column is empty. There is no input that produces an empty one, which is
+    why the filters that used to sit here could not fire and their tests could not fail.
+    """
+    failures: list[str] = []
+    first = renderer._read_cell(
+        next(c for c in payload["cells"] if c["kind"] == "rate"), 0, failures
+    )
+    second = renderer._read_cell(
+        next(
+            c
+            for c in payload["cells"]
+            if c["kind"] == "rate"
+            and c["key"]["baseline"] != first.key[AXES.index("baseline")]
+            and c["key"]["family"] != first.key[AXES.index("family")]
+        ),
+        1,
+        failures,
+    )
+    assert failures == [] and first is not None and second is not None
+
+    section = renderer.Section(
+        name="a section made by a test",
+        lead_in="**two cells sharing neither coordinate.**",
+        claim=lambda cell: True,
+        row_axes=("baseline",),
+        column_axes=("family",),
+    )
+    lines, placed = renderer._build_section(section, [first, second], _NO_ANCHORS, failures)
+    assert failures == []
+    assert placed == {first.identity, second.identity}
+
+    labels, rows = _table(lines, len(section.row_axes))
+    assert len(labels) == 2 and len(rows) == 2
+    assert sum(cell == "--" for row in rows for cell in row) == 2, "the holes are the point"
+    for row in rows:
+        assert set(row) != {"--"}
+    for column in range(len(labels)):
+        assert {row[column] for row in rows} != {"--"}
+
+
+_NO_ANCHORS = renderer.Anchors(at={}, numbers={}, shared={})
+
+
+# --- the numbers themselves ----------------------------------------------------------------------
+
+
+def test_a_negative_zero_renders_as_a_measured_zero(payload: dict[str, Any], tmp_path: Path) -> None:
+    delta = next(
+        cell
+        for cell in payload["cells"]
+        if cell["kind"] == "delta" and cell["key"]["contrast"] == "canon_on_vs_off"
+    )
+    delta["value"] = -0.0
+    delta["interval"] = {"lo": -0.0, "hi": 0.0, "method": "newcombe-paired-score"}
+    payload["run"]["summary"]["findings"] = []
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    assert "-0.00 pp" not in _block(target)
+
+
+def test_a_nonzero_magnitude_below_the_resolution_says_so(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """`0.00%` over a rate that is not zero is a rendered zero that was never measured."""
+    rate = next(cell for cell in payload["cells"] if cell["kind"] == "rate")
+    rate["value"] = 1e-9
+    rate["interval"] = {"lo": 0.0, "hi": 1e-8, "method": "wilson-score"}
+    payload["run"]["summary"]["findings"] = []
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    assert "<0.01%" in _block(target)
+
+
+def test_a_negative_magnitude_below_the_resolution_is_written_as_a_bound_it_satisfies() -> None:
+    """`-<0.0001` reads as "less than minus one ten-thousandth", the opposite of what it means.
+
+    The value is a small negative number, so it is *greater* than that bound. Each form has to be
+    literally true of the value it stands for.
+    """
+    assert renderer._signed(1e-9, 4) == "<0.0001"
+    assert renderer._signed(-1e-9, 4) == ">-0.0001"
+    assert renderer._signed(-0.0, 4) == "+0.0000"
+    assert renderer._signed(-0.5, 4) == "-0.5000"
+    assert "-<" not in renderer._signed(-1e-9, 4)
+
+
+def test_a_pipe_or_a_newline_in_a_value_cannot_split_a_row() -> None:
+    """A `|` ends the cell and shifts every column after it; a newline ends the row.
+
+    Chain names, census names and device strings all come from files this module does not control,
+    and a table that silently grows a column is a table whose figures are under wrong headings.
+    """
+    row = renderer._row(["a|b", "c\nd", "plain"])
+    assert row.count("|") == 4 + 1  # the four delimiters plus the one escaped pipe
+    assert "\n" not in row
+    assert row == "| a\\|b | c d | plain |"
+
+
+def test_an_axis_value_carrying_a_pipe_keeps_every_table_rectangular(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    for cell in payload["cells"]:
+        if cell["key"]["dressing_chain"] == "base32":
+            cell["key"]["dressing_chain"] = "base32|injected"
+        if cell["key"]["contrast"] == "clean_vs_base32":
+            cell["key"]["contrast"] = "clean_vs_base32|injected"
+    payload["run"]["summary"]["findings"] = []
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    block = _block(target)
+
+    assert "base32\\|injected" in block
+    tables = 0
+    width: int | None = None
+    for line in block.splitlines():
+        if not line.startswith("| "):
+            width = None
+            continue
+        cells = len(re.findall(r"(?<!\\)\|", line))
+        if width is None:
+            width, tables = cells, tables + 1
+        assert cells == width, line
+    assert tables >= 5, "the fixture this test rests on is gone"
+
+
+def test_a_second_kind_in_the_matched_window_population_does_not_collide(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """The claim is kind-agnostic, so `kind` has to be one of its column axes.
+
+    Without it a second kind maps to the slot the first holds and the render aborts on data that is
+    not wrong -- the sensitivity section already had `kind` in its columns for the same reason.
+    """
+    companion = copy.deepcopy(
+        next(c for c in payload["cells"] if c["key"]["population"] == "single_window")
+    )
+    companion["kind"] = "rate"
+    companion["k"] = 1
+    companion["n"] = 2
+    companion["value"] = 0.5
+    companion["interval"] = {"lo": 0.1, "hi": 0.9, "method": "wilson-score"}
+    companion.pop("contrast", None)
+    payload["cells"].append(companion)
+    payload["run"]["summary"]["findings"] = []
+    results, target = write(tmp_path, payload)
+    render_into(results, target)  # no slot collision, no unplaced cell
+    assert "one window" in _block(target)
+
+
+def test_a_results_file_with_no_timing_block_still_renders(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """The loader and the renderer agree that `timing` is optional.
+
+    The loader used to demand it and abort with "run.timing is NoneType, not an object" while
+    `_what_ran` skipped it when absent -- an abort a reader could not act on, over a field the
+    renderer never needed. Which runs are publishable is `results.py`'s decision, not this one's.
+    """
+    payload["run"].pop("timing")
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    assert "What it cost, measured" not in _block(target)
+
+
+def test_a_timing_block_that_is_present_and_malformed_still_aborts(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """Optional is not unchecked."""
+    payload["run"]["timing"] = {"layer_ns": {"overall": {"p95_ns": 1}}}
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        load_results(results)
+    assert "carries no p50_ns" in failures_of(caught)
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/fd").is_dir(), reason="descriptor count needs Linux's /proc"
+)
+def test_a_write_that_cannot_open_its_temp_file_leaks_no_descriptor(
+    payload: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`os.fdopen` can raise before the file object owns the descriptor, and `with` leaks it then."""
+    results, target = write(tmp_path, payload)
+    before = len(os.listdir("/proc/self/fd"))
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(renderer.os, "fdopen", refuse)
+    with pytest.raises(ReportNotRenderable):
+        render_into(results, target)
+
+    assert len(os.listdir("/proc/self/fd")) <= before
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["README.md", "results.json"]
+
+
+def test_the_area_scale_is_chosen_by_the_cells_own_interval_method(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """A delta computed with a structural-components interval is an area, whatever the limb is
+    called; a hand-list of limb names would render a new one as a percentage until somebody looked."""
+    delta = next(
+        cell
+        for cell in payload["cells"]
+        if cell["kind"] == "delta"
+        and cell["interval"]["method"] == "delta-auc-structural-components"
+    )
+    rendered = renderer._render_delta(load_cell(delta))
+    assert "pp" not in rendered and rendered.count(".") == 3
+
+    delta["interval"]["method"] = "newcombe-paired-score"
+    assert "pp" in renderer._render_delta(load_cell(delta))
+
+
+def load_cell(raw: dict[str, Any]) -> renderer.Cell:
+    failures: list[str] = []
+    cell = renderer._read_cell(raw, 0, failures)
+    assert cell is not None, failures
+    return cell
+
+
+def test_every_column_renderer_takes_a_whole_cell_and_never_a_float() -> None:
+    """The rule expressed as a signature: there is no way to hand one of these a bare number."""
+    import inspect
+
+    for kind, function in renderer._COLUMN_RENDERERS.items():
+        parameters = list(inspect.signature(function).parameters.values())
+        assert len(parameters) == 1, kind
+        assert parameters[0].annotation == "Cell", kind
+
+
+def test_durations_are_rendered_from_nanoseconds_here_and_the_units_climb() -> None:
+    assert renderer._duration(937) == "937 ns"
+    assert renderer._duration(1_500) == "1.50 us"
+    assert renderer._duration(1_500_000) == "1.50 ms"
+    assert renderer._duration(1_500_000_000) == "1.50 s"
+    assert renderer._duration(90_000_000_000) == "1.50 min"
+    assert renderer._duration(5_400_000_000_000) == "1.50 h"
+
+
+# --- the command line -------------------------------------------------------------------------------
+
+
+def test_the_command_line_renders_and_reports_what_it_rendered(
+    published: dict[str, Any], tmp_path: Path, repo_root: Path
+) -> None:
+    results, target = write(tmp_path, published)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nbc.report.readme",
+            "--results",
+            str(results),
+            "--readme",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+    )
+    assert completed.returncode == EXIT_OK, completed.stderr
+    assert json.loads(completed.stdout)["cells_rendered"] == len(published["cells"])
+    assert RESULTS_START in target.read_text(encoding="utf-8")
+
+
+def test_the_command_line_exits_36_with_an_empty_stdout_and_no_traceback(
+    tmp_path: Path, repo_root: Path
+) -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "nbc.report.readme", "--results", os.devnull],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert completed.returncode == ReportNotRenderable.exit_code == 36
+    assert completed.stdout == ""
+    assert "Traceback" not in completed.stderr
+
+
+def test_two_processes_render_the_same_bytes(
+    published: dict[str, Any], tmp_path: Path, repo_root: Path
+) -> None:
+    """Byte-identical across two processes, so hash randomization cannot reorder a table."""
+    outputs = []
+    for name in ("one", "two"):
+        directory = tmp_path / name
+        results, target = write(directory, published)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "nbc.report.readme",
+                "--results",
+                str(results),
+                "--readme",
+                str(target),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            env={**os.environ, "PYTHONHASHSEED": "0" if name == "one" else "12345"},
+        )
+        assert completed.returncode == EXIT_OK, completed.stderr
+        outputs.append(target.read_bytes())
+    assert outputs[0] == outputs[1]
+
+
+def test_main_returns_zero_and_writes_nothing_outside_the_markers(
+    published: dict[str, Any], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    before = a_readme()
+    results, target = write(tmp_path, published, readme=before)
+    assert main(["--results", str(results), "--readme", str(target)]) == EXIT_OK
+
+    after = target.read_text(encoding="utf-8")
+    assert after[: after.index(RESULTS_START)] == before[: before.index(RESULTS_START)]
+    tail = len(RESULTS_END)
+    assert after[after.index(RESULTS_END) + tail :] == before[before.index(RESULTS_END) + tail :]
+    assert _block(target).strip() != RESULTS_START
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["cells_rendered"] == len(published["cells"])
+    assert report["readme"] == str(target)
+
+
+# --- helpers ------------------------------------------------------------------------------------------
+
+
+def _block(target: Path) -> str:
+    text = target.read_text(encoding="utf-8")
+    return text[text.index(RESULTS_START) : text.index(RESULTS_END)]
+
+
+def test_inject_moves_no_byte_outside_the_markers() -> None:
+    before = a_readme()
+    after = inject(before, "a body\n")
+    assert after == before.replace(f"{RESULTS_START}\n", f"{RESULTS_START}\na body\n")
+
+
+def test_render_refuses_a_body_that_would_carry_a_marker(
+    payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A marker inside the block makes the next injection unable to tell where the block ends."""
+    monkeypatch.setattr(renderer, "_PREAMBLE", f"<!-- {RESULTS_END} -->")
+    results, _ = write(tmp_path, payload)
+    with pytest.raises(ReportNotRenderable) as caught:
+        render(load_results(results))
+    assert RESULTS_END in str(caught.value)

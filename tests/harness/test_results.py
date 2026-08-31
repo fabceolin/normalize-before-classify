@@ -19,7 +19,7 @@ import pytest
 
 from nbc.canon.pipeline import PIPELINE, trace_stage_labels
 from nbc.corpus.matrix import CHAIN_CLASS_BOUND, CHAIN_CLASS_HELD_OUT, CLEAN_CHAIN_NAME
-from nbc.errors import declared_exit_codes
+from nbc.errors import EXIT_OK, declared_exit_codes
 from nbc.harness.results import (
     PROFILE_FULL,
     PROFILE_SMOKE,
@@ -31,7 +31,6 @@ from nbc.harness.results import (
     STEP_BUILD,
     STEP_MEASURE,
     STEP_PREFLIGHT,
-    STEP_RENDER,
     STEP_TIME,
     STEP_VERIFY,
     ResultsFile,
@@ -42,6 +41,7 @@ from nbc.harness.results import (
     render_results,
     smoke_sample,
 )
+from nbc.report.caveats import RESULTS_END, RESULTS_START
 from nbc.schema import (
     AUC_STRUCTURAL,
     AXIS_FAMILY,
@@ -61,6 +61,9 @@ from nbc.schema import (
     Verdict,
     edit_census_of,
 )
+
+REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
+"""The repository this suite checks, and the one no test may write into."""
 
 BASELINE = "primary"
 POLICY = "shared"
@@ -206,11 +209,37 @@ def test_the_steps_are_in_the_declared_order() -> None:
         STEP_MEASURE,
         STEP_TIME,
         STEP_AGGREGATE,
-        STEP_RENDER,
     )
     assert STEPS.index(STEP_PREFLIGHT) < STEPS.index(STEP_VERIFY)
     assert STEPS.index(STEP_VERIFY) < STEPS.index(STEP_MEASURE)
     assert STEPS.index(STEP_TIME) < STEPS.index(STEP_AGGREGATE)
+
+
+def test_rendering_is_not_one_of_the_steps_of_the_measuring_run() -> None:
+    """`render` sat in `STEPS` for two stories with no code path emitting it.
+
+    A declared step nothing takes says the run ends at a published table when it ends at a file --
+    and a reader of `run.steps` could not tell the difference. It is now declared where
+    `reaggregate` is, beside the command that performs it, and the measuring run leaves the README
+    alone. What refuses a stale published block is a test that renders the committed results file
+    and compares it, not a step nobody took.
+    """
+    from nbc.harness.run import STEP_REAGGREGATE, STEP_RENDER
+
+    assert STEP_RENDER == "render"
+    assert STEP_RENDER not in STEPS
+    assert STEP_REAGGREGATE not in STEPS
+
+
+def test_the_report_subcommand_records_the_render_step(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """And the constant is emitted by a code path, which is what it was not."""
+    from nbc.harness.run import STEP_RENDER, main
+
+    root = _report_root(tmp_path)
+    assert main(["--root", str(root), "report"]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out)["steps"] == [STEP_RENDER]
 
 
 RUNTIME_BINDING: Final[str] = "onnx_adapter.py"
@@ -451,12 +480,129 @@ def test_the_new_abort_declares_exit_code_34_and_declares_it_once() -> None:
 # --- the entrypoint's two gates that need no model ------------------------------------------------------
 
 
-def test_the_report_subcommand_aborts_rather_than_rendering_nothing() -> None:
-    """An empty rendered block and a rendered block are indistinguishable to a reader who did not
-    run the command, so the seam says what is missing instead of writing one."""
+def _report_root(tmp_path: Path) -> Path:
+    """A root holding everything `report` reads: the pins, the results file and a README.
+
+    Every byte is copied out of the repository into `tmp_path`. The earlier version of this test
+    invoked `main(["report"])` at the repository root, which was safe only while the subcommand
+    aborted -- the day it started writing, the suite would have published a table into the real
+    README from inside a test run.
+    """
+    root = tmp_path / "root"
+    (root / "results").mkdir(parents=True)
+    (root / "pins.toml").write_text(
+        (REPO_ROOT / "pins.toml").read_text(encoding="utf-8"), encoding="utf-8", newline="\n"
+    )
+    (root / "results" / "results.json").write_text(
+        (REPO_ROOT / "results" / "results.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+        newline="\n",
+    )
+    # **The block is emptied**, so the success path has something to do. Copied whole, the README
+    # and the results file are already in sync: `render_into` finds nothing to write, returns
+    # `readme_changed: False`, and a test asserting the markers are non-empty passes on the bytes
+    # the fixture arrived with without ever watching an injection.
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    start = readme.index(RESULTS_START) + len(RESULTS_START)
+    (root / "README.md").write_text(
+        readme[:start] + "\n" + readme[readme.index(RESULTS_END) :],
+        encoding="utf-8",
+        newline="\n",
+    )
+    return root
+
+
+def test_the_report_subcommand_injects_the_block_into_the_readme_at_its_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The success path, and the assertion that it is the README **at the root** that changed.
+
+    Swapping the injected path for anything else turns this red: the block has to land in the file
+    `--root` names, and the repository's own README has to be untouched by the run.
+    """
+    from nbc.report.caveats import RESULTS_END, RESULTS_START
     from nbc.harness.run import main
 
-    assert main(["report"]) == ResultsIncomplete.exit_code
+    from nbc.report.caveats import RESULTS_END, RESULTS_START
+
+    root = _report_root(tmp_path)
+    before = (REPO_ROOT / "README.md").read_bytes()
+    stale = (root / "README.md").read_text(encoding="utf-8")
+    assert not stale[
+        stale.index(RESULTS_START) + len(RESULTS_START) : stale.index(RESULTS_END)
+    ].strip(), "the fixture is already in sync, so this test would watch no injection"
+
+    assert main(["--root", str(root), "report"]) == EXIT_OK
+
+    written = (root / "README.md").read_text(encoding="utf-8")
+    body = written[written.index(RESULTS_START) + len(RESULTS_START) : written.index(RESULTS_END)]
+    assert body.strip(), "the markers at the root are still empty"
+    assert written != stale
+    assert written[: written.index(RESULTS_START)] == stale[: stale.index(RESULTS_START)]
+    assert (REPO_ROOT / "README.md").read_bytes() == before
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["readme"] == str(root / "README.md")
+    assert report["readme_changed"] is True
+    assert report["cells_rendered"] > 0
+
+
+def test_the_report_subcommand_aborts_rather_than_rendering_nothing(tmp_path: Path) -> None:
+    """A root with no results file writes no block. An empty rendered block and a rendered one are
+    indistinguishable to a reader who did not run the command, so the seam says what is missing."""
+    from nbc.report.readme import ReportNotRenderable
+    from nbc.harness.run import main
+
+    root = _report_root(tmp_path)
+    before = (root / "README.md").read_bytes()
+    (root / "results" / "results.json").unlink()
+
+    assert main(["--root", str(root), "report"]) == ReportNotRenderable.exit_code == 36
+    assert (root / "README.md").read_bytes() == before
+
+
+def _root_with_readme(tmp_path: Path) -> Path:
+    """A temporary root carrying the honesty section, which every entrypoint verifies at step 1.
+
+    `full_run` and `reaggregate` read the README **at their own root** rather than the one in the
+    working directory, so a root without one aborts at the caveats check before reaching whatever
+    the caller is testing. Copied rather than faked: the check is against the section this
+    repository actually ships.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "README.md").write_text(
+        (REPO_ROOT / "README.md").read_text(encoding="utf-8"), encoding="utf-8", newline="\n"
+    )
+    return tmp_path
+
+
+def test_the_run_verifies_the_readme_at_its_own_root_and_not_the_working_directory(
+    tmp_path: Path,
+) -> None:
+    """`verify_caveats_file()` with no argument resolves `README.md` against the working directory.
+
+    Under `--root` that made the honesty check read one file while `report` injected into another,
+    which is exactly the split `readme_path` exists to close. The gutted section is at the root, so
+    a run that still read the repository's own README would pass here and this would go green for
+    the wrong reason.
+    """
+    from nbc.harness.run import full_run, reaggregate
+    from nbc.pins import load_pins
+    from nbc.report.caveats import CaveatsSectionMissing
+
+    root = _root_with_readme(tmp_path)
+    gutted = (root / "README.md").read_text(encoding="utf-8")
+    (root / "README.md").write_text(
+        gutted.replace("## What this does not show", "## What this deliberately omits"),
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert "What this does not show" in (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+    for command in (full_run, reaggregate):
+        with pytest.raises(CaveatsSectionMissing) as caught:
+            command(load_pins(None), root=root)
+        assert "no '## What this does not show' heading" in str(caught.value)
 
 
 def test_a_partially_present_corpus_aborts_rather_than_rebuilding(tmp_path: Path) -> None:
@@ -466,12 +612,12 @@ def test_a_partially_present_corpus_aborts_rather_than_rebuilding(tmp_path: Path
     from nbc.harness.run import full_run
     from nbc.pins import load_pins
 
-    directory = corpus_directory(tmp_path)
+    directory = corpus_directory(_root_with_readme(tmp_path))
     directory.mkdir(parents=True, exist_ok=True)
     (directory / CORPUS_FILENAMES[0]).write_text("{}\n", encoding="utf-8")
 
     with pytest.raises(ResultsIncomplete) as caught:
-        full_run(load_pins(None), root=tmp_path)
+        full_run(load_pins(None), root=_root_with_readme(tmp_path))
     assert "partially present" in str(caught.value)
     assert CORPUS_FILENAMES[1] in str(caught.value)
 
@@ -483,7 +629,7 @@ def test_a_wholly_absent_corpus_says_to_build_it_rather_than_building_it(tmp_pat
     from nbc.pins import load_pins
 
     with pytest.raises(ResultsIncomplete) as caught:
-        full_run(load_pins(None), root=tmp_path)
+        full_run(load_pins(None), root=_root_with_readme(tmp_path))
     assert "build-corpus" in str(caught.value)
 
 
@@ -541,7 +687,7 @@ def test_reaggregating_with_no_previous_file_says_which_command_produces_one(
     from nbc.pins import load_pins
 
     with pytest.raises(ResultsIncomplete) as caught:
-        reaggregate(load_pins(None), root=tmp_path)
+        reaggregate(load_pins(None), root=_root_with_readme(tmp_path))
     assert "results.json" in str(caught.value) and "`all`" in str(caught.value)
 
 
@@ -559,7 +705,7 @@ def test_reaggregating_without_a_timing_block_refuses_before_doing_the_work(
     path.write_text(json.dumps(document), encoding="utf-8")
 
     with pytest.raises(ResultsIncomplete) as caught:
-        reaggregate(load_pins(None), root=tmp_path)
+        reaggregate(load_pins(None), root=_root_with_readme(tmp_path))
     assert "timing" in str(caught.value)
 
 
@@ -578,7 +724,7 @@ def test_reaggregating_without_the_trace_file_refuses_rather_than_emitting_no_ce
     a_previous_results_file(tmp_path)
 
     with pytest.raises(ResultsIncomplete) as caught:
-        reaggregate(load_pins(None), root=tmp_path)
+        reaggregate(load_pins(None), root=_root_with_readme(tmp_path))
     assert TRACES_FILENAME in str(caught.value)
     assert "census" in str(caught.value)
 
@@ -594,7 +740,7 @@ def test_a_run_block_that_is_not_an_object_is_refused(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(ResultsIncomplete) as caught:
-        reaggregate(load_pins(None), root=tmp_path)
+        reaggregate(load_pins(None), root=_root_with_readme(tmp_path))
     assert "no run block" in str(caught.value)
 
 
@@ -620,10 +766,10 @@ def test_the_aggregate_subcommand_is_wired_to_the_reaggregating_path(tmp_path: P
     from nbc.harness.run import main
     from nbc.pins import PINS_FILENAME
 
-    repository = Path(__file__).resolve().parents[2]
-    (tmp_path / PINS_FILENAME).write_bytes((repository / PINS_FILENAME).read_bytes())
+    root = _root_with_readme(tmp_path)
+    (root / PINS_FILENAME).write_bytes((REPO_ROOT / PINS_FILENAME).read_bytes())
 
-    assert main(["--root", str(tmp_path), "aggregate"]) == ResultsIncomplete.exit_code
+    assert main(["--root", str(root), "aggregate"]) == ResultsIncomplete.exit_code
 
 
 def test_reaggregating_records_that_it_measured_nothing() -> None:
@@ -760,7 +906,7 @@ def test_a_full_run_into_the_published_root_is_not_refused_for_that_reason(tmp_p
     from nbc.pins import load_pins
 
     with pytest.raises(ResultsIncomplete) as caught:
-        full_run(load_pins(None), profile=PROFILE_FULL, root=tmp_path)
+        full_run(load_pins(None), profile=PROFILE_FULL, root=_root_with_readme(tmp_path))
     assert "may not write into the repository" not in str(caught.value)
 
 
