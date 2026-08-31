@@ -1,10 +1,30 @@
-"""The resolved environment is CPU-only and pinned, and that is checked rather than promised.
+"""The resolved environment is pinned and carries no accelerator it did not declare.
 
-The CPU-only premise is the reason a stranger can reproduce this table on a laptop. Asserting
-it in prose is worthless: an inference session built without an explicit provider list picks
-up an accelerator when one exists, and the resulting numbers are neither CPU numbers nor
-reproducible. The cheapest place to bind the premise is the dependency resolution — with no
-accelerator runtime resolved, there is none to accidentally acquire.
+Asserting a premise in prose is worthless: an inference session built without an explicit
+provider list picks up an accelerator when one exists, and the resulting numbers are neither
+the numbers that were declared nor reproducible. The cheapest place to bind the premise is the
+dependency resolution — an accelerator runtime that was never resolved cannot be accidentally
+acquired.
+
+**The premise was "CPU-only" until 2026-08-30 and it no longer is, for one process.** The
+scoring pass moved to `CUDAExecutionProvider` in 5b5b3a1 because a 16-thread CPU lands the full
+matrix near twenty hours against roughly one on an RTX 3060; the README states that, names the
+device, and says a reviewer without the card cannot re-run the pass. This file did not follow,
+so from 5b5b3a1 until the commit that carries this docstring the repository asserted an
+invariant that the machine producing the published table violated — the test failed on that
+machine and nowhere else, which is the shape a stale invariant takes.
+
+**What the invariant is now, and why it is still an invariant.** No accelerator distribution
+may be installed *except the inference runtime the declared execution path requires* — one
+name, at the version the runtime pin names, and only for as long as `PROVIDERS` names CUDA.
+The exemption is derived from `PROVIDERS` rather than written down here, so putting the
+declared path back on CPU withdraws it with no edit to this file.
+
+**What deliberately did not widen.** `uv.lock` still resolves the CPU build and nothing here
+exempts it: `test_no_accelerator_package_appears_anywhere_in_the_lockfile` and
+`test_the_lockfile_resolves_no_accelerator_build_of_onnxruntime` both read the lockfile, cover
+a torch arriving through `datasets`, and stay exactly as strict as they were. The exemption
+lives in the installed set of one measurement machine, which is the only place reality moved.
 """
 
 from __future__ import annotations
@@ -15,6 +35,7 @@ import tomllib
 import unicodedata
 from importlib.metadata import distributions
 from pathlib import Path
+from typing import Iterable
 
 import pytest
 
@@ -29,7 +50,13 @@ FORBIDDEN_NAME_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"(^|-)cudnn(-|$)", "a cuDNN component"),
     (r"(^|-)nccl(-|$)", "an NCCL component"),
     (r"^tensorrt(-|$)", "a TensorRT component"),
-    (r"^onnxruntime-gpu(-|$)", "the GPU build of onnxruntime"),
+    # Every non-CPU build, not just the CUDA one. The lockfile scan below has always read
+    # `startswith("onnxruntime-")`, and this table read `^onnxruntime-gpu` -- so an
+    # `onnxruntime-rocm` or `onnxruntime-openvino` installed beside the pin was refused in the
+    # resolution and waved through in the installed set. Two scans of the same premise
+    # disagreeing is how a premise stops being one; found by the guard added for the CUDA
+    # exemption, which needed to name an accelerator this test would refuse and picked ROCm.
+    (r"^onnxruntime-", "a non-CPU build of onnxruntime"),
 )
 
 EXPECTED_PINS: dict[str, str] = {
@@ -69,13 +96,126 @@ def lockfile(repo_root: Path) -> dict:
     return _read_toml(path)
 
 
-def test_no_accelerator_distribution_is_installed() -> None:
+def _declared_accelerator_runtime() -> str | None:
+    """The one accelerator distribution the declared execution path is allowed to bring.
+
+    Read off `PROVIDERS` rather than written here as a literal, because a literal is an
+    exemption that outlives its reason: it would go on permitting a GPU build after the
+    declared path returned to CPU, and nothing would notice. Import it late — importing the
+    adapter imports `onnxruntime`, and this module is otherwise pure file reading.
+    """
+    from nbc.baselines.onnx_adapter import PROVIDERS
+
+    return "onnxruntime-gpu" if "CUDAExecutionProvider" in PROVIDERS else None
+
+
+def _assert_no_forbidden_installed(names: Iterable[str], exempt: str | None) -> None:
+    """The scan itself, over a name sequence, so the guards below can drive it directly.
+
+    Taking names rather than reading `distributions()` is what lets the exemption's edges be
+    tested at all: the machine running the suite has exactly one installed set, and the two
+    cases that matter — a GPU build with the exemption withdrawn, a second accelerator with it
+    in force — are both absent from it.
+    """
+    permitted = _normalize(exempt) if exempt else None
     offenders = [
-        f"{dist.metadata['Name']} ({why})"
-        for dist in distributions()
-        if dist.metadata["Name"] and (why := _forbidden(dist.metadata["Name"]))
+        f"{name} ({why})"
+        for name in names
+        if name and _normalize(name) != permitted and (why := _forbidden(name))
     ]
-    assert not offenders, "the resolved environment must be CPU-only: " + "; ".join(offenders)
+    allowed = f"; the only permitted accelerator runtime is {exempt}" if exempt else ""
+    assert not offenders, (
+        "the resolved environment must carry no accelerator it did not declare: "
+        + "; ".join(offenders)
+        + allowed
+    )
+
+
+def test_no_accelerator_distribution_is_installed() -> None:
+    """Everything except the runtime the declared path names, which is one name and versioned."""
+    _assert_no_forbidden_installed(
+        [dist.metadata["Name"] for dist in distributions() if dist.metadata["Name"]],
+        _declared_accelerator_runtime(),
+    )
+
+
+def test_exactly_one_build_of_the_inference_runtime_is_installed_at_the_pinned_version() -> None:
+    """The half the exemption would otherwise give away.
+
+    Permitting `onnxruntime-gpu` by name alone permits *any* version of it, and the version is
+    the whole pin — the published scores were produced under one. It also permits both builds
+    at once, which resolves to whichever import wins and makes the recorded provider list a
+    coin flip. So: exactly one, and its version is the runtime pin.
+    """
+    pinned = EXPECTED_PINS["onnxruntime"]
+    installed = {
+        _normalize(dist.metadata["Name"]): dist.version
+        for dist in distributions()
+        if dist.metadata["Name"]
+    }
+    builds = {
+        name: version
+        for name, version in installed.items()
+        if name == "onnxruntime" or name.startswith("onnxruntime-")
+    }
+
+    assert len(builds) == 1, (
+        f"exactly one build of onnxruntime must be installed, found {sorted(builds)}: two "
+        "builds resolve to whichever import wins and the recorded provider list stops being "
+        "a fact about the run"
+    )
+    name, version = next(iter(builds.items()))
+    assert version == pinned, (
+        f"{name} is installed at {version} and the declared runtime pin is {pinned}; the "
+        "published scores were produced under one version of one runtime"
+    )
+    if name != "onnxruntime":
+        assert name == _normalize(_declared_accelerator_runtime() or ""), (
+            f"{name} is installed and the declared execution path does not name it"
+        )
+
+
+def test_the_exemption_is_withdrawn_the_moment_the_declared_path_returns_to_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason the exemption is derived instead of written down.
+
+    An exemption written as a literal is one nobody revisits: the declared path could go back
+    to `("CPUExecutionProvider",)` and a GPU build would keep passing this file forever, with
+    the repository once again asserting one thing and the machine doing another — which is the
+    exact defect this exemption was introduced to stop repeating.
+    """
+    from nbc.baselines import onnx_adapter
+
+    monkeypatch.setattr(onnx_adapter, "PROVIDERS", ("CPUExecutionProvider",))
+    assert _declared_accelerator_runtime() is None
+
+
+def test_the_exempt_name_is_still_a_forbidden_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exemption is an exclusion at one call site, not a hole in the pattern table.
+
+    Deleting `^onnxruntime-gpu` from `FORBIDDEN_NAME_PATTERNS` would have been the one-line
+    way to make the measurement machine green, and it would also have stopped the two lockfile
+    tests from ever seeing a GPU build enter the resolution. So the pattern stays, and only
+    the installed-set scan steps around it.
+    """
+    assert _forbidden("onnxruntime-gpu") is not None
+    assert _forbidden("onnxruntime") is None
+
+    from nbc.baselines import onnx_adapter
+
+    monkeypatch.setattr(onnx_adapter, "PROVIDERS", ("CPUExecutionProvider",))
+    with pytest.raises(AssertionError):
+        _assert_no_forbidden_installed(["onnxruntime-gpu"], _declared_accelerator_runtime())
+
+
+def test_the_scan_still_refuses_every_other_accelerator_on_the_measurement_machine() -> None:
+    """The exemption is one name. Torch on the GPU box is as forbidden as torch anywhere."""
+    for name in ("torch", "transformers", "nvidia-cublas-cu12", "tensorrt", "onnxruntime-rocm"):
+        with pytest.raises(AssertionError):
+            _assert_no_forbidden_installed([name], "onnxruntime-gpu")
 
 
 def test_no_accelerator_package_appears_anywhere_in_the_lockfile(lockfile: dict) -> None:

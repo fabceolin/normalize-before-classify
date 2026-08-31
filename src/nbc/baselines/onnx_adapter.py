@@ -1,12 +1,19 @@
-"""The only adapter: every baseline is an ONNX graph, on CPU, fed from its own signature.
+"""The only adapter: every baseline is an ONNX graph on the declared path, fed from its signature.
 
 Three things are bound here that are cheap to state in prose and worthless stated that way.
 
 **The device.** An `InferenceSession` built without an explicit provider list picks up an
-accelerator when one exists. The numbers it then produces are neither CPU numbers nor
-reproducible on a reviewer's laptop, and every test still passes. So every session names
-`providers=["CPUExecutionProvider"]`, reads no device from the environment, and is refused if
-the runtime hands back anything else.
+accelerator when one exists. The numbers it then produces are not the numbers the artifact
+declares, they are not reproducible, and every test still passes. So every session names
+`providers=PROVIDERS`, reads no device from the environment, and is refused if the runtime
+hands back anything else -- and, once the providers agree, is refused again if the driver names
+a different card than `DEVICE`, because two CUDA devices both report `CUDAExecutionProvider`.
+
+This paragraph said `providers=["CPUExecutionProvider"]` for a full day after `PROVIDERS`
+stopped saying it -- 5b5b3a1 moved the constant on 2026-08-30 and left the prose above it
+describing the path it had just replaced. The constant below records what moved and why; this
+is the sentence that did not follow, found on 2026-08-31 while reconciling the environment
+invariant with the same commit.
 
 **The input feed.** It is built from the graph's **declared input signature**, never from a
 convention, because the pinned families genuinely differ: BERT-family graphs take
