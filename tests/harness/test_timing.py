@@ -30,6 +30,7 @@ from nbc.harness.timing import (
     TimingIncomplete,
     TimingReport,
     corpus_class_of,
+    read_timing_report,
     run_timing_pass,
     time_inference,
     time_layer,
@@ -294,6 +295,78 @@ def test_a_negative_elapsed_time_is_refused() -> None:
             inference=InferenceTiming({"primary": Percentiles(1, 2, 2)}, BATCH_SIZE_ONE),
             elapsed_ns=-1,
         )
+
+
+# --- reading a report back out of a published file -----------------------------------------------------
+
+
+def a_whole_report(elapsed_ns: int = 7) -> TimingReport:
+    return TimingReport(
+        layer=LayerTiming(
+            overall=Percentiles(11, 22, 3),
+            by_class={
+                name: Percentiles(index + 1, index + 5, 3)
+                for index, name in enumerate(CORPUS_CLASSES)
+            },
+            trace_enabled=True,
+        ),
+        inference=InferenceTiming(
+            {"primary": Percentiles(100, 200, 4), "secondary": Percentiles(9, 90, 4)},
+            BATCH_SIZE_ONE,
+        ),
+        elapsed_ns=elapsed_ns,
+    )
+
+
+def test_a_report_survives_a_round_trip_through_its_own_json() -> None:
+    """`reaggregate` publishes a table over a cost it did not measure, and this is how the cost
+    gets there. A parser that is not the exact inverse of the writer would carry a different number
+    into N3 than the pass produced, with nothing on either side saying so."""
+    original = a_whole_report()
+    assert read_timing_report(original.as_json_object()) == original
+
+
+def test_reading_a_timing_block_that_is_not_an_object_is_refused() -> None:
+    with pytest.raises(TimingIncomplete) as caught:
+        read_timing_report([1, 2, 3])
+    assert "not an object" in str(caught.value)
+
+
+@pytest.mark.parametrize("dropped", ["layer_ns", "inference_ns", "elapsed_ns"])
+def test_a_timing_block_missing_a_key_names_it_rather_than_defaulting(dropped: str) -> None:
+    """The refusal that matters most here: a defaulted p95 under N3 is a fabricated latency, and
+    the condition it decides is the one this artifact's headline rests on."""
+    document = a_whole_report().as_json_object()
+    del document[dropped]
+    with pytest.raises(TimingIncomplete) as caught:
+        read_timing_report(document)
+    assert dropped in str(caught.value)
+
+
+def test_a_hand_edited_block_still_meets_the_constructors_invariants() -> None:
+    """Reading is not a way around the types. `p50 > p95` is refused on the way back in exactly as
+    it is on the way out, so a block somebody edited between runs does not reach a verdict."""
+    document = a_whole_report().as_json_object()
+    document["layer_ns"]["overall"]["p50_ns"] = 10**9  # type: ignore[index]
+    with pytest.raises(ValueError):
+        read_timing_report(document)
+
+
+def test_a_block_whose_inference_is_at_another_batch_size_is_refused() -> None:
+    """`InferenceTiming` refuses any batch size but one, and the reader does not smuggle one past
+    it: a batched per-item average is a different quantity from a latency at batch size 1."""
+    document = a_whole_report().as_json_object()
+    document["inference_ns"]["batch_size"] = 8  # type: ignore[index]
+    with pytest.raises(ValueError):
+        read_timing_report(document)
+
+
+def test_a_block_missing_a_corpus_class_is_refused() -> None:
+    """The layer's cost broken out over two of the three classes reads as a cost over the corpus."""
+    document = a_whole_report().as_json_object()
+    del document["layer_ns"]["by_class"][CLASS_ATTACKS]  # type: ignore[index]
+    with pytest.raises(ValueError):
+        read_timing_report(document)
 
 
 # --- the two rules this module lives under -------------------------------------------------------------

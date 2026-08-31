@@ -84,6 +84,7 @@ __all__ = [
     "TimingIncomplete",
     "TimingReport",
     "corpus_class_of",
+    "read_timing_report",
     "run_timing_pass",
     "time_inference",
     "time_layer",
@@ -268,6 +269,79 @@ class TimingReport:
             "inference_ns": self.inference.as_json_object(),
             "elapsed_ns": self.elapsed_ns,
         }
+
+
+def _percentiles_from(document: object, where: str) -> Percentiles:
+    if not isinstance(document, Mapping):
+        raise TimingIncomplete(f"{where} is not a percentiles object, got {document!r}")
+    missing = [name for name in ("p50_ns", "p95_ns", "n") if name not in document]
+    if missing:
+        raise TimingIncomplete(f"{where} is missing {missing}")
+    return Percentiles(
+        p50=int(document["p50_ns"]),  # type: ignore[call-overload]
+        p95=int(document["p95_ns"]),  # type: ignore[call-overload]
+        n=int(document["n"]),  # type: ignore[call-overload]
+    )
+
+
+def read_timing_report(document: object) -> TimingReport:
+    """A `TimingReport` back out of the JSON `as_json_object` wrote. The exact inverse, here.
+
+    It lives beside the writer for the reason the writer lives on the type: a parser in the module
+    that happens to need one is a second declaration of the file's shape, and the two drift on the
+    first field anybody adds. This one fails on a shape it does not recognise instead of filling a
+    default, because its whole purpose is to let a run publish a table over a cost it did **not**
+    measure, and a silently defaulted p95 there would be a fabricated number under N3.
+
+    Every constructor invariant still applies: the percentiles refuse `p50 > p95`, the layer timing
+    refuses a missing corpus class, and the inference timing refuses an empty baseline map and any
+    batch size but one. A block that was hand-edited between runs does not get through.
+    """
+    if not isinstance(document, Mapping):
+        raise TimingIncomplete(f"the timing block is not an object, got {document!r}")
+    missing = [
+        name for name in ("layer_ns", "inference_ns", "elapsed_ns") if name not in document
+    ]
+    if missing:
+        raise TimingIncomplete(
+            f"the timing block is missing {missing}, so it does not describe a pass this reader "
+            f"can reconstruct; N3 would have no right-hand side"
+        )
+
+    layer_document = document["layer_ns"]
+    if not isinstance(layer_document, Mapping):
+        raise TimingIncomplete(f"layer_ns is not an object, got {layer_document!r}")
+    by_class_document = layer_document.get("by_class")
+    if not isinstance(by_class_document, Mapping):
+        raise TimingIncomplete(f"layer_ns.by_class is not an object, got {by_class_document!r}")
+    layer = LayerTiming(
+        overall=_percentiles_from(layer_document.get("overall"), "layer_ns.overall"),
+        by_class={
+            name: _percentiles_from(by_class_document.get(name), f"layer_ns.by_class.{name}")
+            for name in by_class_document
+        },
+        trace_enabled=bool(layer_document.get("trace_enabled")),
+    )
+
+    inference_document = document["inference_ns"]
+    if not isinstance(inference_document, Mapping):
+        raise TimingIncomplete(f"inference_ns is not an object, got {inference_document!r}")
+    by_baseline_document = inference_document.get("by_baseline")
+    if not isinstance(by_baseline_document, Mapping):
+        raise TimingIncomplete(
+            f"inference_ns.by_baseline is not an object, got {by_baseline_document!r}"
+        )
+    inference = InferenceTiming(
+        by_baseline={
+            key: _percentiles_from(value, f"inference_ns.by_baseline.{key}")
+            for key, value in by_baseline_document.items()
+        },
+        batch_size=int(inference_document.get("batch_size", -1)),  # type: ignore[call-overload]
+    )
+
+    return TimingReport(
+        layer=layer, inference=inference, elapsed_ns=int(document["elapsed_ns"])  # type: ignore[call-overload]
+    )
 
 
 def corpus_class_of(item: CorpusItem) -> str:

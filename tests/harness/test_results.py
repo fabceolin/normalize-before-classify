@@ -487,6 +487,167 @@ def test_a_wholly_absent_corpus_says_to_build_it_rather_than_building_it(tmp_pat
     assert "build-corpus" in str(caught.value)
 
 
+# --- re-deriving the table over a run that already happened ---------------------------------------------
+
+
+def a_previous_results_file(root: Path, **overrides: object) -> Path:
+    """A results file shaped like one `all` wrote, with only the fields `reaggregate` reads.
+
+    The cells and the verdict are empty on purpose: this command never looks at them. It reads the
+    run block, re-derives everything else from the scores, and a fixture carrying a plausible table
+    would invite a test to assert against numbers nobody measured.
+    """
+    from nbc.harness.run import RESULTS_FILENAME, results_directory
+    from nbc.harness.timing import BATCH_SIZE_ONE, CORPUS_CLASSES
+
+    percentiles = {"p50_ns": 11, "p95_ns": 22, "n": 3}
+    run: dict[str, object] = {
+        "build_id": "a-build-nobody-here-has",
+        "timing": {
+            "layer_ns": {
+                "overall": dict(percentiles),
+                "by_class": {name: dict(percentiles) for name in CORPUS_CLASSES},
+                "trace_enabled": True,
+            },
+            "inference_ns": {
+                "by_baseline": {"primary": dict(percentiles)},
+                "batch_size": BATCH_SIZE_ONE,
+            },
+            "elapsed_ns": 5,
+        },
+        "declared_path": {"note": "carried forward"},
+        "profile": "full",
+        "profile_items": 28600,
+        "steps": ["preflight", "verify", "build", "measure", "time", "aggregate"],
+        "total_wall_ns": 99,
+    }
+    run.update(overrides)
+
+    directory = results_directory(root)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / RESULTS_FILENAME
+    path.write_text(
+        json.dumps({"schema_version": 1, "run": run, "cells": [], "verdict": []}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_reaggregating_with_no_previous_file_says_which_command_produces_one(
+    tmp_path: Path,
+) -> None:
+    """This command re-derives a table; it does not measure one. Producing the first is `all`."""
+    from nbc.harness.run import reaggregate
+    from nbc.pins import load_pins
+
+    with pytest.raises(ResultsIncomplete) as caught:
+        reaggregate(load_pins(None), root=tmp_path)
+    assert "results.json" in str(caught.value) and "`all`" in str(caught.value)
+
+
+def test_reaggregating_without_a_timing_block_refuses_before_doing_the_work(
+    tmp_path: Path,
+) -> None:
+    """N3 has no right-hand side without it, so the condition would be `not_evaluable` and abort --
+    after the aggregation. Refused up front instead, naming the field."""
+    from nbc.harness.run import reaggregate
+    from nbc.pins import load_pins
+
+    path = a_previous_results_file(tmp_path)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    del document["run"]["timing"]
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ResultsIncomplete) as caught:
+        reaggregate(load_pins(None), root=tmp_path)
+    assert "timing" in str(caught.value)
+
+
+def test_reaggregating_without_the_trace_file_refuses_rather_than_emitting_no_census(
+    tmp_path: Path,
+) -> None:
+    """The quiet failure this command is most exposed to.
+
+    `aggregate.read_traces` reads a missing file as a run with no traces and returns an empty
+    mapping, so `edit_census_cells` emits nothing and the table comes out missing a whole family of
+    cells with no error anywhere. A crash is better than a table a reader has to count to distrust.
+    """
+    from nbc.harness.run import TRACES_FILENAME, reaggregate
+    from nbc.pins import load_pins
+
+    a_previous_results_file(tmp_path)
+
+    with pytest.raises(ResultsIncomplete) as caught:
+        reaggregate(load_pins(None), root=tmp_path)
+    assert TRACES_FILENAME in str(caught.value)
+    assert "census" in str(caught.value)
+
+
+def test_a_run_block_that_is_not_an_object_is_refused(tmp_path: Path) -> None:
+    from nbc.harness.run import RESULTS_FILENAME, reaggregate, results_directory
+    from nbc.pins import load_pins
+
+    directory = results_directory(tmp_path)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / RESULTS_FILENAME).write_text(
+        json.dumps({"schema_version": 1, "run": [], "cells": [], "verdict": []}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ResultsIncomplete) as caught:
+        reaggregate(load_pins(None), root=tmp_path)
+    assert "no run block" in str(caught.value)
+
+
+def test_scores_from_another_corpus_are_refused() -> None:
+    """The one input this cheap path can be handed that produces a plausible and wrong table.
+
+    Fired directly rather than through the command, because reaching it needs a built corpus in a
+    temporary root and building one is a decision this suite does not make.
+    """
+    from nbc.harness.run import refuse_a_corpus_the_scores_do_not_describe
+
+    refuse_a_corpus_the_scores_do_not_describe("same", "same")  # does not raise
+
+    with pytest.raises(ResultsIncomplete) as caught:
+        refuse_a_corpus_the_scores_do_not_describe("this-corpus", "the-one-scored")
+    assert "this-corpus" in str(caught.value) and "the-one-scored" in str(caught.value)
+    assert "wrong and looks right" in str(caught.value)
+
+
+def test_the_aggregate_subcommand_is_wired_to_the_reaggregating_path(tmp_path: Path) -> None:
+    """The seam between the CLI and the function, checked where it costs nothing: a root with the
+    committed pins and no previous results file reaches the first refusal and reports its code."""
+    from nbc.harness.run import main
+    from nbc.pins import PINS_FILENAME
+
+    repository = Path(__file__).resolve().parents[2]
+    (tmp_path / PINS_FILENAME).write_bytes((repository / PINS_FILENAME).read_bytes())
+
+    assert main(["--root", str(tmp_path), "aggregate"]) == ResultsIncomplete.exit_code
+
+
+def test_reaggregating_records_that_it_measured_nothing() -> None:
+    """The honesty requirement, asserted on the code rather than on a run.
+
+    A results file whose latencies were produced by another process and does not say so is the
+    artifact this project is not. `run.reaggregated` is where it says so, and the step name is
+    `reaggregate` rather than `aggregate` so a reader diffing two files can tell the cheap act from
+    the whole run.
+    """
+    from nbc.harness.run import STEP_REAGGREGATE
+    from nbc.harness.results import STEP_AGGREGATE
+
+    source = (Path(__file__).resolve().parents[2] / "src/nbc/harness/run.py").read_text(
+        encoding="utf-8"
+    )
+    assert STEP_REAGGREGATE != STEP_AGGREGATE
+    body = source.split("def reaggregate(")[1].split("\ndef ")[0]
+    assert '"reaggregated"' in body
+    assert "run_timing_pass" not in body, "this command measures no cost"
+    assert "merge_shards" not in body, "this command scores nothing"
+    assert "open_baselines" not in body, "this command opens no model"
+
+
 def test_the_trace_file_is_gitignored() -> None:
     """Its consumer is a person debugging one document; what the table needs is the per-stage edit
     counts, which are Count cells in the results file."""
@@ -631,12 +792,40 @@ def test_all_three_corpus_reads_apply_the_profile() -> None:
         and node.func.id == "_items_for_profile"
     ]
     assert len(reads) >= 3, reads
+    discards = _reads_that_discard_the_items(tree)
     # The timing subcommand reads the corpus too and measures the whole of it on purpose, so the
     # count is not required to match; what is required is that no read is left without one nearby.
     for line in reads:
-        assert any(abs(line - other) <= 3 for other in applies) or _is_the_timing_pass(source, line), (
+        exempt = _is_the_timing_pass(source, line) or line in discards
+        assert any(abs(line - other) <= 3 for other in applies) or exempt, (
             f"run.py:{line} reads the corpus without applying the profile"
         )
+
+
+def _reads_that_discard_the_items(tree: "ast.Module") -> set[int]:
+    """`reaggregate` reads the corpus for the manifest alone -- it re-reads scores a previous run
+    wrote and opens no model -- so it binds the items to `_`. A profile chooses how many documents
+    to score, and a pass that never binds a document cannot score one; that is why the discard is
+    the exemption rather than the name of the function, which would have to be widened again for
+    the next such pass.
+    """
+    import ast
+
+    discarding = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)):
+            continue
+        if value.func.id != "read_corpus":
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Tuple) and len(target.elts) == 2:
+                items = target.elts[1]
+                if isinstance(items, ast.Name) and items.id == "_":
+                    discarding.add(value.lineno)
+    return discarding
 
 
 def _is_the_timing_pass(source: str, line: int) -> bool:

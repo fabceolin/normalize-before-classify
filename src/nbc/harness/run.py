@@ -93,7 +93,7 @@ from nbc.harness.summary import (
     SUMMARY_CHOICE,
     findings,
 )
-from nbc.harness.timing import run_timing_pass
+from nbc.harness.timing import read_timing_report, run_timing_pass
 from nbc.harness.verdict import refuse_an_unevaluable_run, verdicts
 from nbc.pins import Pins, load_pins
 from nbc.report.caveats import verify_caveats_file
@@ -112,6 +112,8 @@ __all__ = [
     "RESULTS_FILENAME",
     "TRACES_FILENAME",
     "full_run",
+    "reaggregate",
+    "refuse_a_corpus_the_scores_do_not_describe",
     "results_directory",
     "traces_path",
     "scores_path",
@@ -759,6 +761,185 @@ def full_run(
     }
 
 
+STEP_REAGGREGATE: Final[str] = "reaggregate"
+"""What `reaggregate` records in `run.steps`, and it is deliberately not `STEP_AGGREGATE`.
+
+The two produce the same four keys and are not the same act. `aggregate` inside `all` sits after a
+scoring pass and a timing pass this process ran; `reaggregate` sits after neither, over a cost
+somebody else measured. A reader diffing two results files has to be able to tell which one they
+are holding, and a shared step name would make the cheaper act indistinguishable from the whole run.
+"""
+
+
+def refuse_a_corpus_the_scores_do_not_describe(here: str, produced_against: object) -> None:
+    """Abort unless the corpus present is the one the committed scores were computed over.
+
+    A separate function, and small, because it is the one refusal in `reaggregate` a test cannot
+    reach through the command: getting there needs a corpus present in a temporary root, and
+    building one is a decision this suite does not make. Fired directly instead, so the branch is
+    one somebody has seen run rather than one the coverage report reports as taken.
+    """
+    if here != produced_against:
+        raise ResultsIncomplete(
+            f"the corpus present here has build id {here!r} and the scores were produced against "
+            f"{produced_against!r}. Re-deriving a table over one corpus from scores computed over "
+            f"another produces a file that is wrong and looks right"
+        )
+
+
+def reaggregate(pins: Pins, *, root: str | Path | None = None) -> dict[str, object]:
+    """Recompute the cells, the limits and the four verdicts over a run that already happened.
+
+    **What this exists for.** `results/results.json` is a pure function of `results/scores.jsonl`,
+    `results/traces.jsonl` and the timing block, and the first two are fixed: `scores.jsonl` came
+    out byte-identical from two `all` invocations an hour apart. So re-deriving the table when the
+    code that reads it changes costs seconds, while re-measuring costs the ~85-minute timing pass.
+    The first time that was needed -- three published verdict sentences misreading a correct
+    measurement -- there was no way to do it, because `all` was the only door to `aggregate_cells`
+    and `all` runs the timing pass on the way.
+
+    **It measures nothing, and it says so in the file.** The timing block is read back out of the
+    previous results file through `timing.read_timing_report`, and `run.reaggregated` records that
+    it was inherited, which invocation measured it and what this pass recomputed. A results file
+    whose cost figures were produced by another process and does not say so is exactly the artifact
+    this project is not.
+
+    **Three refusals, and each is a way the cheap path could publish something false.**
+
+    - *No previous file, or no timing block in it.* N3's right-hand side would be absent, the
+      condition would go `not_evaluable` and the run would abort -- but only after the work. Named
+      up front instead.
+    - *No `traces.jsonl`.* `aggregate.read_traces` reads a missing file as a run with no traces,
+      and `edit_census_cells` then emits nothing, so this command would publish a table quietly
+      missing a whole family of cells and nothing would fail. A quiet loss is worse than a crash,
+      so it is refused here rather than found by a reader counting cells.
+    - *A corpus that is not the one the scores describe.* The build id is recomputed through
+      `manifest.read_corpus`, the one guarded door, and compared against the previous file's.
+      Scores over one corpus and a manifest over another is the single input this path can be
+      handed that produces a plausible and wrong table.
+    """
+    started = time.perf_counter_ns()
+
+    platform.preflight()
+    caveats = verify_caveats_file()
+
+    previous_at = results_directory(root) / RESULTS_FILENAME
+    if not previous_at.exists():
+        raise ResultsIncomplete(
+            f"there is no {RESULTS_DIRNAME}/{RESULTS_FILENAME} to re-derive from. This command "
+            f"recomputes the table over a run that already happened; producing the first one is "
+            f"`all`, which measures the cost this command inherits"
+        )
+    previous = json.loads(previous_at.read_text(encoding="utf-8"))
+    previous_run = previous.get("run")
+    if not isinstance(previous_run, Mapping):
+        raise ResultsIncomplete(
+            f"{RESULTS_DIRNAME}/{RESULTS_FILENAME} carries no run block, so there is nothing to "
+            f"inherit the measured cost and the corpus identity from"
+        )
+
+    absent = [name for name in ("build_id", "timing") if name not in previous_run]
+    if absent:
+        raise ResultsIncomplete(
+            f"the previous run block is missing {absent}. Without the timing block N3 has no "
+            f"right-hand side, and without the build id there is nothing to check this corpus "
+            f"against; both are cheaper to refuse now than after the aggregation"
+        )
+    # Round-tripped rather than copied across. A block edited by hand fails here, on the timing
+    # constructors' own invariants, instead of reaching N3 as a plausible number.
+    report = read_timing_report(previous_run["timing"])
+
+    traces_at = traces_path(root)
+    if not traces_at.exists():
+        raise ResultsIncomplete(
+            f"{RESULTS_DIRNAME}/{TRACES_FILENAME} is absent, and it is not committed -- the timing "
+            f"pass inside `all` writes it. Without it the per-stage edit census comes out empty "
+            f"and this command would publish a table quietly missing a family of cells"
+        )
+
+    manifest, _ = read_corpus(pins, root)
+    refuse_a_corpus_the_scores_do_not_describe(manifest.build_id, previous_run["build_id"])
+    steps = [STEP_VERIFY, STEP_BUILD]
+
+    scores = read_scores(scores_path(root))
+    traces = read_traces(traces_at)
+    produced = aggregate_cells(scores, pins, traces)
+    limits = findings(produced)
+    decided = verdicts(produced, report, pins.benign_frame.confirmatory_cell, limits)
+
+    refuse_an_incomplete_table(
+        completeness_problems(produced, _required_window_policies(pins))
+    )
+    refuse_an_unevaluable_run(decided)
+
+    results = ResultsFile(
+        run=RunBlock(
+            {
+                "build_id": manifest.build_id,
+                "corpus_files": [
+                    {"name": entry.name, "sha256": entry.sha256, "rows": entry.rows}
+                    for entry in manifest.files
+                ],
+                "declared_path": previous_run.get("declared_path"),
+                "caveats": caveats.as_run_fields(),
+                "confirmatory_cell": pins.benign_frame.confirmatory_cell.as_run_fields(),
+                "timing": report.as_json_object(),
+                "summary": {
+                    "choice": SUMMARY_CHOICE,
+                    "rejected": dict(REJECTED_SUMMARIES),
+                    "rejected_justifications": dict(REJECTED_JUSTIFICATIONS),
+                    "findings": [limit.as_json_object() for limit in limits],
+                },
+                "interval_methods": list(INTERVAL_METHODS),
+                "profile": previous_run.get("profile"),
+                "profile_items_per_cell": previous_run.get("profile_items_per_cell"),
+                "profile_items": previous_run.get("profile_items"),
+                "steps": steps + [STEP_REAGGREGATE],
+                "total_wall_ns": time.perf_counter_ns() - started,
+                # The honesty field: everything a reader needs in order to know that the cost
+                # figures in this file were measured by a different process than wrote it.
+                "reaggregated": {
+                    "from_steps": previous_run.get("steps"),
+                    "from_total_wall_ns": previous_run.get("total_wall_ns"),
+                    "inherited": [
+                        "timing",
+                        "declared_path",
+                        "profile",
+                        "profile_items_per_cell",
+                        "profile_items",
+                    ],
+                    "recomputed": [
+                        "cells",
+                        "verdict",
+                        "summary",
+                        "caveats",
+                        "confirmatory_cell",
+                        "build_id",
+                        "corpus_files",
+                    ],
+                    "note": (
+                        "The cells, the limits and the four verdicts were re-derived from the "
+                        "committed scores and the trace file. No scoring pass and no timing pass "
+                        "ran: the layer and inference latencies under `timing` were measured by "
+                        "the invocation named in `from_steps` and are carried forward unchanged."
+                    ),
+                },
+            }
+        ),
+        cells=produced,
+        verdict=decided,
+    )
+    previous_at.write_text(render_results(results), encoding="utf-8")
+
+    return {
+        "results": str(previous_at),
+        "cells": len(produced),
+        "verdicts": [v.outcome for v in decided],
+        "findings": len(limits),
+        "steps": steps + [STEP_REAGGREGATE],
+    }
+
+
 def _items_for_profile(items: Sequence[CorpusItem], pins: Pins, profile: str) -> tuple[CorpusItem, ...]:
     """The corpus a run at `profile` measures over.
 
@@ -918,6 +1099,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     subcommands.add_parser(
+        "aggregate",
+        help=(
+            "re-derive results/results.json from the scores and traces a previous run already "
+            "produced: aggregate, evaluate the four conditions and write the file. Measures "
+            "nothing -- no scoring pass, no timing pass, no model opened -- and carries the cost "
+            "figures forward from the previous file, recording in run.reaggregated that it did"
+        ),
+    )
+    subcommands.add_parser(
         "report",
         help=(
             "render the table from results/results.json and inject it into the README. Story 5.1 "
@@ -959,6 +1149,11 @@ def main(argv: list[str] | None = None) -> int:
             report = full_run(
                 pins, shards=args.shards or 1, root=args.root, profile=args.profile
             )
+        elif args.subcommand == "aggregate":
+            # No `--profile`: this command does not choose a corpus, it re-reads the scores a run
+            # already wrote. The profile that produced them is carried forward from the previous
+            # file, so a smoke table cannot be re-derived into a full one by passing a flag.
+            report = reaggregate(pins, root=args.root)
         elif args.subcommand == "report":
             raise ResultsIncomplete(
                 "the renderer is story 5.1 -- 'the table is a pure function of the results file' -- "
