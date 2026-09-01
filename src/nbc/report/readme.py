@@ -62,6 +62,7 @@ __all__ = [
     "Cell",
     "DEFAULT_RESULTS",
     "HEADLINE_WINDOW_POLICY",
+    "QUIET_VERDICT_OUTCOME",
     "Results",
     "ReportNotRenderable",
     "SCHEMA_VERSION",
@@ -134,6 +135,20 @@ Restated here rather than imported: `pins.WINDOW_POLICIES` is where the vocabula
 reaching it would drag `pins.toml` and the whole pin loader into a renderer. The cost of restating
 it is that a policy added there and not here aborts the render -- which is the safe direction, and
 is why an unrecognized policy aborts instead of being dropped."""
+
+QUIET_VERDICT_OUTCOME: Final[str] = "not_triggered"
+"""The one verdict outcome that does not have to be met before the first table.
+
+The block used to publish the conditions in one list under every table, with no summary over them,
+so the one that *fired* was indistinguishable, from above, from the ones that did not. The
+headline is therefore defined by exclusion rather than by a list of interesting outcomes: every
+outcome except this one is named above the tables. `not_evaluable` is the reason it is written this
+way -- it is the artifact not working, it is not `triggered`, and a headline keyed on `triggered`
+alone would have hidden it exactly as thoroughly as the old silence hid the condition that fired.
+
+Restated here rather than imported, for the reason `HEADLINE_WINDOW_POLICY` is: `nbc.schema` is
+where the outcome vocabulary is declared and the import bound keeps it out of a renderer. A test
+binds the two."""
 
 SENSITIVITY_WINDOW_POLICIES: Final[frozenset[str]] = frozenset()
 """The window policies that are a sensitivity pass rather than the headline, which today is none.
@@ -1028,6 +1043,12 @@ class Section:
     Rows and columns are derived from the values the file actually holds on those coordinates, so
     no label in the output is typed here. `claim` decides which cells the section is responsible
     for; every claimed cell lands in exactly one slot, or the render aborts.
+
+    `folded` is the curation lever, and it is **declared per section rather than derived from
+    anything a cell carries**. Which of these tables is a headline and which is the evidence under
+    one is an editorial judgement about this argument, not a property of the data. Declaring it
+    here keeps that judgement in one readable list and out of the render loop, and a folded section
+    still emits every byte it emitted before -- a fold removes rendered height, never a figure.
     """
 
     name: str
@@ -1035,6 +1056,7 @@ class Section:
     claim: Callable[[Cell], bool]
     row_axes: tuple[str, ...]
     column_axes: tuple[str, ...]
+    folded: bool = False
 
 
 def _column_labels(columns: Sequence[tuple[Any, ...]], column_axes: Sequence[str]) -> list[str]:
@@ -1067,6 +1089,13 @@ def _build_section(
     The lead-in travels with the table rather than being emitted by the caller: a section whose
     body renders no rows must take its prose with it, or the README promises a comparison over a
     table that is not there.
+
+    A `folded` section puts its table inside a `<details>` and **leaves the lead-in outside it**:
+    the sentence that says what was folded away is the one thing a reader skimming past a closed
+    fold must still meet, or the fold hides a claim rather than its evidence. An empty folded
+    section emits nothing at all, `<details>` included -- the rule above is about the whole
+    section, and a summary offering to expand a table that does not exist is the same broken
+    promise the lead-in rule refuses.
     """
     claimed = [cell for cell in cells if section.claim(cell)]
     if not claimed:
@@ -1113,7 +1142,7 @@ def _build_section(
     header = [f"`{axis}`" for axis in section.row_axes] + labels
     rule = ["---"] * len(section.row_axes) + ["---:"] * len(labels)
 
-    lines = ["", section.lead_in, "", _row(header), _row(rule)]
+    table = [_row(header), _row(rule)]
     for index in range(len(rows)):
         texts = [_axis_text(value) for value in rows[index]]
         for column in range(len(columns)):
@@ -1122,8 +1151,28 @@ def _build_section(
                 texts.append(_MISSING)
                 continue
             texts.append(_COLUMN_RENDERERS[cell.kind](cell) + anchors.markers(cell))
-        lines.append(_row(texts))
-    return lines, placed
+        table.append(_row(texts))
+
+    if not section.folded:
+        return ["", section.lead_in, "", *table], placed
+
+    # The blank line after `<summary>` is not cosmetic: without it the table inside the fold is
+    # rendered as one paragraph of literal pipes, and the blank line before `</details>` is what
+    # keeps the closing tag out of the table's last row.
+    return (
+        [
+            "",
+            section.lead_in,
+            "",
+            f"<details><summary>{section.name} -- {len(claimed):,} "
+            f"cell{'' if len(claimed) == 1 else 's'}</summary>",
+            "",
+            *table,
+            "",
+            "</details>",
+        ],
+        placed,
+    )
 
 
 def _sections(cells: Sequence[Cell]) -> list[Section]:
@@ -1133,6 +1182,17 @@ def _sections(cells: Sequence[Cell]) -> list[Section]:
     coordinates a cell declares, and the rows and columns are whatever values the file carries on
     them. The one place a literal appears is where the file's own vocabulary is the predicate --
     the four cell kinds, the two populations, and the contrast prefixes.
+
+    **`folded` is declared here and nowhere else, and it is the only editorial judgement in this
+    module.** The rates are the claim and are never folded; the verdicts under the tables are the
+    claim being decided and are never folded either. Every other section declared below is the
+    evidence *for* a claim one of those two already makes -- the same difference at the threshold
+    and threshold-free, the same difference over the matched population, the separation each
+    difference is a difference in, what each dressing cost before the layer saw it, the sensitivity
+    pass, and the censuses underneath all of it -- so each of those carries its lead-in in the open
+    and its table behind a fold. Nothing is dropped: every folded row is still in the file, still
+    diffable, still one click away. The count of folded sections is not typed here either; it is
+    whatever this list declares, and `test_readme.py` asserts the split against the declaration.
     """
     counts = sum(1 for cell in cells if cell.kind == "count")
     rates = sum(1 for cell in cells if cell.kind == "rate")
@@ -1172,6 +1232,7 @@ def _sections(cells: Sequence[Cell]) -> list[Section]:
             ),
             row_axes=("baseline", "dressing_chain", "chain_class"),
             column_axes=("family", "benign_class"),
+            folded=True,
         ),
         Section(
             name="canon deltas, threshold-free",
@@ -1188,6 +1249,7 @@ def _sections(cells: Sequence[Cell]) -> list[Section]:
             ),
             row_axes=("baseline", "dressing_chain", "chain_class"),
             column_axes=("benign_class",),
+            folded=True,
         ),
         Section(
             name="dressing deltas",
@@ -1204,6 +1266,7 @@ def _sections(cells: Sequence[Cell]) -> list[Section]:
             ),
             row_axes=("baseline", "contrast", "canon_on"),
             column_axes=("family", "benign_class"),
+            folded=True,
         ),
         Section(
             name="separation",
@@ -1215,6 +1278,7 @@ def _sections(cells: Sequence[Cell]) -> list[Section]:
             claim=lambda cell: cell.kind == "auc" and is_all(cell),
             row_axes=("baseline", "dressing_chain", "chain_class", "canon_on"),
             column_axes=("benign_class",),
+            folded=True,
         ),
         Section(
             name="matched windows",
@@ -1233,6 +1297,7 @@ def _sections(cells: Sequence[Cell]) -> list[Section]:
             # claim is kind-agnostic, so a second kind landing in this population would map to the
             # slot the first already holds and the render would abort on data that is not wrong.
             column_axes=("kind", "family", "benign_class"),
+            folded=True,
         ),
         Section(
             name="sensitivity",
@@ -1244,6 +1309,7 @@ def _sections(cells: Sequence[Cell]) -> list[Section]:
             claim=lambda cell: cell.coord("window_policy") in SENSITIVITY_WINDOW_POLICIES,
             row_axes=("window_policy", "baseline", "dressing_chain", "canon_on"),
             column_axes=("kind", "family", "benign_class"),
+            folded=True,
         ),
         Section(
             name="censuses",
@@ -1256,6 +1322,7 @@ def _sections(cells: Sequence[Cell]) -> list[Section]:
             claim=lambda cell: cell.kind == "count" and is_all(cell),
             row_axes=("baseline", "dressing_chain", "chain_class", "family", "benign_class"),
             column_axes=("census", "canon_on"),
+            folded=True,
         ),
     ]
 
@@ -1282,7 +1349,11 @@ def _what_ran(run: Mapping[str, Any], failures: list[str]) -> list[str]:
     if isinstance(profile, str):
         items = run.get("profile_items")
         per_cell = run.get("profile_items_per_cell")
-        suffix = f", {int(items):,} items scored" if isinstance(items, int) else ""
+        # **"items scored" named an actor this line cannot name.** The figure is the size of the
+        # scored matrix the cells were aggregated from; whether *this* invocation did the scoring
+        # is what `run.steps` and the wall-time label below say, and on the committed file they
+        # say it did not. So the count is stated as the matrix it is, with no verb attributing it.
+        suffix = f", {int(items):,} items in the scored matrix" if isinstance(items, int) else ""
         if isinstance(per_cell, int):
             suffix += f", {per_cell:,} per cell"
         lines.append(f"- profile: `{stored(profile, 'run.profile')}`{suffix}")
@@ -1295,17 +1366,36 @@ def _what_ran(run: Mapping[str, Any], failures: list[str]) -> list[str]:
         ]
 
     steps = run.get("steps")
-    if isinstance(steps, list) and all(isinstance(step, str) for step in steps):
+    # **An empty list is not a list of steps.** `steps: []` is a list that is not `None`, so the
+    # old guard emitted `- steps: ` with nothing after it -- a label whose whole claim is that it
+    # names something -- while the wall-time parenthetical below silently vanished, because that
+    # one tested the list for truth rather than for presence. One rule now: a run that named no
+    # step gets no step line and the same unparenthesised wall-time label as a run with no field.
+    named_steps = (
+        [stored(step, "run.steps") for step in steps] or None
+        if isinstance(steps, list) and all(isinstance(step, str) for step in steps)
+        else None
+    )
+    if named_steps is not None:
         # Printed as the file records them, in order and without collapsing: two `build`
         # entries would be two builds, and a list that quietly reported them as one would be
         # hiding the fact a reader is here for.
-        lines.append(
-            "- steps: "
-            + ", ".join(f"`{stored(step, 'run.steps')}`" for step in steps)
-        )
+        lines.append("- steps: " + ", ".join(f"`{step}`" for step in named_steps))
+
     wall = run.get("total_wall_ns")
     if isinstance(wall, int):
-        lines.append(f"- wall time: {_duration(wall)}")
+        # **This is not the scoring run's wall clock and must never be labelled as one.**
+        # `total_wall_ns` is started by whichever invocation wrote the file and stopped when it
+        # wrote it, so on a `reaggregate` it times a pass that opened no model and scored no item
+        # -- and the published block called it "wall time" three lines under "28,600 items
+        # scored", where the only reading available to a reader is that scoring 28,600 items took
+        # it. The original scoring run's clock is not recoverable: each re-derivation overwrites
+        # the field with its own. So the figure is kept and the label is made true, by naming the
+        # steps the file itself says this invocation ran.
+        covered = (
+            " (" + ", ".join(f"`{step}`" for step in named_steps) + ")" if named_steps else ""
+        )
+        lines.append(f"- wall time of the steps this invocation ran{covered}: {_duration(wall)}")
 
     methods = run.get("interval_methods")
     if isinstance(methods, list) and all(isinstance(name, str) for name in methods):
@@ -1406,6 +1496,68 @@ def _what_ran(run: Mapping[str, Any], failures: list[str]) -> list[str]:
     return lines
 
 
+def _verdict_headline(verdicts: Sequence[Mapping[str, Any]], failures: list[str]) -> list[str]:
+    """What the pre-registered conditions came out as, above the first table.
+
+    The conditions are the only thing in this block that is a *finding* rather than a measurement,
+    and until this line existed they were rendered once, in a list under every table. One of them
+    triggered. Nothing above the tables said so, and a reader who stopped at the first table --
+    which is what a reader with five minutes does -- left having read the evidence for a
+    conclusion the block never stated.
+
+    A file that carries conditions always gets a line, because the "nothing fired" case is a
+    result too and rendering it as absence makes the presence of the line the message. Which
+    outcomes are worth naming is decided by `QUIET_VERDICT_OUTCOME` and by exclusion, so an
+    outcome the vocabulary grows later is named by default rather than silently omitted.
+
+    **A file with no conditions at all gets no line, and that is silence chosen deliberately.**
+    The alternative was an abort, and an abort is wrong here: `verdict: []` is what a legitimately
+    partial file carries -- a results file rendered before any condition was evaluated -- and this
+    module renders what a file holds rather than deciding what a file must hold. Nor is it
+    silence about a result: there is no result to be silent about, and a sentence saying "0
+    conditions were evaluated" above a table would be this module inventing a finding. The rule
+    the "never silence" above states is about *outcomes*, and an empty list has none. The
+    completeness that would be worth an abort -- a cell nothing renders -- is enforced in `render`,
+    against the file's own cells.
+    """
+    if not verdicts:
+        return []
+    loud = [
+        (
+            _stored_text(str(verdict["condition"]), f"verdict[{index}].condition", failures),
+            _stored_text(str(verdict["outcome"]), f"verdict[{index}].outcome", failures),
+        )
+        for index, verdict in enumerate(verdicts)
+        if str(verdict["outcome"]) != QUIET_VERDICT_OUTCOME
+    ]
+    total = len(verdicts)
+    quiet = total - len(loud)
+    if not loud:
+        sentence = (
+            f"**What the pre-registered conditions came out as.** All {total} came out "
+            f"`{QUIET_VERDICT_OUTCOME}`: none of them fired."
+        )
+    else:
+        # Positive voice, and the outcome spelled out rather than an identifier under a double
+        # negative: "1 did not come out `not_triggered`: `N3`" made a reader compose two negations
+        # to learn that a condition fired, and then told them only its name.
+        named = ", ".join(f"`{condition}` came out `{outcome}`" for condition, outcome in loud)
+        # No tail when nothing was quiet, and the count is written as "k of the n" in both limbs so
+        # the sentence needs no singular branch to stay grammatical.
+        rest = (
+            f" {quiet} of the {total} came out `{QUIET_VERDICT_OUTCOME}`." if quiet else ""
+        )
+        sentence = (
+            f"**What the pre-registered conditions came out as.** Of the {total} pre-registered "
+            f"falsification conditions, {named}.{rest}"
+        )
+    return [
+        "",
+        sentence
+        + " Each condition is decided under the tables, from the figures the tables carry.",
+    ]
+
+
 def _verdict_lines(verdicts: Sequence[Mapping[str, Any]], failures: list[str]) -> list[str]:
     """The pre-registered conditions, each rendered from its `computed` block and not its sentence.
 
@@ -1463,56 +1615,122 @@ def _finding_lines(
 
     A finding whose coordinates several measurements share carries no marker in the tables, and its
     entry says so rather than leaving a reader looking for a bracket that is not there.
+
+    **Findings of one kind whose `computed` blocks are the same block are stated once.** The
+    committed file raises one kind whose every member carries the identical fields, and the block
+    published each of them as its own bullet of the same sentence -- a run of lines carrying one
+    fact, in the artifact whose whole claim is that it is readable. The collapse is on the
+    `computed` block and on nothing else: no `kind` decides it, so it fires wherever a run repeats
+    itself and never where two findings differ by a byte.
+
+    **Inside a collapsed entry a finding carries its coordinates only when nothing else does.**
+    The first collapse stated the shared `computed` once and then printed every member's full
+    coordinate tuple, which turned a hundred lines into one line of seventeen thousand characters:
+    the same words, unwrapped. But a finding that anchored is already beside its own cell in a
+    table above -- that is what the anchor mechanism is *for* -- so its entry needs only its
+    number, and the walk back to the coordinates is the marker. A finding in `Anchors.shared`
+    anchored nowhere: there is no table row to walk back to, so it keeps its tuple and its entry
+    says how many measurements share it. Anchored or not is read off the anchors, never off a
+    `kind` or a count.
     """
     if not findings:
         return []
 
-    by_kind: dict[str, list[tuple[int, int, Mapping[str, Any]]]] = {}
-    for index, finding in enumerate(findings):
-        by_kind.setdefault(str(finding["kind"]), []).append(
-            (anchors.numbers[index], index, finding)
-        )
-
+    grouped = _grouped_findings(findings)
+    # The set decides whether a collapsed entry has to repeat its coordinates; the sum is how many
+    # markers a reader will actually meet, and they are not the same number when one finding names
+    # two cells.
+    anchored_numbers = {number for numbers in anchors.at.values() for number in numbers}
     anchored = sum(len(numbers) for numbers in anchors.at.values())
     lines = [
         "",
         (
-            f"**{len(findings)} findings the aggregator raised, in {len(by_kind)} kinds.** A "
+            f"**{len(findings)} findings the aggregator raised, in {len(grouped)} kinds.** A "
             f"bracketed number beside a figure above is a finding that names that measurement, and "
-            f"{anchored} such markers appear. A finding whose nine coordinates are shared by more "
-            f"than one measurement -- a rate and a census count can sit at the same coordinates -- "
-            f"is anchored to none of them and says so, because the file records no `kind` on a "
-            f"finding's keys and guessing which measurement was meant is how a marker lands on a "
-            f"figure it is not about."
+            f"{anchored} such markers appear. **A marker sits in the table cell it is "
+            f"about, and where that table is inside a fold the fold has to be open before the "
+            f"browser's find-in-page will reach it** -- collapsed content is not searched. A "
+            f"finding whose nine coordinates are shared by more than one measurement -- a rate and "
+            f"a census count can sit at the same coordinates -- is anchored to none of them and "
+            f"says so, because the file records no `kind` on a finding's keys and guessing which "
+            f"measurement was meant is how a marker lands on a figure it is not about."
         ),
     ]
-    for kind in sorted(by_kind):
-        entries = sorted(by_kind[kind])
-        varying = _varying_axes([finding for _, _, finding in entries])
-        lines += ["", f"**`{kind}`** -- {len(entries)}.", ""]
-        for number, index, finding in entries:
+    for kind, groups in grouped.items():
+        held = sum(len(group) for group in groups)
+        varying = _varying_axes([findings[index] for group in groups for index in group])
+        collapsed = held - len(groups)
+        # One entry is "repeats ... and is stated"; more than one is "repeat ... and are stated".
+        # The plural-only sentence shipped, and read "1 of them repeat another's `computed`
+        # exactly and are stated with it" -- in the same block that grew a singular branch for the
+        # fold's cell count.
+        stated = ""
+        if collapsed == 1:
+            stated = " 1 of them repeats another's `computed` exactly and is stated with it."
+        elif collapsed:
+            stated = (
+                f" {collapsed} of them repeat another's `computed` exactly and are stated with it."
+            )
+        lines += ["", f"**`{kind}`** -- {held}.{stated}", ""]
+
+        def at(index: int, varying: tuple[str, ...] = varying) -> str:
+            """One finding's own coordinates, with the note for a marker it could not carry."""
             coordinates = " ; ".join(
                 ", ".join(f"{axis}={_axis_text(key[axis])}" for axis in varying)
-                for key in finding["keys"]
-            )
-            computed = finding["computed"]
-            figures = ", ".join(
-                f"`{_stored_text(name, f'finding[{index}].computed field name', failures)}` "
-                + _computed_entry(
-                    name, computed[name], computed, f"finding[{index}].computed", failures
-                )
-                for name in _rendered_names(computed)
+                for key in findings[index]["keys"]
             )
             shared = anchors.shared.get(index)
-            unanchored = (
-                f" (not anchored: {shared} measurements share these coordinates)"
-                if shared
-                else ""
+            return (coordinates or "every cell") + (
+                f" (not anchored: {shared} measurements share these coordinates)" if shared else ""
+            )
+
+        for group in groups:
+            computed = findings[group[0]]["computed"]
+            where = f"finding[{group[0]}].computed"
+            figures = ", ".join(
+                f"`{_stored_text(name, where + ' field name', failures)}` "
+                + _computed_entry(name, computed[name], computed, where, failures)
+                for name in _rendered_names(computed)
+            )
+            if len(group) == 1:
+                lines.append(f"- **[{anchors.numbers[group[0]]}]** {at(group[0])}: {figures}")
+                continue
+            covers = " ; ".join(
+                f"**[{anchors.numbers[index]}]**"
+                + ("" if anchors.numbers[index] in anchored_numbers else f" {at(index)}")
+                for index in group
             )
             lines.append(
-                f"- **[{number}]** {coordinates or 'every cell'}{unanchored}: {figures}"
+                f"- **{len(group)} findings carrying one `computed`**, stated once: {figures}. "
+                f"They are {covers}."
             )
     return lines
+
+
+def _grouped_findings(
+    findings: Sequence[Mapping[str, Any]],
+) -> dict[str, list[list[int]]]:
+    """The findings' positions in the file, grouped as the block prints them: kind, then `computed`.
+
+    One function, called by both the numbering and the printing, because "numbered in the order
+    they are printed" stops being true the moment the two derive that order separately -- and a
+    collapse that reorders the printing without reordering the numbering is exactly how a reader
+    ends up at [19] beside a figure with nowhere to look, which is the defect `_finding_notes`
+    already exists to have fixed.
+
+    The `computed` block is compared as one canonically serialized value rather than field by
+    field: two blocks are the same block when every name and every value in them is the same, and
+    a single differing byte anywhere puts them in different groups. Key *order* is deliberately not
+    part of it -- it is not something a reader of the rendered block can see, and a producer that
+    emitted its fields in a different order would otherwise publish the same fact twice.
+    """
+    by_kind: dict[str, dict[str, list[int]]] = {}
+    for index, finding in enumerate(findings):
+        by_computed = by_kind.setdefault(str(finding["kind"]), {})
+        by_computed.setdefault(
+            json.dumps(finding["computed"], sort_keys=True), []
+        ).append(index)
+    return {kind: list(by_kind[kind].values()) for kind in sorted(by_kind)}
 
 
 def _varying_axes(findings: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
@@ -1565,6 +1783,11 @@ def _finding_notes(findings: Sequence[Mapping[str, Any]], cells: Sequence[Cell])
     grouped by `kind` below, so file order made the printed list run [151]-[190], [19]-[21],
     [22]-[125] -- a reader who saw [19] beside a figure had no way to find it.
 
+    The printed order is `_grouped_findings`', not one derived here, because the block also groups
+    findings that share a `computed` block into one entry: two orders computed separately would
+    drift apart the first time the second grouping moved something, and the numbers would stop
+    ascending down the page for a second time.
+
     Nothing here reads a `kind` for anything but the grouping order, so a kind invented tomorrow
     anchors beside the cells it names without a line changing here.
     """
@@ -1572,7 +1795,12 @@ def _finding_notes(findings: Sequence[Mapping[str, Any]], cells: Sequence[Cell])
     for cell in cells:
         at_coordinate.setdefault(cell.key, []).append(cell)
 
-    order = sorted(range(len(findings)), key=lambda index: (str(findings[index]["kind"]), index))
+    order = [
+        index
+        for groups in _grouped_findings(findings).values()
+        for group in groups
+        for index in group
+    ]
     numbers = {index: position + 1 for position, index in enumerate(order)}
 
     at: dict[tuple[Any, ...], list[int]] = {}
@@ -1612,6 +1840,9 @@ def render(results: Results) -> str:
 
     lines: list[str] = ["", _PREAMBLE, ""]
     lines += _what_ran(results.run, failures)
+    # Above the first table, and above it deliberately: the conditions are the only thing here a
+    # reader is owed before the evidence, and they used to be rendered once, under every table.
+    lines += _verdict_headline(results.verdicts, failures)
 
     placed: set[tuple[Any, ...]] = set()
     for section in _sections(results.cells):

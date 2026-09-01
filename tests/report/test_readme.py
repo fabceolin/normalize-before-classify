@@ -368,6 +368,27 @@ def test_the_published_results_credit_the_corpus_the_manifest_and_the_attributio
         assert entry["rows"] == by_name[entry["name"]]["rows"]
 
 
+def test_the_readme_states_the_realized_repository_count_the_manifest_records(
+    repo_root: Path,
+) -> None:
+    """The one figure the page states in prose that the generated block cannot carry.
+
+    Every B-code interval in the block is narrowed by the fact that files from one repository
+    resemble each other, and the count a reader needs in order to judge by how much is in
+    `data/manifest.json` and in no cell of `results.json`. Prose is therefore the only place it can
+    be said -- and a hand-transcribed figure is the one thing this repository does not leave
+    unchecked, so the sentence is bound to the manifest here rather than trusted.
+    """
+    manifest = json.loads((repo_root / "data" / "manifest.json").read_text(encoding="utf-8"))
+    realized = manifest["reports"]["benign_draw"]["b_code"]["repositories_realized"]
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+    above = readme[: readme.index(RESULTS_START)]
+    assert f"**{realized} repositories**" in above, (
+        f"the manifest records {realized} realized B-code repositories and the page above the "
+        f"block does not state that number"
+    )
+
+
 # --- the I/O matrix, one row at a time --------------------------------------------------------------
 
 
@@ -707,6 +728,325 @@ def test_a_declared_sensitivity_pass_renders_beside_the_headline_and_never_into_
     assert "sensitivity pass" in block
     headline = block[block.index("The rates, per benign class") : block.index("sensitivity pass")]
     assert "publisher" not in headline
+
+
+# --- the conditions, above the tables rather than only under them --------------------------------
+
+
+def test_the_quiet_outcome_is_the_one_the_producer_writes() -> None:
+    """Declared in the renderer for the reason `HEADLINE_WINDOW_POLICY` is, and bound to the
+    producer here, so an outcome vocabulary that moves cannot leave the headline keyed on a value
+    no verdict can carry."""
+    from nbc.schema import OUTCOME_NOT_TRIGGERED, VERDICT_OUTCOMES
+
+    assert renderer.QUIET_VERDICT_OUTCOME == OUTCOME_NOT_TRIGGERED
+    assert renderer.QUIET_VERDICT_OUTCOME in VERDICT_OUTCOMES
+
+
+def test_a_triggering_verdict_is_named_above_the_first_table(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """The committed file's N3 triggered and the block said so once, under every table. A reader
+    with five minutes read the evidence and left without the conclusion.
+
+    The headline names the outcome and not only the identifier, and it says it in positive voice:
+    "1 did not come out `not_triggered`: `N3`" made a reader compose two negations to learn that a
+    condition fired, and then told them only its name.
+    """
+    triggered = [
+        (verdict["condition"], verdict["outcome"])
+        for verdict in published["verdict"]
+        if verdict["outcome"] != renderer.QUIET_VERDICT_OUTCOME
+    ]
+    assert triggered, "the fixture this test rests on is gone"
+
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    block = _block(target)
+    headline = block[: block.index("| ")]
+    for condition, outcome in triggered:
+        assert f"`{condition}` came out `{outcome}`" in headline
+    assert "did not come out" not in headline
+
+
+def test_a_file_where_nothing_triggered_still_gets_a_line(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """Never silence. Rendering "nothing fired" as absence makes the presence of the line the
+    message, and a reader cannot tell it from a block that forgot to say."""
+    for verdict in payload["verdict"]:
+        verdict["outcome"] = renderer.QUIET_VERDICT_OUTCOME
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    headline = _block(target)
+    headline = headline[: headline.index("| ")]
+    assert "What the pre-registered conditions came out as" in headline
+    assert f"came out `{renderer.QUIET_VERDICT_OUTCOME}`: none of them fired" in headline
+
+
+def test_an_outcome_the_vocabulary_grows_later_is_loud_by_default(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """Keyed by exclusion, so `not_evaluable` -- the artifact not working -- cannot be hidden by a
+    headline that only knows how to look for `triggered`."""
+    payload["verdict"][0]["outcome"] = "not_evaluable"
+    for verdict in payload["verdict"][1:]:
+        verdict["outcome"] = renderer.QUIET_VERDICT_OUTCOME
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    headline = _block(target)
+    headline = headline[: headline.index("| ")]
+    assert f"`{payload['verdict'][0]['condition']}` came out `not_evaluable`" in headline
+
+
+def test_a_file_where_every_condition_is_loud_names_them_all_and_grows_no_tail(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """The tail exists to account for the conditions the headline did not name. With nothing left
+    over there is nothing to account for, and "; 0 of the 4 came out `not_triggered`" would be the
+    headline reporting the empty set as a result.
+
+    The branch that decides this shipped uncovered: deleting the `if quiet` guard left the suite
+    green, because every file any test rendered had at least one quiet verdict.
+    """
+    for index, verdict in enumerate(payload["verdict"]):
+        verdict["outcome"] = "triggered" if index % 2 else "not_evaluable"
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    headline = _block(target)
+    headline = headline[: headline.index("| ")]
+
+    for verdict in payload["verdict"]:
+        assert f"`{verdict['condition']}` came out `{verdict['outcome']}`" in headline
+    assert renderer.QUIET_VERDICT_OUTCOME not in headline
+    assert "of the" in headline, "the total is still stated"
+
+
+def test_a_file_that_evaluated_no_condition_gets_no_headline(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """Silence, and it is chosen rather than inherited -- the deliberate exception to "never
+    silence" one paragraph up.
+
+    "Never silence" is a rule about *outcomes*: a condition that came out `not_triggered` is a
+    result, and rendering it as an absent line makes the presence of the line the message. An
+    empty `verdict` list has no outcome to be silent about. The two alternatives are both worse.
+    An abort would refuse a file that is legitimately partial -- a results file rendered before
+    anything was evaluated -- and this module's job is to render what a file holds, not to decide
+    what a file must hold; the completeness that *is* worth an abort, a cell no table claims, is
+    enforced in `render` against the file's own cells. A line reading "0 conditions were
+    evaluated" above the first table would be worse still: the block would be announcing a finding
+    that the aggregator never raised, in the artifact whose whole rule is that every figure came
+    from the file.
+
+    The branch shipped uncovered: `if not verdicts: return []` was removable with the suite green,
+    and without it this file publishes "All 0 came out `not_triggered`: none of them fired" over
+    tables whose conditions nobody evaluated.
+    """
+    payload["verdict"] = []
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    block = _block(target)
+    headline = block[: block.index("| ")]
+
+    assert "pre-registered" not in headline
+    assert "What the pre-registered conditions came out as" not in block
+    assert "`rate` cells" in headline, "the first table still arrives with its lead-in"
+
+
+# --- the clock, labelled for what it actually timed -----------------------------------------------
+
+
+def test_the_wall_time_names_the_steps_the_invocation_ran(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """`- wall time: 1.37 min` sat three lines under "28,600 items scored" and was the
+    reaggregation's own clock: the invocation that wrote it opened no model and scored nothing.
+
+    The original scoring run's clock is not recoverable -- every re-derivation overwrites the
+    field -- so the fix is the label, and the label is the file's own `run.steps`.
+    """
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    block = _block(target)
+    line = next(line for line in block.splitlines() if line.startswith("- wall time"))
+    assert line.startswith("- wall time of the steps this invocation ran (")
+    for step in published["run"]["steps"]:
+        assert f"`{step}`" in line
+    assert "\n- wall time: " not in block
+
+
+def test_the_wall_time_survives_a_run_that_records_no_steps(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """The figure is the file's and stays; only the parenthesis naming the steps goes away."""
+    payload["run"].pop("steps", None)
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    line = next(
+        line for line in _block(target).splitlines() if line.startswith("- wall time")
+    )
+    assert line == "- wall time of the steps this invocation ran: " + renderer._duration(
+        payload["run"]["total_wall_ns"]
+    )
+
+
+def test_a_run_that_names_no_step_emits_no_dangling_step_label(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """`steps: []` is a list that is not `None`, and the two guards over it disagreed.
+
+    The step line tested the field for *presence* and published `- steps: ` with nothing after it;
+    the wall-time parenthetical tested the same list for *truth* and silently vanished. So the
+    block carried a label whose whole claim is that it names something, next to a label that had
+    stopped naming anything, and neither said the file recorded no step.
+    """
+    payload["run"]["steps"] = []
+    results, target = write(tmp_path, payload)
+    render_into(results, target)
+    block = _block(target)
+
+    assert "- steps: " not in block
+    line = next(line for line in block.splitlines() if line.startswith("- wall time"))
+    assert line == "- wall time of the steps this invocation ran: " + renderer._duration(
+        payload["run"]["total_wall_ns"]
+    )
+
+
+# --- the fold: rendered height comes off, no byte does -------------------------------------------
+
+
+def _a_section(**overrides: Any) -> Any:
+    fields: dict[str, Any] = {
+        "name": "a section made by a test",
+        "lead_in": "**the sentence that says what is in the table.**",
+        "claim": lambda cell: True,
+        "row_axes": ("baseline",),
+        "column_axes": ("family",),
+    }
+    fields.update(overrides)
+    return renderer.Section(**fields)
+
+
+def _two_cells(payload: dict[str, Any]) -> list[Any]:
+    failures: list[str] = []
+    first = renderer._read_cell(
+        next(c for c in payload["cells"] if c["kind"] == "rate"), 0, failures
+    )
+    second = renderer._read_cell(
+        next(
+            c
+            for c in payload["cells"]
+            if c["kind"] == "rate" and c["key"]["family"] != first.key[AXES.index("family")]
+        ),
+        1,
+        failures,
+    )
+    assert failures == []
+    return [first, second]
+
+
+def test_a_folded_section_puts_its_table_in_a_details_and_its_lead_in_outside_it(
+    payload: dict[str, Any],
+) -> None:
+    """The lead-in is the one line a reader skimming past a closed fold still has to meet.
+
+    Both shapes from one pair of cells, so the difference in the output is the flag and nothing
+    else: the fold adds a `<details>`, a `<summary>` naming the section and counting its cells,
+    and the two blank lines Markdown needs to keep rendering a table inside HTML. Every row is
+    still there -- a fold removes rendered height, never a figure.
+    """
+    cells = _two_cells(payload)
+    failures: list[str] = []
+    plain, _ = renderer._build_section(_a_section(), cells, _NO_ANCHORS, failures)
+    folded, placed = renderer._build_section(
+        _a_section(folded=True), cells, _NO_ANCHORS, failures
+    )
+    assert failures == []
+    assert placed == {cell.identity for cell in cells}
+
+    assert "<details>" not in "\n".join(plain)
+    assert folded[1] == "**the sentence that says what is in the table.**"
+    assert folded[3] == "<details><summary>a section made by a test -- 2 cells</summary>"
+    assert folded[-1] == "</details>"
+    assert folded[4] == "" and folded[-2] == ""
+    assert [line for line in folded if line.startswith("| ")] == [
+        line for line in plain if line.startswith("| ")
+    ]
+
+
+def test_a_folded_section_holding_one_cell_says_one_cell(payload: dict[str, Any]) -> None:
+    """The summary is the only thing a reader sees with the fold shut, so it is the one place in
+    the block where a plural over a count of one is read by everybody.
+
+    The singular limb shipped uncovered: `{'' if len(claimed) == 1 else 's'}` collapsed to a bare
+    `'s'` with the suite still green, because every folded section any test built held two cells
+    or more. Meanwhile the findings catalogue was publishing "1 of them repeat another's
+    `computed`" in the same commit -- so this is the branch that was written and never proven,
+    beside the one that was never written.
+    """
+    cells = _two_cells(payload)
+    failures: list[str] = []
+    one, placed = renderer._build_section(
+        _a_section(folded=True, claim=lambda cell: cell.identity == cells[0].identity),
+        cells,
+        _NO_ANCHORS,
+        failures,
+    )
+    assert failures == [] and placed == {cells[0].identity}
+    assert one[3] == "<details><summary>a section made by a test -- 1 cell</summary>"
+
+    two, _ = renderer._build_section(_a_section(folded=True), cells, _NO_ANCHORS, failures)
+    assert failures == []
+    assert two[3] == "<details><summary>a section made by a test -- 2 cells</summary>"
+
+
+def test_an_empty_folded_section_emits_nothing_at_all(payload: dict[str, Any]) -> None:
+    """Not even the summary. A fold offering to expand a table that is not there is the same
+    broken promise as a lead-in over one, which `:656` already refuses for the unfolded case."""
+    cells = _two_cells(payload)
+    failures: list[str] = []
+    lines, placed = renderer._build_section(
+        _a_section(folded=True, claim=lambda cell: False),
+        cells,
+        _NO_ANCHORS,
+        failures,
+    )
+    assert failures == [] and placed == set()
+    assert lines == []
+
+
+def test_the_committed_block_folds_the_evidence_and_never_the_rates_or_the_verdicts(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """Which sections fold is an editorial judgement, so it is asserted against the declaration.
+
+    The two things a reader must meet with the fold shut are the rates -- the claim -- and the
+    verdicts, which are the claim being decided. Everything folded is evidence for one of those.
+    """
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    block = _block(target)
+
+    loaded = load_results(results)
+    folded = [section for section in renderer._sections(loaded.cells) if section.folded]
+    assert {section.name for section in renderer._sections(loaded.cells)} - {
+        section.name for section in folded
+    } == {"rates"}
+
+    rendered = [
+        section.name
+        for section in folded
+        if renderer._build_section(section, loaded.cells, _NO_ANCHORS, [])[0]
+    ]
+    assert block.count("<details>") == len(rendered)
+    assert block.count("</details>") == len(rendered)
+    for name in rendered:
+        assert f"<summary>{name} -- " in block
+
+    headline = block[: block.index("<details>")]
+    assert "The rates, per benign class" in headline
+    assert "pre-registered falsification conditions" in headline
 
 
 def test_a_results_file_that_is_not_utf8_aborts_rather_than_crashing(tmp_path: Path) -> None:
@@ -1180,13 +1520,21 @@ def test_a_finding_never_marks_a_measurement_at_a_coordinate_it_shares(
 def test_the_committed_block_puts_no_marker_on_a_census_count(
     published: dict[str, Any], tmp_path: Path
 ) -> None:
-    """The published symptom, asserted against the file that produced it."""
+    """The published symptom, asserted against the file that produced it.
+
+    Re-run against the folded block, which moved this section behind a `<details>` without moving a
+    byte of it. The slice is unchanged and still lands on the whole census table -- the fold's own
+    tags are not table rows and the `\\n\\n**` it stops at is now the verdicts under the closing
+    tag -- and the count below is what keeps it from quietly becoming a scan over nothing.
+    """
     results, target = write(tmp_path, published)
     render_into(results, target)
     block = _block(target)
     censuses = block[block.index("What the layer did to the text") :]
     censuses = censuses[: censuses.index("\n\n**")]
-    marked = [line for line in censuses.splitlines() if line.startswith("| ") and "[" in line]
+    rows = [line for line in censuses.splitlines() if line.startswith("| ")]
+    assert len(rows) > 2, "the slice no longer covers the census table it is scanning"
+    marked = [line for line in rows if "[" in line]
     assert marked == []
 
 
@@ -1194,7 +1542,16 @@ def test_every_marker_in_the_block_names_a_finding_the_block_lists(
     published: dict[str, Any], tmp_path: Path
 ) -> None:
     """The block's own generated sentence, held to account: a bracket a reader cannot resolve is
-    the sentence being false."""
+    the sentence being false.
+
+    **Restated for the collapse, not relaxed by it.** Findings of one kind whose `computed` blocks
+    are the same block are now stated in one entry, so a finding's number is no longer always the
+    first token of a bullet of its own. The invariant that mattered never was about the shape of a
+    bullet: it is that every number a marker carries resolves inside the findings list, and that
+    every number the file's findings were given is reachable there. So `listed` is now scanned out
+    of the findings list itself -- which is stricter than the old scan, because a number appearing
+    only in a table or only in the prose above no longer counts as listed.
+    """
     results, target = write(tmp_path, published)
     render_into(results, target)
     block = _block(target)
@@ -1204,7 +1561,8 @@ def test_every_marker_in_the_block_names_a_finding_the_block_lists(
         if line.startswith("| ")
         for number in re.findall(r"\[(\d+)\]", line)
     }
-    listed = {int(number) for number in re.findall(r"^- \*\*\[(\d+)\]\*\*", block, re.M)}
+    catalogue = block[block.index("findings the aggregator raised") :]
+    listed = {int(number) for number in re.findall(r"\*\*\[(\d+)\]\*\*", catalogue)}
     assert used <= listed
     assert listed == set(range(1, len(published["run"]["summary"]["findings"]) + 1))
 
@@ -1213,13 +1571,19 @@ def test_findings_are_numbered_in_the_order_they_are_printed(
     published: dict[str, Any], tmp_path: Path
 ) -> None:
     """File order ran the printed list [151]-[190], [19]-[21], [22]-[125]: a reader seeing [19]
-    beside a figure had nowhere to look."""
+    beside a figure had nowhere to look.
+
+    Read across the whole findings list rather than off the first token of each bullet, because a
+    collapsed entry carries several numbers on one line. The property is the same and it is the
+    stronger reading of it: the numbers ascend from 1 in the order a reader meets them, whether
+    they meet them one to a line or several. It is what makes `_finding_notes` and
+    `_finding_lines` share one grouping instead of deriving the order twice.
+    """
     results, target = write(tmp_path, published)
     render_into(results, target)
-    printed = [
-        int(number)
-        for number in re.findall(r"^- \*\*\[(\d+)\]\*\*", _block(target), re.M)
-    ]
+    block = _block(target)
+    catalogue = block[block.index("findings the aggregator raised") :]
+    printed = [int(number) for number in re.findall(r"\*\*\[(\d+)\]\*\*", catalogue)]
     assert printed == sorted(printed)
     assert printed == list(range(1, len(printed) + 1))
 
@@ -1260,15 +1624,225 @@ def test_a_finding_naming_two_cells_anchors_at_both(
     assert block.count(" [1]") >= 2
 
 
+# --- findings that say the same thing, said once -------------------------------------------------
+
+
+def _two_findings(payload: dict[str, Any], computed: dict[str, Any], other: dict[str, Any]) -> str:
+    pair = [c for c in payload["cells"] if c["kind"] == "auc"][:2]
+    payload["run"]["summary"]["findings"] = [
+        {
+            "kind": "a_kind_a_test_invented",
+            "keys": [dict(pair[0]["key"])],
+            "statement": "",
+            "computed": computed,
+        },
+        {
+            "kind": "a_kind_a_test_invented",
+            "keys": [dict(pair[1]["key"])],
+            "statement": "",
+            "computed": other,
+        },
+    ]
+    findings = payload["run"]["summary"]["findings"]
+    failures: list[str] = []
+    lines = renderer._finding_lines(
+        findings, renderer._finding_notes(findings, ()), failures
+    )
+    assert failures == []
+    return "\n".join(lines)
+
+
+def test_two_findings_of_one_kind_with_one_computed_block_are_stated_once(
+    payload: dict[str, Any],
+) -> None:
+    """A bullet per finding, each repeating one sentence, is a run of lines carrying one fact, in
+    the artifact whose claim is that it is readable. The collapse states the shared values once and
+    still accounts for every finding it covers, each by its own number -- and here, where nothing
+    anchors, by its coordinates too."""
+    same = {"n_negative": 41, "one_item_moves_the_rate_by": 0.002}
+    rendered = _two_findings(payload, dict(same), dict(same))
+    entries = [line for line in rendered.splitlines() if line.startswith("- ")]
+    assert len(entries) == 1
+    assert entries[0].count("`n_negative` 41") == 1
+    assert "**[1]**" in entries[0] and "**[2]**" in entries[0]
+    assert "2 findings carrying one `computed`" in entries[0]
+
+
+def test_two_computed_blocks_that_differ_only_in_key_order_are_one_block(
+    payload: dict[str, Any],
+) -> None:
+    """Key order is not something a reader of the rendered block can see, so it cannot be what
+    decides whether one fact is published once or twice.
+
+    `sort_keys=True` in `_grouped_findings` is what makes that true, and it shipped unproven: with
+    it deleted the suite stayed green, because every pair of blocks any test compared was built in
+    one order. A producer that emitted `n_positive` before `n_negative` on the second of two
+    otherwise identical findings would then have published the same sentence twice, each claiming
+    to be the one statement of a shared `computed`.
+    """
+    first = {"n_negative": 41, "n_positive": 97, "one_item_moves_the_rate_by": 0.002}
+    reordered = {"one_item_moves_the_rate_by": 0.002, "n_positive": 97, "n_negative": 41}
+    assert list(first) != list(reordered) and first == reordered
+
+    rendered = _two_findings(payload, first, reordered)
+    entries = [line for line in rendered.splitlines() if line.startswith("- ")]
+    assert len(entries) == 1, "the same three values in another order are the same three values"
+    assert entries[0].count("`n_negative` 41") == 1
+    assert "2 findings carrying one `computed`" in entries[0]
+    assert "**[1]**" in entries[0] and "**[2]**" in entries[0]
+
+
+def test_one_differing_byte_keeps_the_two_findings_apart(payload: dict[str, Any]) -> None:
+    """The other half of the same rule, and the reason it is keyed on the block rather than on a
+    `kind`: two findings that differ anywhere are two facts and stay two entries."""
+    rendered = _two_findings(
+        payload,
+        {"n_negative": 41, "one_item_moves_the_rate_by": 0.002},
+        {"n_negative": 41, "one_item_moves_the_rate_by": 0.0021},
+    )
+    entries = [line for line in rendered.splitlines() if line.startswith("- ")]
+    assert len(entries) == 2
+    assert entries[0].startswith("- **[1]**") and entries[1].startswith("- **[2]**")
+
+
+def test_one_collapsed_finding_is_counted_in_the_singular(payload: dict[str, Any]) -> None:
+    """"1 of them repeat another's `computed` exactly and are stated with it" was published.
+
+    Three findings, two of which share a block: exactly one is collapsed into another's entry, so
+    the sentence has to read "repeats ... and is stated". The plural-only version of this line
+    shipped in the same commit that wrote a singular branch for the fold's `<summary>`.
+    """
+    pair = [c for c in payload["cells"] if c["kind"] == "auc"][:3]
+    same = {"n_negative": 41, "one_item_moves_the_rate_by": 0.002}
+    blocks = [dict(same), dict(same), {"n_negative": 42, "one_item_moves_the_rate_by": 0.002}]
+    findings = [
+        {
+            "kind": "a_kind_a_test_invented",
+            "keys": [dict(cell["key"])],
+            "statement": "",
+            "computed": block,
+        }
+        for cell, block in zip(pair, blocks)
+    ]
+    failures: list[str] = []
+    rendered = "\n".join(
+        renderer._finding_lines(findings, renderer._finding_notes(findings, ()), failures)
+    )
+    assert failures == []
+    assert "1 of them repeats another's `computed` exactly and is stated with it." in rendered
+    assert "repeat another's" not in rendered
+
+
+def test_the_committed_findings_collapse_and_no_finding_loses_its_anchor(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """Against the file that produced the symptom: one kind whose every finding shares a `computed`.
+
+    The collapse is asserted on the file's own arithmetic rather than on a number typed here, so
+    the day the aggregator stops repeating itself this test measures the new file instead of
+    failing over the old one.
+    """
+    findings = published["run"]["summary"]["findings"]
+    blocks_of: dict[str, set[str]] = {}
+    for finding in findings:
+        blocks_of.setdefault(finding["kind"], set()).add(
+            json.dumps(finding["computed"], sort_keys=True)
+        )
+    entries_expected = sum(len(blocks) for blocks in blocks_of.values())
+    assert entries_expected < len(findings), "the fixture this test rests on is gone"
+
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    catalogue = _block(target)
+    catalogue = catalogue[catalogue.index("findings the aggregator raised") :]
+    assert len([line for line in catalogue.splitlines() if line.startswith("- ")]) == (
+        entries_expected
+    )
+    numbered = {int(n) for n in re.findall(r"\*\*\[(\d+)\]\*\*", catalogue)}
+    assert numbered == set(range(1, len(findings) + 1))
+
+
+def test_a_collapsed_finding_repeats_its_coordinates_only_when_nothing_anchors_it(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """The first collapse dropped a hundred lines and kept every word: one line, 17,308 characters.
+
+    A finding that anchored is already beside its own cell in a table above, which is the whole
+    point of the marker, so inside a collapsed entry its number is the walk back and the tuple is
+    redundant. A finding in `Anchors.shared` anchored nowhere and keeps its tuple, because there
+    is no row to walk back to. Asserted off the anchors rather than off a `kind`, and both limbs
+    are exercised by the committed file.
+    """
+    loaded = load_results(Path(write(tmp_path, published)[0]))
+    anchors = renderer._finding_notes(loaded.findings, loaded.cells)
+    anchored = {n for numbers in anchors.at.values() for n in numbers}
+    groups = [
+        group
+        for groups in renderer._grouped_findings(loaded.findings).values()
+        for group in groups
+        if len(group) > 1
+    ]
+    all_anchored = [g for g in groups if all(anchors.numbers[i] in anchored for i in g)]
+    none_anchored = [g for g in groups if not any(anchors.numbers[i] in anchored for i in g)]
+    assert all_anchored and none_anchored, "the fixture this test rests on is gone"
+
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    entries = [
+        line
+        for line in _block(target).splitlines()
+        if line.startswith("- **") and "findings carrying one `computed`" in line
+    ]
+
+    def entry_for(group: list[int]) -> str:
+        first = f"**[{anchors.numbers[group[0]]}]**"
+        return next(line for line in entries if f"They are {first}" in line)
+
+    for group in all_anchored:
+        covers = entry_for(group).split("They are ", 1)[1]
+        assert re.fullmatch(r"(\*\*\[\d+\]\*\* ; )*\*\*\[\d+\]\*\*\.", covers), covers
+        assert "=" not in covers, "an anchored finding's tuple is its marker, not a repeat of it"
+
+    for group in none_anchored:
+        covers = entry_for(group).split("They are ", 1)[1]
+        assert "not anchored:" in covers
+        assert any(f"{axis}=" in covers for axis in AXES)
+
+
+def test_no_line_of_the_committed_block_makes_a_reader_walk_past_a_thousand_characters(
+    published: dict[str, Any], tmp_path: Path
+) -> None:
+    """Line count is not the measure and was the wrong acceptance criterion.
+
+    "no longer occupy 107 lines" is a proxy an implementation can satisfy by joining the lines: it
+    did, and published one line of 17,308 characters that carried every word the 107 lines had.
+    Reading cost moves with characters, so that is what is bounded, and it is bounded on every
+    line rather than on the block's total -- a block whose mean line is short and whose longest is
+    a screenful still stops the reader at the screenful.
+    """
+    results, target = write(tmp_path, published)
+    render_into(results, target)
+    longest = max(_block(target).splitlines(), key=len)
+    assert len(longest) <= 1500, f"{len(longest)} characters on one line: {longest[:200]}..."
+
+
 # --- rows and columns nothing filled ------------------------------------------------------------------
 
 
 def _table(lines: list[str], row_axes: int) -> tuple[list[str], list[list[str]]]:
-    """The data columns of a built section: its labels, and its rows, both without the row axes."""
+    """The data columns of a built section: its labels, and its rows, both without the row axes.
+
+    The table is found by looking for the first row rather than at a fixed offset: a folded
+    section wraps its table in `<details>` and a `<summary>`, so the header sits two lines lower
+    there than in an unfolded one, and an index counted from the top would have silently read the
+    `<summary>` as a header row.
+    """
     def cells(line: str) -> list[str]:
         return [cell.strip() for cell in line.strip().strip("|").split(" | ")]
 
-    return cells(lines[3])[row_axes:], [cells(line)[row_axes:] for line in lines[5:]]
+    rows = [index for index, line in enumerate(lines) if line.startswith("| ")]
+    header, body = rows[0], rows[2:]
+    return cells(lines[header])[row_axes:], [cells(lines[index])[row_axes:] for index in body]
 
 
 def test_no_row_and_no_column_of_the_block_is_entirely_missing(

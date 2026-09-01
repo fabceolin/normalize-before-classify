@@ -563,9 +563,28 @@ def test_every_command_the_readme_documents_is_runnable(repo_root: Path) -> None
     `uv run nbc all`, which does not exist -- there is no `[project.scripts]` entry and the
     entrypoint arrives with the measurement harness. A README is the one surface a stranger
     actually touches, so what it says can be run has to be runnable.
+
+    **The fences are matched line-anchored and with their language tag, because they were not.**
+    The scan used to look for a literal "```\\n" as the opening fence, which is also exactly what a
+    *closing* fence looks like. On a page whose only fences were untagged that happened to pair
+    correctly; the day the page grew a ````mermaid` block the pairing went out of phase by one and
+    the opening fence of every real command block became the *end* of a match over the prose
+    before it.
+
+    **It would not have failed silently, and an earlier version of this docstring said it would.**
+    Out of phase, the old pattern extracts prose rather than command blocks, so the `uv ` filter
+    below matches nothing, `assert commands` fires, and the test goes red on the first run against
+    the new page -- which is how the regex came to be fixed. The fix is still necessary and the
+    scan is stronger for being anchored; what was wrong was the story it told about itself, in the
+    suite whose subject is claims that outrun their evidence. A tagged fence is now an opening
+    fence and `^` keeps a run of backticks inside a line from being either.
     """
     readme = _readme(repo_root)
-    fenced = re.findall(r"```\n(.*?)```", readme, re.S)
+    fenced = re.findall(r"^```[A-Za-z0-9_+-]*\n(.*?)^```", readme, re.S | re.M)
+    assert len(fenced) == readme.count("\n```") // 2, (
+        "the fenced blocks did not pair up: some block is opened or closed by something this scan "
+        "does not recognize, and a command inside it would never be checked"
+    )
     commands = [
         line.split("#")[0].strip()
         for block in fenced
