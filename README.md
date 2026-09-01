@@ -321,6 +321,13 @@ three files to each other: the `build_id` in `results/results.json` against
 [`data/manifest.json`](data/manifest.json) and against [`data/ATTRIBUTION.md`](data/ATTRIBUTION.md), and
 the bytes between the markers below against what that results file renders today.
 
+**One caveat has to be read before the table rather than after it.** Everything below measures whether a
+classifier fires, not whether an attack works. A payload the classifier misses is a recall failure by
+construction, but it is a *threat* only if a downstream model decodes it and obeys, and nothing in this
+repository tests that — no downstream model is run and no definition of attack success is offered. That is
+caveat 3c in ["what this does not show"](#what-this-does-not-show), it is the strongest objection to the
+whole table, and a reader who meets it only after forming a verdict has met it too late.
+
 <!-- RESULTS:START -->
 <!-- Everything between these two markers is generated from `results/results.json` by `python -m nbc.report.readme`. Do not edit it: the next run replaces it wholesale, and a number here that no run produced cannot survive that. -->
 
@@ -990,7 +997,8 @@ one of the two attack datasets, which a second baseline had likewise trained on.
 baselines is a floor, not a comfortable margin, and a reader is entitled to weigh the result accordingly.
 
 **3b. Both baselines cap sequences at the same length**, so long documents are windowed for both and the
-per-baseline share of items that exceeded one window is reported alongside the rates. That symmetry is
+census table in the block above records, cell by cell, how many items exceeded one window. No aggregate
+over those counts is published there; caveat 5 computes the per-baseline shares itself. That symmetry is
 convenient here and is not a property of the model class: the dropped third baseline had a context four
 times longer and published its own long-document protocol, and had it stayed, its column would have been
 produced under a different windowing regime from the others. The comparison in this table does not have
@@ -1009,16 +1017,40 @@ scored on text it was trained on reports memory, not detection — and it cuts b
 on attacks it has seen, and the false-positive rate looks better on benign text it was taught to call safe.
 Reading model cards is not enough to catch this. The attack corpus used here declares on its own card that
 it was seeded from two datasets that one of the baselines declares training on, one hop that no model card
-reveals; measured literally, that reached **48% of the benign rows and 17% of the attack rows** before
-filtering. Read those two figures as a floor rather than as the removal: they were measured against those
-two seeds alone, and the exclusion set the build actually applies is wider — every source either baseline
+reveals. Two figures for the size of the problem, each traceable to the file that carries it rather than to
+this paragraph. Before the filter ran, and against a probe of the benign pool taken on 2026-08-24,
+`pins.toml` records the measured reach of **`VMware/open-instruct`
+alone at 3,424 of 7,066 unique benign rows — 48%** — a source one baseline declares training on directly,
+with three further declared seeds unmeasured at that point. On the attack side `data/manifest.json` records
+**515 of 3,071 unique positives removed — 17%** — which is the one-hop reach through
+`jackhhao/jailbreak-classification`. Read both as a floor rather than as the removal: each was measured
+against part of the declaration, and the exclusion set the build actually applies is wider — every source either baseline
 declares training on, plus every seed the attack dataset's own card names, twelve today, each pinned in
 `pins.toml` by repository and — where the hub will resolve one — revision, and derived from those
 declarations rather than listed beside them,
 so a lineage that grows and an exclusion set that does not is a file that no longer loads. Two texts are
 the same row under a declared normalization: NFKC, lowercased, whitespace collapsed. So the build downloads
 every declared training source it can and removes every corpus row that appears in one, and reports how
-many rows each source removed. What remains undeclared or unreachable remains a limit, and there are two
+many rows each source removed. What it removed is in `data/manifest.json` under `reports.exclusion`:
+**4,061 of 10,135 rows**, leaving **6,074** — **3,546 of 7,064** on the conversational benign half and
+**515 of 3,071** on the attack half. The two benign denominators are two stages and not a discrepancy:
+**7,066** is the 2026-08-24 probe recorded in `pins.toml`, **7,064** is `rows_in` for B-chat in the build
+that produced this table, a difference of 2 rows. The per-source table beside those totals attributes far
+less than they come to: `jackhhao/jailbreak-classification` 515 matched rows, `rubend18/ChatGPT-Jailbreak-Prompts`
+47 matched rows, zero for every other source the build could read and no count for the two it could not —
+**562 attributed against 4,061 removed**. The totals are what the build acted on; the attribution beside them
+does not account for the rest, and that gap is stated here rather than left for a reader to add up.
+**`VMware/open-instruct` is one of those zeros.** The source this caveat's 48% is measured on was read at
+its pinned revision — 357,453 texts loaded — and the exclusion report attributes **0 matched rows** to it.
+A reader who opens `data/manifest.json` finds the headline source of the largest figure in this paragraph
+sitting at zero. That is the same attribution gap and not a second one, and it is the reason the 48% is
+labelled a pre-filter probe above rather than a removal.
+**The gap is also not spread evenly across the two halves, and the single figure hides that.** On the
+attack half the attribution is complete: **515 attributed against 515 removed**. On the conversational
+benign half **3,546 rows were removed and at most 47 are attributed** — `rubend18/ChatGPT-Jailbreak-Prompts`
+is the only non-zero source that is not the attack half's own 515, so the benign attribution is
+near-total absence. Averaging the halves into one ratio is what makes it look partial.
+What remains undeclared or unreachable remains a limit, and there are two
 of those. One training source common to **both** baselines is access-restricted and returns HTTP 401, so
 overlap against it is unmeasurable for any corpus this experiment could have chosen. A second — one of the
 four seeds the attack dataset names — resolves at its pinned commit and publishes its rows through a
@@ -1041,20 +1073,36 @@ important follow-up.
 **5. Long documents are windowed, and a window boundary can split an instruction.** Documents past a
 model's sequence limit are scored in fixed non-overlapping windows and the document takes the maximum
 window score. An instruction that straddles a boundary is seen by neither window in full. The direction of
-this bias is worth stating, because it is the opposite of what one might assume: canonicalization
-*shortens* documents in tokens rather than lengthening them — an encoded payload tokenizes into several
-times the tokens of its decoded form — so it is the **encoded** condition that spills into extra windows,
-and taking the maximum across windows hands those extra chances to the un-canonicalized baseline.
-On the recall side, that works against the result reported here. **It does not work the same way on the
-other half, and stating only the flattering half would be the kind of selective candour this section
-exists to avoid.** Benign items are dressed in the same encodings, so encoded benign documents also spill
-into extra windows without the layer, also take an inflated maximum, and also produce extra false
-positives without the layer — which makes the layer's false-positive *cost* look smaller than it is. The
-two biases push the headline comparison in opposite directions and do not cancel in any knowable way.
-Both are reported: the share of items needing more than one window is given per baseline, and every
-cost-versus-gain comparison is accompanied by a **windows-matched** version restricted to documents that
-fit in a single window under both conditions, so a reader can see how much of the trade is the window
-policy rather than the layer.
+this bias was stated here before the run as a universal, and the run falsified it. The claim was that
+canonicalization *shortens* documents in tokens rather than lengthening them — an encoded payload
+tokenizes into several times the tokens of its decoded form — so it is the **encoded** condition that
+spills into extra windows and the un-canonicalized baseline that collects those extra chances at the
+maximum. **That holds for one of the two baselines and inverts for the other, and the corrected version is
+worse for the result rather than better.** Aggregated over the `window_overflow` census cells in the block
+above, matched so that every cell contributes both canon states, the share of items needing more than one
+window moves, with the layer off and then on, **28.94% → 20.57% for `protectai-deberta-v3`** — shortening,
+as claimed — and **10.70% → 16.74% for `testsavantai-bert-small`**, which is the reverse. The mechanism is
+visible where it happens: `testsavantai-bert-small` on `b_code` with `base64` goes from **3 of 500** items
+over one window with the layer **off** to **395 of 500** with it **on**, once the layer decodes the blob
+back into source, which is far longer in that model's 30k WordPiece vocabulary than the blob was;
+**`testsavantai-bert-small`'s whole `b_code` half moves 39.92% → 68.86%**. So on the
+half of the corpus where the false-positive story lives, the layer is what lengthens the document for one
+of the two baselines. **Stating only the flattering half would be the kind of selective candour this
+section exists to avoid.** Benign items are dressed in the same encodings, so wherever the un-canonicalized
+condition is the one that spills, encoded benign documents spill with it, take an inflated maximum, and
+produce extra false positives without the layer — which makes the layer's false-positive *cost* look
+smaller than it is there, and larger than it is wherever the layer is what spills. The biases push the
+headline comparison in opposite directions, they differ in sign between the two baselines, and they do not
+cancel in any knowable way. A **windows-matched** twin — the same comparison restricted to documents that
+fit in a single window under both conditions — therefore accompanies **77 of the 274** delta cells the
+block above publishes, so a reader can see how much of the trade is the window policy rather than the
+layer. It does not accompany all of them, and this sentence used to say that it did. The twins cover
+**77 of the 78** canon-on-versus-off rate deltas; the one without is
+**`protectai-deberta-v3` on `zero_width+base64` against `b_code`**, where **500 of 500** items exceed one
+window with the layer **off**, so the matched population there is empty. The remaining **196** delta cells
+are clean-versus-dressing contrasts and threshold-free AUC deltas, and carry no twin at all. The four
+aggregates above are the per-baseline figures, computed from the per-cell `window_overflow` counts in the block's
+census table; the block itself publishes those counts per cell and no aggregate over them.
 
 **6. The layer is itself a surface.** A canonicalizer that decodes aggressively can be attacked from the
 other direction: benign-looking encoded content that decodes into text the classifier fires on turns a
@@ -1097,7 +1145,54 @@ exempt from the round trip and **counted**: the corpus build's draw report publi
 `payloads_below_decode_floor`, how many drawn payloads carry rows that no ceiling and no character mapping
 will recover. Divide it by the drawn positives before reading the encoded columns.
 
-**8.** *(reserved for what the run actually revealed — written after the numbers exist)*
+**8. On part of the axis the baselines are not detecting injection, they are detecting encoding — and the
+recall column there carries no information.** This is the slot the section reserved before the first
+measurement, and this is what the measurement put in it. Of the **104** published false-positive rates,
+**29 sit at or above 0.99**; for **19 of those** the attack cell at the same baseline, chain and canon
+state reports a recall at or above 0.99 as well, and **16 of the 19** read exactly 1.0000 on both. A
+false-positive rate and a recall are never one cell — the pairing here is a benign cell against the attack
+cell sharing its baseline, its dressing chain, its chain class, its canon state, its window policy and its
+population, which is one attack cell per benign cell and no ambiguity about which. A classifier that
+answers "attack" to every document scores a perfect
+recall and a perfect false-positive rate at the same time, and that is what those cells are: no
+discrimination whatever, published as a recall of 100%. Every one of the 19 is the layer **off**, which
+reverses the plain reading of the table on those chains — the layer's contribution there is not recovering
+recall, it is returning the model to a regime where it separates anything at all, at a nominal cost in
+recall that a saturated cell was never entitled to charge. The threshold-free column says the same thing
+independently rather than by re-reading the same rates: **the AUC for attacks at `protectai-deberta-v3`
+against `b_code` with the layer off is 0.0145 on `hex` and 0.0133 on `base64+homoglyph`** — far below
+0.5, which the block's own separation lead-in names as an ordering the wrong way round. The same model
+whose recall column reads 1.0000 there ranks benign source code above real attacks. Where a recall and a
+false-positive rate saturate together, read the AUC and disregard the rate. No pre-registered condition was
+written to look for this, and that is part of the finding: N1 through N4 all ask what the layer did, and
+none of them asks whether the baseline carried any information at the operating point the comparison is
+made at.
+
+Three further questions the run settled rather than left open, each decided by figures the block above
+already publishes. First, **N3 triggered, and its relative limb never bound.** The layer's p95 is
+**18,394,582 ns against a ceiling of 1,000,000 ns — 18.4× over it** — so of the four pre-registered
+falsification conditions this is the one whose `outcome` reads `triggered`. The layer is far slower than
+the budget the condition set, and that is the plainest thing the run says about it. The ceiling is
+`min(0.1 × fastest baseline p95, 1 ms)`, and the run records `share_ceiling_ns` 2.28 ms against
+`absolute_ceiling_ns` 1.00 ms with `binding_ceiling` `the absolute`, so the limb that was added to keep the
+condition machine-independent was inert and N3 reduced to a figure in milliseconds — which is what a review
+predicted before the run and what the run then measured. Second, **the pre-registered confirmatory cell
+could not decide anything**: the cell declared before the numbers existed is
+**`protectai-deberta-v3` on `base64+base64+base64+base64` against `b_code`**, and its false-positive rate
+is pinned at 1.0000 with 500 of 500 in both canon states, so the verdict records `cell_could_decide` `no`.
+It landed on the **false-positive half** of the saturation described above and not on both halves:
+`delta_recall` there is **0.1658**, so the recall on that cell moved and was never pinned. One rate with
+nowhere to go is enough to make the cell undecidable, and that is what happened. Third, **the layer
+recovered nothing on the encodings held out to test generalization**:
+`held_out_chains_recovering` is `none`, over **`base32` and `url_percent` — two of the three held out**,
+because caveat 7's `rot13` is there to mark the boundary of what normalization can reach rather than to be
+recovered, and is excluded from the pass/fail condition for that reason. The broader claim would overstate
+the record: `chains_recovering_off_distribution` carries **`base64+base64+base64+base64`**, a chain past
+the declared recursion ceiling rather than an encoding the layer was never written against, so the layer
+did recover off its own distribution somewhere. What it did not do is generalize to an unfamiliar
+encoding. A reader who takes one thing from this section should take the first paragraph; a reader
+weighing the pre-registration should take all three of these, because they are the ways the design itself
+came up short.
 
 ## License
 
