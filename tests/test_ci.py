@@ -146,6 +146,7 @@ def test_the_push_workflow_asserts_the_codes_the_aborts_actually_declare() -> No
     from nbc.corpus.manifest import CorpusManifestMismatch
     from nbc.platform import UnsupportedPlatform
     from nbc.report.size_budget import SizeBudgetViolated
+    from nbc.report.timed_read import Sc1RecordUnusable
     from nbc.pins import PinsFileInvalid
 
     codes = declared_exit_codes()
@@ -155,11 +156,28 @@ def test_the_push_workflow_asserts_the_codes_the_aborts_actually_declare() -> No
         CorpusManifestMismatch,
         SizeBudgetViolated,
         ResultsIncomplete,
+        Sc1RecordUnusable,
     ):
         assert codes[expected.exit_code] is expected
         assert str(expected.exit_code) in exit_code_checks(text(CI)), (
             f"ci.yml asserts no step against {expected.__name__} (exit {expected.exit_code})"
         )
+
+
+@pytest.mark.parametrize(("module", "code"), [("size_budget", 14), ("timed_read", 37)])
+def test_each_readme_claim_check_runs_and_has_a_negative_control(module: str, code: int) -> None:
+    """A check CI never runs is a module, and a check nobody has seen refuse anything is a file.
+
+    Both halves are asserted for each: the plain invocation that must exit 0 on the real page, and
+    at least one more that drives it into its own abort and compares the code to a number.
+    """
+    body = text(CI)
+    invocations = body.count(f"python -m nbc.report.{module}")
+    assert invocations >= 2, (
+        f"ci.yml invokes nbc.report.{module} {invocations} time(s); it needs the run and at least "
+        f"one negative control that proves the abort fires"
+    )
+    assert str(code) in exit_code_checks(body), f"no step compares a status to {code}"
 
 
 def test_the_lockfile_gate_uses_locked_and_not_frozen() -> None:

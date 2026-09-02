@@ -247,6 +247,62 @@ jobs:
             exit 1
           fi
 
+      - name: Verify the SC1 timed-read record is usable as evidence
+        # SC1 is the one claim here about a human, so the reading is a person's and everything
+        # around it is checked: the record parses, its three questions are the enumerated three,
+        # every recorded failure has a README change after it, and the page a reader is handed is
+        # measurable. `not yet run` is a report and exits 0 -- a gate nobody has walked through yet
+        # is not a broken gate, and a step that failed on it would be telling a maintainer to
+        # manufacture the one thing the criterion forbids manufacturing.
+        run: uv run python -m nbc.report.timed_read
+
+      - name: Prove the SC1 record abort fires
+        # The EXIT CODE, not non-zero-ness: 37 is Sc1RecordUnusable and 2 is a usage error, which is
+        # what a typo in this very step produces. /dev/null has no markers and no tables at all.
+        run: |
+          set +e
+          uv run python -m nbc.report.timed_read --record /dev/null
+          status=$?
+          set -e
+          if [ "$status" -ne 37 ]; then
+            echo "::error::expected exit 37 (Sc1RecordUnusable), got $status"
+            exit 1
+          fi
+
+      - name: Prove a recorded failure with no README change is what is refused
+        # The negative control, and the reason this module exists rather than the reason it aborts
+        # most easily. Two records differing in ONE row: a failed read with the change that answered
+        # it, and the same failed read with that row deleted. The first must exit 0 and the second
+        # 37, so this step cannot pass because a heredoc has a typo in it -- a typo fails the half
+        # that expects 0.
+        run: |
+          reads='| Reader | Date | Elapsed | What is the question | What does the table show | What do the caveats say |\n|---|---|---|---|---|---|\n| CI | 2026-09-05 | 4:12 | correct: said the question | correct: said the shape | wrong: nothing came to mind |\n'
+          header='| Date | After read | What changed |\n|---|---|---|\n'
+          answer='| 2026-09-06 | CI 2026-09-05 | cut the longest section |\n'
+          frame='<!-- SC1-READS:START -->\n\n%b\n<!-- SC1-READS:END -->\n\n<!-- SC1-CHANGES:START -->\n\n%b\n<!-- SC1-CHANGES:END -->\n'
+          printf "$frame" "$reads" "$header$answer" > "$RUNNER_TEMP/sc1-answered.md"
+          printf "$frame" "$reads" "$header" > "$RUNNER_TEMP/sc1-unanswered.md"
+          if cmp -s "$RUNNER_TEMP/sc1-answered.md" "$RUNNER_TEMP/sc1-unanswered.md"; then
+            echo "::error::the two records are identical, so this step would prove nothing"
+            exit 1
+          fi
+          set +e
+          uv run python -m nbc.report.timed_read --record "$RUNNER_TEMP/sc1-answered.md" > /dev/null
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::error::a failed read WITH the README change that answered it exited $status"
+            exit 1
+          fi
+          set +e
+          uv run python -m nbc.report.timed_read --record "$RUNNER_TEMP/sc1-unanswered.md" > /dev/null
+          status=$?
+          set -e
+          if [ "$status" -ne 37 ]; then
+            echo "::error::expected exit 37 for a failed read with no README change, got $status"
+            exit 1
+          fi
+
       - name: Refuse a dirty tree
         # The suite must not write into the working tree. A test that leaves a file behind is a
         # test that could have left a *different* file behind -- and `git diff --exit-code` is

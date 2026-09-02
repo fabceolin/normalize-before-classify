@@ -919,8 +919,11 @@ inference latency, and condition N3 is decided on them.
       and each pre-registered condition is named above the first table with the outcome it came out
       as, rather than only under the tables
 - [x] "what this does not show" — the eleven caveats that do not depend on the result, written
-      before the first run. Slot 8 is still reserved: it is the one caveat that had to wait for
-      numbers, the numbers now exist, and writing it is the next thing this page owes a reader
+      before the first run, and the twelfth in slot 8, the one that had to wait for numbers: the
+      run produced them and it is written below, where the reserved placeholder used to be
+- [ ] the five-minute read this page claims: its protocol, its three questions and every result are
+      in [`sc1-timed-read.md`](sc1-timed-read.md), `python -m nbc.report.timed_read` prints what
+      the page costs a reader and reports `not yet run` until somebody takes it, and nobody has
 
 ## How big the layer is
 
