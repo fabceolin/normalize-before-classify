@@ -14,6 +14,30 @@ positives.**
 > question before the answer was known, on purpose: the measurement decided the claim, not the other
 > way around, and the question above the table is the one that was asked before the table existed.
 
+## Abstract
+
+This page is long, and the length is priced further down; this section is the short version.
+Everything between the two markers below is generated from `results/results.json` by
+`python -m nbc.report.readme` — every figure is derived from the file, never typed, exactly like
+the results block the tables live in.
+
+<!-- ABSTRACT:START -->
+<!-- Everything between these two markers is generated from `results/results.json` by `python -m nbc.report.readme`, exactly like the results block further down. Do not edit it: the next run replaces it wholesale, and a number here that no run produced cannot survive that. -->
+
+**What the layer recovers, in one pair of cells.** With the layer off, the worst cell in the file is not a miss but an inversion: on `base64+base64` against `b_code`, `protectai-deberta-v3` ranks the benign class above the attacks, ROC AUC 0.0007 [0.0003, 0.0011] 1,200 vs 500. The same cell with the layer on reads 0.8433 [0.8245, 0.8621] 1,200 vs 500.
+
+- **`protectai-deberta-v3`.** With the layer on, 8 of 9 dressed `bound` chains read exactly the clean text's own row — recall 83.17% [80.94%, 85.18%] 998/1,200, false positives 3.00% [1.83%, 4.89%] 15/500 on `b_chat`, 35.20% [31.14%, 39.48%] 176/500 on `b_code`; the exception is `base64+base64+base64+base64`. With the layer off, recall on those chains runs from 6.58% to 100.00% of 1,200 attacks, and the benign false-positive rate reaches 100.00% (500/500 on `b_code` under `base64`).
+- **`testsavantai-bert-small`.** With the layer on, 8 of 9 dressed `bound` chains read exactly the clean text's own row — recall 87.58% [85.60%, 89.33%] 1,051/1,200, false positives 18.60% [15.43%, 22.25%] 93/500 on `b_chat`, 11.00% [8.55%, 14.05%] 55/500 on `b_code`; the exception is `base64+base64+base64+base64`. With the layer off, recall on those chains runs from 22.75% to 100.00% of 1,200 attacks, and the benign false-positive rate reaches 100.00% (500/500 on `b_code` under `base64+base64`).
+
+Across the 3 held-out dressing chains — the encodings the layer does not declare — turning it on moves no column by more than 1 document: the layer recovers only what it declares to recover.
+
+Of the 4 pre-registered falsification conditions, `N3` came out `triggered`; the other 3 read `not_triggered`. Each is decided under the tables below, from the figures the tables carry.
+
+The layer itself prices at p50 338.51 us and p95 18.39 ms per document, over 28,600 documents; the priciest class is `b_code`, at p50 6.02 ms.
+
+Every figure above is quoted from the cells the tables below carry, each with its interval and the count it was measured over; what these figures do not establish is priced in "What this does not show".
+<!-- ABSTRACT:END -->
+
 ## The question
 
 Prompt-injection classifiers are trained on attack text. Attackers stopped sending attack text. A payload
@@ -1196,6 +1220,19 @@ did recover off its own distribution somewhere. What it did not do is generalize
 encoding. A reader who takes one thing from this section should take the first paragraph; a reader
 weighing the pre-registration should take all three of these, because they are the ways the design itself
 came up short.
+
+## Conclusion
+
+Canonicalization recovered what it declared, and only that. On the dressing chains inside the
+layer's declared scope, both baselines return to the row they publish on clean text: the recovery
+on the attack side and the collapse of the dressed-benign false positives are the same event, and
+the abstract at the top of this page quotes it from the results file rather than restating it here.
+Outside that scope the layer claims nothing and recovers nothing — the held-out encodings barely
+move, and a chain past the declared decode ceiling stays where it was. What the layer costs on
+clean text sits inside the intervals the table prints beside it; what it costs in latency, the
+provenance block prices per document. None of this establishes more than it says: the section
+above this one is the list of what these numbers do not show, and it is the part of the page to
+read before quoting any single figure from it.
 
 ## License
 

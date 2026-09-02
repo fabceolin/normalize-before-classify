@@ -29,9 +29,11 @@ on one screen-scroll of the file, in words:
   lines costs nothing and a marker is not a word. Per line it would not work: `re.DOTALL` on a
   pattern applied one line at a time is an inert flag, which is exactly what this module shipped.
 - the generated block between the `RESULTS` markers is counted **separately** from the hand-written
-  prose, because only one of the two is anybody's to shorten. The headline figure is the
-  **hand-written** half against the budget: pooling the two produces a ratio nobody can act on,
-  since the generated half is not anybody's to cut.
+  prose, because only one of the two is anybody's to shorten, and the abstract between the
+  `ABSTRACT` markers is counted with it, for the same reason: both spans are replaced wholesale by
+  `python -m nbc.report.readme`. The headline figure is the **hand-written** half against the
+  budget: pooling the halves produces a ratio nobody can act on, since the generated half is not
+  anybody's to cut.
 
 **A measurement that cannot be trusted aborts instead of under-counting.** An unclosed fence, a
 `<details>` that never closes, an inverted or duplicated `RESULTS` marker pair: each of those makes
@@ -55,7 +57,7 @@ subject is claims that outrun their evidence does not get to put a hand-typed me
 checked one.
 
 This module imports the standard library, `nbc.errors`, and `nbc.report.caveats` for the `RESULTS`
-markers -- declared once, in the module that owns the honesty check, as `readme.py` already imports
+and `ABSTRACT` markers -- declared once, in the module that owns the honesty check, as `readme.py` already imports
 them. It loads no inference runtime, reads no `results.json`, and writes to nothing.
 
     python -m nbc.report.timed_read [--readme README.md] [--record sc1-timed-read.md]
@@ -75,7 +77,7 @@ from pathlib import Path
 from typing import Final
 
 from nbc.errors import NbcError
-from nbc.report.caveats import RESULTS_END, RESULTS_START
+from nbc.report.caveats import ABSTRACT_END, ABSTRACT_START, RESULTS_END, RESULTS_START
 
 __all__ = [
     "ANSWER_VERDICTS",
@@ -356,6 +358,36 @@ def _locate_block(readme: str, failures: list[str]) -> tuple[int, int] | None:
     return starts[0], ends[0]
 
 
+def _locate_abstract_span(readme: str, failures: list[str]) -> tuple[int, int] | None:
+    """The abstract's line span, or `None`.
+
+    A page with neither marker has no abstract and that is not a failure — the abstract landed
+    later than the block and a fabricated page in a test is allowed to be simpler than the real
+    one. One marker without the other, a duplicate, or an inverted pair is a failure for the same
+    reason a malformed block is: the split cannot attribute the span, and the generated half would
+    silently land in the half a person is told to shorten.
+    """
+    lines = readme.splitlines()
+    starts = [index for index, line in enumerate(lines) if ABSTRACT_START in line]
+    ends = [index for index, line in enumerate(lines) if ABSTRACT_END in line]
+    if not starts and not ends:
+        return None
+    if len(starts) != 1 or len(ends) != 1:
+        failures.append(
+            f"the abstract is not delimited exactly once: found {len(starts)} "
+            f"{ABSTRACT_START!r} and {len(ends)} {ABSTRACT_END!r}; the page load cannot be split "
+            f"into the half a person wrote and the half a run writes"
+        )
+        return None
+    if ends[0] < starts[0]:
+        failures.append(
+            f"{ABSTRACT_END!r} appears before {ABSTRACT_START!r} in the README; the abstract "
+            f"span is inverted and the split would attribute each half to the other"
+        )
+        return None
+    return starts[0], ends[0]
+
+
 def measure_page(readme: str) -> PageLoad:
     """Measure the reading load of `readme`, or raise `Sc1RecordUnusable` saying why it cannot.
 
@@ -367,7 +399,8 @@ def measure_page(readme: str) -> PageLoad:
     """
     failures: list[str] = []
     span = _locate_block(readme, failures)
-    if span is None:
+    abstract_span = _locate_abstract_span(readme, failures)
+    if span is None or failures:
         raise Sc1RecordUnusable(*failures)
 
     block_start, block_end = span
@@ -393,7 +426,9 @@ def measure_page(readme: str) -> PageLoad:
 
     for index, line in enumerate(lines):
         text = line.strip()
-        in_block = block_start <= index <= block_end
+        in_block = block_start <= index <= block_end or (
+            abstract_span is not None and abstract_span[0] <= index <= abstract_span[1]
+        )
 
         marker = _FENCE.match(text)
         if marker is not None:

@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 
 from nbc.errors import EXIT_OK, NbcError, exit_code_for
-from nbc.report.caveats import RESULTS_END, RESULTS_START
+from nbc.report.caveats import ABSTRACT_END, ABSTRACT_START, RESULTS_END, RESULTS_START
 from nbc.report.timed_read import (
     ANSWER_VERDICTS,
     BUDGET_MINUTES,
@@ -974,3 +974,41 @@ def test_the_check_does_not_import_the_inference_runtime() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     assert completed.stdout.strip() == "False", completed.stdout
+
+
+# --- the abstract span -----------------------------------------------------------------------------
+#
+# The abstract between the `ABSTRACT` markers is generated, so it belongs to the half a run writes:
+# counting it as hand-written would bill a person for words that `python -m nbc.report.readme`
+# replaces wholesale.
+
+
+def test_the_abstract_span_is_counted_with_the_generated_half() -> None:
+    page = (
+        "# a page\n\nalpha beta gamma\n\n"
+        f"{ABSTRACT_START}\nfour generated abstract words\n{ABSTRACT_END}\n\n"
+        f"{RESULTS_START}\ntwo words\n{RESULTS_END}\n"
+    )
+    load = measure_page(page)
+    assert load.generated_words == 6
+    assert load.hand_written_words == 6  # "# a page" (the marker included) and "alpha beta gamma"
+
+
+def test_a_page_with_no_abstract_markers_still_measures() -> None:
+    page = f"# a page\n\nprose\n\n{RESULTS_START}\nblock\n{RESULTS_END}\n"
+    load = measure_page(page)
+    assert load.generated_words == 1
+
+
+@pytest.mark.parametrize(
+    "markers",
+    [ABSTRACT_START, ABSTRACT_END, f"{ABSTRACT_END}\n{ABSTRACT_START}"],
+    ids=["lone-start", "lone-end", "inverted"],
+)
+def test_a_malformed_abstract_marker_pair_is_refused_rather_than_misattributed(
+    markers: str,
+) -> None:
+    """Half a marker pair would silently file generated words under the hand-written half."""
+    page = f"# a page\n\n{markers}\n\n{RESULTS_START}\n{RESULTS_END}\n"
+    with pytest.raises(Sc1RecordUnusable, match="abstract"):
+        measure_page(page)

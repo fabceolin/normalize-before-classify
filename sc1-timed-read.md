@@ -185,6 +185,89 @@ verdict shape a reader needs for the second question is not on the line that was
 in this repository was checking any of the three. A line number in a hand-written file beside a
 generated measurement is exactly the stale figure this record is written to avoid.
 
+Measured again on **2026-09-02**, still before any read, after the page grew an abstract and a
+conclusion. The abstract is generated between its own markers and is counted with the generated
+half, because `python -m nbc.report.readme` replaces it wholesale and shortening it by hand is
+futile; the conclusion and the abstract's framing sentences are hand-written and count against the
+half a person can act on. As above, nothing below was typed: it is the `page` half of what
+`python -m nbc.report.timed_read` printed on that date, pasted whole.
+
+```json
+{
+  "page": {
+    "budget_minutes": 5,
+    "budget_words": 1250,
+    "lines": 1300,
+    "minutes": 49.2,
+    "minutes_generated_block": 13.3,
+    "minutes_hand_written": 35.9,
+    "over_budget_factor_hand_written": 7.18,
+    "over_budget_factor_total": 9.85,
+    "sections": [
+      {
+        "heading": "# normalize-before-classify",
+        "minutes": 0.7,
+        "words": 182
+      },
+      {
+        "heading": "## Abstract",
+        "minutes": 0.2,
+        "words": 52
+      },
+      {
+        "heading": "## The question",
+        "minutes": 0.7,
+        "words": 173
+      },
+      {
+        "heading": "## What gets measured",
+        "minutes": 6.4,
+        "words": 1591
+      },
+      {
+        "heading": "## Reproducing this",
+        "minutes": 7.4,
+        "words": 1841
+      },
+      {
+        "heading": "## Status",
+        "minutes": 1.3,
+        "words": 315
+      },
+      {
+        "heading": "## How big the layer is",
+        "minutes": 1.3,
+        "words": 326
+      },
+      {
+        "heading": "## What this does not show",
+        "minutes": 14.5,
+        "words": 3613
+      },
+      {
+        "heading": "## Conclusion",
+        "minutes": 0.7,
+        "words": 163
+      },
+      {
+        "heading": "## License",
+        "minutes": 0.2,
+        "words": 39
+      },
+      {
+        "heading": "## Redistribution of undeclared material",
+        "minutes": 2.7,
+        "words": 685
+      }
+    ],
+    "words_generated_block": 3332,
+    "words_hand_written": 8980,
+    "words_per_minute": 250,
+    "words_total": 12312
+  }
+}
+```
+
 Two things this measurement is not. It is not a reading time: readers differ by far more than the
 250 words per minute the report declares, and that constant is a stated convention rather than a
 fact about anybody. And it is not an argument for cutting any particular paragraph — curation is real

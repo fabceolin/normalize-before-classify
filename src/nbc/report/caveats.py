@@ -45,6 +45,8 @@ from typing import Final
 from nbc.errors import NbcError
 
 __all__ = [
+    "ABSTRACT_END",
+    "ABSTRACT_START",
     "CAVEATS_HEADING",
     "Caveat",
     "CaveatsReport",
@@ -117,6 +119,13 @@ is well under the shortest of them and leaves room to tighten prose without trip
 
 RESULTS_START: Final[str] = "<!-- RESULTS:START -->"
 RESULTS_END: Final[str] = "<!-- RESULTS:END -->"
+
+ABSTRACT_START: Final[str] = "<!-- ABSTRACT:START -->"
+ABSTRACT_END: Final[str] = "<!-- ABSTRACT:END -->"
+"""The abstract's markers, owned here beside the block's for the same reason the block's are:
+one module declares every span a run writes into the README, so the two checkers that must tell
+generated text from hand-written text (`readme.py`, `timed_read.py`) read the same constants
+instead of each spelling its own."""
 
 DEFAULT_README: Final[Path] = Path("README.md")
 

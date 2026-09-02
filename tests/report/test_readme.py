@@ -27,7 +27,7 @@ import pytest
 
 from nbc.errors import EXIT_OK, declared_exit_codes, exit_code_for
 from nbc.report import readme as renderer
-from nbc.report.caveats import RESULTS_END, RESULTS_START
+from nbc.report.caveats import ABSTRACT_END, ABSTRACT_START, RESULTS_END, RESULTS_START
 from nbc.report.readme import (
     AXES,
     DEFAULT_RESULTS,
@@ -35,9 +35,11 @@ from nbc.report.readme import (
     ReportNotRenderable,
     SCHEMA_VERSION,
     inject,
+    inject_abstract,
     load_results,
     main,
     render,
+    render_abstract,
     render_into,
 )
 
@@ -2231,3 +2233,131 @@ def test_render_refuses_a_body_that_would_carry_a_marker(
     with pytest.raises(ReportNotRenderable) as caught:
         render(load_results(results))
     assert RESULTS_END in str(caught.value)
+
+
+# --- the abstract --------------------------------------------------------------------------------
+#
+# The abstract answers the page's own question in a sentence a reader can quote, and the discipline
+# is the block's: every figure in it is derived from the results file by the renderer, never typed,
+# and the renderer either locates its span exactly or refuses to guess.
+
+
+def an_abstract_readme() -> str:
+    return (
+        "# a repository\n\nprose above.\n\n"
+        f"{ABSTRACT_START}\nstale abstract\n{ABSTRACT_END}\n\n"
+        f"{RESULTS_START}\n{RESULTS_END}\n\nprose below.\n"
+    )
+
+
+def test_the_shipped_readme_carries_the_abstract_the_committed_results_render(
+    repo_root: Path,
+) -> None:
+    """The abstract on the page is the one the committed results render, byte for byte.
+
+    The freshness discipline of `test_the_shipped_readme_carries_the_block_the_committed_results_render`,
+    applied to the second generated span: an abstract that has drifted from the file is a typed
+    number wearing a marker pair.
+    """
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+    results = load_results(repo_root / DEFAULT_RESULTS)
+    start = readme.index(ABSTRACT_START) + len(ABSTRACT_START)
+    end = readme.index(ABSTRACT_END)
+    assert readme[start:end] == "\n" + render_abstract(results)
+
+
+def test_a_readme_without_abstract_markers_gets_the_block_and_no_abstract(
+    tmp_path: Path, payload: dict[str, Any]
+) -> None:
+    """No markers is no abstract, reported as such — not an abort and not a silent insertion."""
+    results, target = write(tmp_path / "plain", payload)
+    report = render_into(results, target)
+    assert report["abstract_rendered"] is False
+    text = target.read_text(encoding="utf-8")
+    assert ABSTRACT_START not in text and ABSTRACT_END not in text
+
+
+def test_a_readme_with_abstract_markers_gets_a_fresh_abstract(
+    tmp_path: Path, payload: dict[str, Any]
+) -> None:
+    results, target = write(tmp_path / "with", payload, readme=an_abstract_readme())
+    report = render_into(results, target)
+    assert report["abstract_rendered"] is True
+    text = target.read_text(encoding="utf-8")
+    assert "stale abstract" not in text
+    start = text.index(ABSTRACT_START) + len(ABSTRACT_START)
+    end = text.index(ABSTRACT_END)
+    assert text[start:end] == "\n" + render_abstract(load_results(results))
+
+
+@pytest.mark.parametrize(
+    "markers",
+    [
+        f"{ABSTRACT_START}\n",
+        f"{ABSTRACT_END}\n",
+        f"{ABSTRACT_END}\n{ABSTRACT_START}\n",
+        f"{ABSTRACT_START}\n{ABSTRACT_START}\n{ABSTRACT_END}\n",
+    ],
+    ids=["lone-start", "lone-end", "inverted", "duplicated-start"],
+)
+def test_a_malformed_abstract_marker_pair_aborts_rather_than_guessing(
+    tmp_path: Path, payload: dict[str, Any], markers: str
+) -> None:
+    """One marker without the other, inverted, or duplicated: refused, and the README untouched."""
+    readme = f"# a repository\n\n{markers}\n{RESULTS_START}\n{RESULTS_END}\n"
+    results, target = write(tmp_path / "broken", payload, readme=readme)
+    with pytest.raises(ReportNotRenderable) as caught:
+        render_into(results, target)
+    assert "abstract" in failures_of(caught)
+    assert target.read_text(encoding="utf-8") == readme
+
+
+def test_the_abstract_quotes_rows_the_tables_carry(repo_root: Path) -> None:
+    """Every rendered rate in the abstract also appears in the block, so the two cannot disagree.
+
+    The abstract's whole claim to trust is that it quotes cells rather than summarizing them; a
+    rate string of its own would be a figure the tables cannot be checked against.
+    """
+    results = load_results(repo_root / DEFAULT_RESULTS)
+    abstract = render_abstract(results)
+    block = render(results)
+    rates = re.findall(r"\d+\.\d+% \[[^\]]+\] [\d,]*\d/[\d,]*\d", abstract)
+    assert len(rates) >= 4, "the abstract quotes fewer rate cells than the shape it promises"
+    for rendered in rates:
+        assert rendered in block, f"{rendered!r} is in the abstract and in no table"
+
+
+def test_the_abstract_names_a_bound_chain_that_does_not_return_to_the_clean_row(
+    tmp_path: Path, payload: dict[str, Any]
+) -> None:
+    """The equality claim is derived, proven by breaking it: nudge one cell, the chain is named.
+
+    On the committed file the exception list holds the chain past the decode ceiling; this test
+    moves one document in `base64`'s canon-on attack row and expects `base64` to join it, so the
+    sentence cannot be a constant that happens to match the data.
+    """
+    for cell in payload["cells"]:
+        key = cell.get("key", {})
+        if (
+            cell.get("kind") == "rate"
+            and key.get("baseline") == "protectai-deberta-v3"
+            and key.get("dressing_chain") == "base64"
+            and key.get("canon_on") is True
+            and key.get("family") == "attack"
+            and key.get("population") == "all"
+        ):
+            cell["k"] = cell["k"] - 1
+            cell["value"] = cell["k"] / cell["n"]
+            break
+    else:
+        pytest.fail("the committed file no longer holds the cell this test nudges")
+    results, _ = write(tmp_path / "nudged", payload)
+    abstract = render_abstract(load_results(results))
+    protectai = next(
+        line
+        for line in abstract.splitlines()
+        if line.startswith("- **`protectai-deberta-v3`")
+    )
+    assert "exceptions are" in protectai
+    assert "`base64`" in protectai
+    assert "7 of 9" in protectai

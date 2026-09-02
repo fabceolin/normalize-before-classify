@@ -51,6 +51,8 @@ from typing import Any, Callable, Final, Mapping, Sequence
 
 from nbc.errors import NbcError
 from nbc.report.caveats import (
+    ABSTRACT_END,
+    ABSTRACT_START,
     DEFAULT_README,
     RESULTS_END,
     RESULTS_START,
@@ -68,9 +70,11 @@ __all__ = [
     "SCHEMA_VERSION",
     "SENSITIVITY_WINDOW_POLICIES",
     "inject",
+    "inject_abstract",
     "load_results",
     "main",
     "render",
+    "render_abstract",
     "render_into",
 ]
 
@@ -1877,11 +1881,11 @@ def render(results: Results) -> str:
         raise ReportNotRenderable(*failures)
 
     body = "\n".join(lines).strip("\n") + "\n"
-    for marker in (RESULTS_START, RESULTS_END):
+    for marker in (RESULTS_START, RESULTS_END, ABSTRACT_START, ABSTRACT_END):
         if marker in body:
             raise ReportNotRenderable(
-                f"the rendered block contains {marker!r}; a second marker inside the block makes "
-                f"the next injection unable to tell where the block ends"
+                f"the rendered block contains {marker!r}; a marker inside the block makes "
+                f"the next injection unable to tell where a generated span ends"
             )
     return body
 
@@ -1894,6 +1898,377 @@ def inject(readme: str, body: str) -> str:
         raise ReportNotRenderable(*failures)
     start, end = span
     return readme[:start] + RESULTS_START + "\n" + body + RESULTS_END + readme[end:]
+
+
+# --- the abstract --------------------------------------------------------------------------------
+#
+# SC1 asks the reader for the question, the table and the caveats in under five minutes, and the
+# one thing the page never did was answer its own question in a sentence a reader can quote. The
+# sentence cannot be typed: this repository's discipline is that no measurement reaches the page by
+# hand, so the abstract is rendered from the results file exactly as the block is, into its own
+# marker pair near the top of the page.
+
+
+_ABSTRACT_PREAMBLE: Final[str] = (
+    "<!-- Everything between these two markers is generated from `results/results.json` by "
+    "`python -m nbc.report.readme`, exactly like the results block further down. Do not edit it: "
+    "the next run replaces it wholesale, and a number here that no run produced cannot survive "
+    "that. -->"
+)
+
+
+def _headline_rate(
+    rates: Sequence[Cell],
+    baseline: str,
+    chain: Any,
+    canon_on: bool,
+    family: str | None,
+    benign_class: str | None,
+) -> Cell | None:
+    for cell in rates:
+        if (
+            cell.coord("baseline") == baseline
+            and cell.coord("dressing_chain") == chain
+            and cell.coord("canon_on") is canon_on
+            and cell.coord("family") == family
+            and cell.coord("benign_class") == benign_class
+        ):
+            return cell
+    return None
+
+
+def _rate_row(
+    rates: Sequence[Cell],
+    baseline: str,
+    chain: Any,
+    canon_on: bool,
+    columns: Sequence[tuple[str, str | None]],
+    where: str,
+    failures: list[str],
+) -> tuple[Cell, ...] | None:
+    row: list[Cell] = []
+    for family, benign_class in columns:
+        cell = _headline_rate(rates, baseline, chain, canon_on, family, benign_class)
+        if cell is None:
+            failures.append(
+                f"{where}: no rate cell for family={family!r}, benign_class={benign_class!r}, "
+                f"canon_on={canon_on!r}; the abstract cannot quote a row the file does not hold"
+            )
+            return None
+        row.append(cell)
+    return tuple(row)
+
+
+def _row_counts(row: Sequence[Cell]) -> tuple[tuple[int | None, int | None], ...]:
+    """A row reduced to its `k/n` pairs, which is what two equal rows are equal in."""
+    return tuple((cell.k, cell.n) for cell in row)
+
+
+def _abstract_lines(results: Results, failures: list[str]) -> list[str]:
+    """The abstract's lines, every figure in them a cell or a run field the file holds.
+
+    What is derived rather than judged: the worst layer-off AUC is the file's own minimum; a chain
+    "reads the clean row" when its `k/n` pairs equal the clean row's exactly; the held-out movement
+    is the largest `k` difference the held-out chains show anywhere. The one editorial act is which
+    facts get a sentence at all, and that list is this function's code, not its data.
+    """
+    where = "abstract"
+    rates = [
+        cell
+        for cell in results.cells
+        if cell.kind == "rate"
+        and cell.coord("population") == "all"
+        and cell.coord("dressing_chain") is not None
+    ]
+    if not rates:
+        failures.append(f"{where}: the file holds no headline rate cells to summarize")
+        return []
+
+    baselines = sorted({str(cell.coord("baseline")) for cell in rates})
+    benign_classes = sorted(
+        {
+            str(cell.coord("benign_class"))
+            for cell in rates
+            if cell.coord("benign_class") is not None
+        }
+    )
+    columns: list[tuple[str, str | None]] = [("attack", None)]
+    columns += [("benign", name) for name in benign_classes]
+
+    lines: list[str] = ["", _ABSTRACT_PREAMBLE, ""]
+
+    # One pair of cells, chosen by the file (its own minimum), because "the ranking inverts" is
+    # the fact a reader needs before meeting a recall column that reads well for the wrong reason.
+    aucs = [
+        cell
+        for cell in results.cells
+        if cell.kind == "auc" and cell.coord("population") == "all" and cell.value is not None
+    ]
+    worst = min(
+        (cell for cell in aucs if cell.coord("canon_on") is False),
+        key=lambda cell: cell.value or 0.0,
+        default=None,
+    )
+    if worst is not None:
+        twin = next(
+            (
+                cell
+                for cell in aucs
+                if cell.coord("canon_on") is True
+                and all(
+                    cell.coord(axis) == worst.coord(axis)
+                    for axis in AXES
+                    if axis != "canon_on"
+                )
+            ),
+            None,
+        )
+        if twin is None:
+            failures.append(
+                f"{where}: the worst layer-off AUC cell has no layer-on twin to stand beside it"
+            )
+        else:
+            lines.append(
+                "**What the layer recovers, in one pair of cells.** With the layer off, the "
+                "worst cell in the file is not a miss but an inversion: on "
+                f"`{_stored_text(str(worst.coord('dressing_chain')), where, failures)}` against "
+                f"`{_stored_text(str(worst.coord('benign_class')), where, failures)}`, "
+                f"`{_stored_text(str(worst.coord('baseline')), where, failures)}` ranks the "
+                f"benign class above the attacks, ROC AUC {_render_auc(worst)}. The same cell "
+                f"with the layer on reads {_render_auc(twin)}."
+            )
+            lines.append("")
+
+    for baseline in baselines:
+        at = f"{where}, baseline {baseline!r}"
+        chain_class = {
+            cell.coord("dressing_chain"): cell.coord("chain_class")
+            for cell in rates
+            if cell.coord("baseline") == baseline
+        }
+        bound = sorted(
+            str(chain)
+            for chain, cls in chain_class.items()
+            if cls == "bound" and chain != "clean"
+        )
+        if not bound:
+            failures.append(f"{at}: no bound dressing chain besides clean to compare against it")
+            continue
+        clean_row = _rate_row(
+            rates, baseline, "clean", True, columns, f"{at}, clean row", failures
+        )
+        if clean_row is None:
+            continue
+        matching: list[str] = []
+        exceptions: list[str] = []
+        for chain in bound:
+            row = _rate_row(
+                rates, baseline, chain, True, columns, f"{at}, chain {chain!r}", failures
+            )
+            if row is None:
+                continue
+            (matching if _row_counts(row) == _row_counts(clean_row) else exceptions).append(chain)
+        off_recalls = [
+            cell
+            for chain in bound
+            if (cell := _headline_rate(rates, baseline, chain, False, "attack", None))
+            is not None
+            and cell.value is not None
+        ]
+        off_benign = [
+            cell
+            for chain in bound
+            for name in benign_classes
+            if (cell := _headline_rate(rates, baseline, chain, False, "benign", name))
+            is not None
+            and cell.value is not None
+        ]
+        if not off_recalls or not off_benign:
+            failures.append(
+                f"{at}: the layer-off rows are missing; the abstract cannot say what the layer "
+                f"is being compared against"
+            )
+            continue
+        lowest = min(off_recalls, key=lambda cell: cell.value or 0.0)
+        highest = max(off_recalls, key=lambda cell: cell.value or 0.0)
+        worst_fp = max(off_benign, key=lambda cell: cell.value or 0.0)
+        exceptions_clause = ""
+        if exceptions:
+            named = ", ".join(
+                f"`{_stored_text(chain, at, failures)}`" for chain in exceptions
+            )
+            exceptions_clause = (
+                f"; the exception{'s are' if len(exceptions) > 1 else ' is'} {named}"
+            )
+        lines.append(
+            f"- **`{_stored_text(baseline, at, failures)}`.** With the layer on, "
+            f"{len(matching)} of {len(bound)} dressed `bound` chains read exactly the clean "
+            f"text's own row — recall {_render_rate(clean_row[0])}, false positives "
+            + ", ".join(
+                f"{_render_rate(cell)} on `{name}`"
+                for name, cell in zip(benign_classes, clean_row[1:])
+            )
+            + f"{exceptions_clause}. With the layer off, recall on those chains runs from "
+            f"{_percent(lowest.value or 0.0)} to {_percent(highest.value or 0.0)} of "
+            f"{lowest.n:,} attacks, and the benign false-positive rate reaches "
+            f"{_percent(worst_fp.value or 0.0)} ({worst_fp.k:,}/{worst_fp.n:,} on "
+            f"`{_stored_text(str(worst_fp.coord('benign_class')), at, failures)}` under "
+            f"`{_stored_text(str(worst_fp.coord('dressing_chain')), at, failures)}`)."
+        )
+
+    held_chains: set[str] = set()
+    held_moves: list[int] = []
+    for baseline in baselines:
+        for chain in {
+            cell.coord("dressing_chain")
+            for cell in rates
+            if cell.coord("baseline") == baseline
+            and cell.coord("chain_class") == "held_out"
+        }:
+            held_chains.add(str(chain))
+            for family, benign_class in columns:
+                on = _headline_rate(rates, baseline, chain, True, family, benign_class)
+                off = _headline_rate(rates, baseline, chain, False, family, benign_class)
+                if on is None or off is None or on.k is None or off.k is None:
+                    failures.append(
+                        f"{where}, baseline {baseline!r}, held-out chain {str(chain)!r}: the "
+                        f"on/off pair for family={family!r}, benign_class={benign_class!r} is "
+                        f"incomplete, so the held-out movement cannot be stated"
+                    )
+                    continue
+                held_moves.append(abs(on.k - off.k))
+    if held_chains and held_moves:
+        moved = max(held_moves)
+        movement = (
+            "moves no column at all"
+            if moved == 0
+            else f"moves no column by more than {moved:,} document{'s' if moved != 1 else ''}"
+        )
+        lines.append("")
+        lines.append(
+            f"Across the {len(held_chains)} held-out dressing chains — the encodings the layer "
+            f"does not declare — turning it on {movement}: the layer recovers only what it "
+            f"declares to recover."
+        )
+
+    if results.verdicts:
+        total = len(results.verdicts)
+        loud = [
+            (str(verdict["condition"]), str(verdict["outcome"]))
+            for verdict in results.verdicts
+            if str(verdict["outcome"]) != QUIET_VERDICT_OUTCOME
+        ]
+        lines.append("")
+        if loud:
+            named = "; ".join(
+                f"`{_stored_text(condition, f'{where}, verdicts', failures)}` came out "
+                f"`{_stored_text(outcome, f'{where}, verdicts', failures)}`"
+                for condition, outcome in loud
+            )
+            rest = (
+                f"; the other {total - len(loud)} read `{QUIET_VERDICT_OUTCOME}`"
+                if total > len(loud)
+                else ""
+            )
+            lines.append(
+                f"Of the {total} pre-registered falsification conditions, {named}{rest}. "
+                f"Each is decided under the tables below, from the figures the tables carry."
+            )
+        else:
+            lines.append(
+                f"None of the {total} pre-registered falsification conditions triggered. Each "
+                f"is decided under the tables below, from the figures the tables carry."
+            )
+
+    timing = results.run.get("timing")
+    if isinstance(timing, Mapping):
+        layer = timing.get("layer_ns")
+        if isinstance(layer, Mapping):
+            overall = layer.get("overall")
+            if isinstance(overall, Mapping):
+                sentence = (
+                    f"The layer itself prices at p50 {_duration(overall['p50_ns'])} and p95 "
+                    f"{_duration(overall['p95_ns'])} per document, over "
+                    f"{int(overall['n']):,} documents"
+                )
+                by_class = layer.get("by_class")
+                if isinstance(by_class, Mapping) and by_class:
+                    priciest = max(
+                        sorted(by_class), key=lambda name: by_class[name]["p50_ns"]
+                    )
+                    sentence += (
+                        f"; the priciest class is "
+                        f"`{_stored_text(str(priciest), f'{where}, timing', failures)}`, at "
+                        f"p50 {_duration(by_class[priciest]['p50_ns'])}"
+                    )
+                lines.append("")
+                lines.append(sentence + ".")
+
+    lines.append("")
+    lines.append(
+        "Every figure above is quoted from the cells the tables below carry, each with its "
+        "interval and the count it was measured over; what these figures do not establish is "
+        'priced in "What this does not show".'
+    )
+    lines.append("")
+    return lines
+
+
+def render_abstract(results: Results) -> str:
+    """The abstract's body, between its markers. Aborts rather than rendering a partial claim."""
+    failures: list[str] = []
+    lines = _abstract_lines(results, failures)
+    if failures:
+        raise ReportNotRenderable(*failures)
+    body = "\n".join(lines).strip("\n") + "\n"
+    for marker in (RESULTS_START, RESULTS_END, ABSTRACT_START, ABSTRACT_END):
+        if marker in body:
+            raise ReportNotRenderable(
+                f"the rendered abstract contains {marker!r}; a marker inside it makes the next "
+                f"injection unable to tell where a generated span ends"
+            )
+    return body
+
+
+def _locate_abstract(readme: str, failures: list[str]) -> tuple[int, int] | None:
+    """The abstract's span, or `None` with the reason appended.
+
+    Exactly-once and ordered, for the reason `caveats.py`'s `_locate_markers` gives: a marker pair
+    the renderer cannot locate is a span it cannot tell from hand-written text. A README with
+    neither marker is not malformed — it has no abstract — and that case is the caller's to
+    decide, so this helper is only called once a marker has been seen.
+    """
+    starts = [match.start() for match in re.finditer(re.escape(ABSTRACT_START), readme)]
+    ends = [match.start() for match in re.finditer(re.escape(ABSTRACT_END), readme)]
+    if len(starts) != 1 or len(ends) != 1:
+        failures.append(
+            f"the abstract is not delimited exactly once: found {len(starts)} "
+            f"{ABSTRACT_START!r} and {len(ends)} {ABSTRACT_END!r}; the renderer cannot tell "
+            f"which text it may overwrite"
+        )
+        return None
+    if ends[0] < starts[0]:
+        failures.append(
+            f"{ABSTRACT_END!r} appears before {ABSTRACT_START!r}; the abstract span is inverted"
+        )
+        return None
+    return starts[0], ends[0] + len(ABSTRACT_END)
+
+
+def inject_abstract(readme: str, body: str) -> str:
+    """`readme` with the bytes between the abstract markers replaced by `body`."""
+    failures: list[str] = []
+    span = _locate_abstract(readme, failures)
+    if span is None:
+        raise ReportNotRenderable(*failures)
+    block = _locate_markers(readme, failures)
+    if block is not None and block[0] <= span[0] < block[1]:
+        raise ReportNotRenderable(
+            "the abstract markers sit inside the generated results block, where the next block "
+            "injection would erase them"
+        )
+    start, end = span
+    return readme[:start] + ABSTRACT_START + "\n" + body + ABSTRACT_END + readme[end:]
 
 
 def _write(path: Path, text: str) -> None:
@@ -1965,6 +2340,10 @@ def render_into(results_path: Path, readme_path: Path) -> dict[str, object]:
         ) from undecodable
 
     updated = inject(readme, body)
+    abstract_rendered = False
+    if ABSTRACT_START in updated or ABSTRACT_END in updated:
+        updated = inject_abstract(updated, render_abstract(results))
+        abstract_rendered = True
     if updated != readme:
         try:
             _write(readme_path, updated)
@@ -1977,6 +2356,7 @@ def render_into(results_path: Path, readme_path: Path) -> dict[str, object]:
     return {
         "readme": str(readme_path),
         "results": str(results_path),
+        "abstract_rendered": abstract_rendered,
         "cells_rendered": len(results.cells),
         "verdicts_rendered": len(results.verdicts),
         "findings_rendered": len(results.findings),
