@@ -2088,7 +2088,7 @@ def _abstract_lines(results: Results, failures: list[str]) -> list[str]:
                 f"`{_stored_text(chain, at, failures)}`" for chain in exceptions
             )
             returned += (
-                f" — the exception{'s are' if len(exceptions) > 1 else ' is'} {named}"
+                f" (the exception{'s are' if len(exceptions) > 1 else ' is'} {named})"
             )
         cells_by_row: dict[str, str] = {
             "returned": returned,
@@ -2133,7 +2133,7 @@ def _abstract_lines(results: Results, failures: list[str]) -> list[str]:
         "**The problem.** Prompt-injection classifiers are trained on attack text, and a payload "
         "wrapped in base64 or hex, split with zero-width characters, or spelled with homoglyphs "
         "is, to the model, a different string than the attack it carries. The question is what "
-        "canonicalizing the input first — decoding and unwrapping it before the model sees it — "
+        "canonicalizing the input first (decoding and unwrapping it before the model sees it) "
         "recovers in detection, and what it costs on benign text."
     )
     lines.append("")
@@ -2177,7 +2177,7 @@ def _abstract_lines(results: Results, failures: list[str]) -> list[str]:
             for baseline, _, matched, total in summaries
         )
         lines.append(
-            f"- With the layer on, {per_baseline} — the recovery on the attack side and the "
+            f"- With the layer on, {per_baseline}. The recovery on the attack side and the "
             f"collapse of the dressed-benign false positives are the same event, because the "
             f"canonicalized input *is* the clean input."
         )

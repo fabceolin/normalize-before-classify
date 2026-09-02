@@ -197,12 +197,12 @@ half a person can act on. As above, nothing below was typed: it is the `page` ha
   "page": {
     "budget_minutes": 5,
     "budget_words": 1250,
-    "lines": 1312,
-    "minutes": 49.3,
+    "lines": 1313,
+    "minutes": 48.9,
     "minutes_generated_block": 13.3,
-    "minutes_hand_written": 35.9,
-    "over_budget_factor_hand_written": 7.18,
-    "over_budget_factor_total": 9.85,
+    "minutes_hand_written": 35.6,
+    "over_budget_factor_hand_written": 7.11,
+    "over_budget_factor_total": 9.78,
     "sections": [
       {
         "heading": "# normalize-before-classify",
@@ -212,58 +212,58 @@ half a person can act on. As above, nothing below was typed: it is the `page` ha
       {
         "heading": "## Abstract",
         "minutes": 0.2,
-        "words": 52
+        "words": 54
       },
       {
         "heading": "## The question",
         "minutes": 0.7,
-        "words": 173
+        "words": 175
       },
       {
         "heading": "## What gets measured",
-        "minutes": 6.4,
-        "words": 1591
+        "minutes": 6.3,
+        "words": 1573
       },
       {
         "heading": "## Reproducing this",
-        "minutes": 7.4,
-        "words": 1841
+        "minutes": 7.3,
+        "words": 1816
       },
       {
         "heading": "## Status",
-        "minutes": 1.3,
-        "words": 315
+        "minutes": 1.2,
+        "words": 310
       },
       {
         "heading": "## How big the layer is",
         "minutes": 1.3,
-        "words": 326
+        "words": 324
       },
       {
         "heading": "## What this does not show",
-        "minutes": 14.5,
-        "words": 3613
+        "minutes": 14.3,
+        "words": 3574
       },
       {
         "heading": "## Conclusion",
-        "minutes": 0.7,
-        "words": 163
+        "minutes": 0.6,
+        "words": 162
       },
       {
         "heading": "## License",
         "minutes": 0.2,
-        "words": 39
+        "words": 38
       },
       {
         "heading": "## Redistribution of undeclared material",
         "minutes": 2.7,
-        "words": 685
+        "words": 680
       }
     ],
-    "words_generated_block": 3335,
-    "words_hand_written": 8980,
+    "words_generated_block": 3332,
+    "words_hand_written": 8888,
     "words_per_minute": 250,
-    "words_total": 12315
+    "words_total": 12220
   }
 }
 ```

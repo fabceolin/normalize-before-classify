@@ -18,13 +18,13 @@ positives.**
 
 This page is long, and the length is priced further down; this section is the short version.
 Everything between the two markers below is generated from `results/results.json` by
-`python -m nbc.report.readme` — every figure is derived from the file, never typed, exactly like
-the results block the tables live in.
+`python -m nbc.report.readme`: every figure is derived from the file rather than typed by hand,
+exactly like the results block the tables live in.
 
 <!-- ABSTRACT:START -->
 <!-- Everything between these two markers is generated from `results/results.json` by `python -m nbc.report.readme`, exactly like the results block further down. Do not edit it: the next run replaces it wholesale, and a number here that no run produced cannot survive that. -->
 
-**The problem.** Prompt-injection classifiers are trained on attack text, and a payload wrapped in base64 or hex, split with zero-width characters, or spelled with homoglyphs is, to the model, a different string than the attack it carries. The question is what canonicalizing the input first — decoding and unwrapping it before the model sees it — recovers in detection, and what it costs on benign text.
+**The problem.** Prompt-injection classifiers are trained on attack text, and a payload wrapped in base64 or hex, split with zero-width characters, or spelled with homoglyphs is, to the model, a different string than the attack it carries. The question is what canonicalizing the input first (decoding and unwrapping it before the model sees it) recovers in detection, and what it costs on benign text.
 
 **The approach.** Every item goes down two routes, as-is and canonicalized, over 2 public baselines that share no architecture and no tokenizer. The attacks are dressed across 9 dressing chains the layer declares (`bound`) and 3 it does not (`held_out`), and the benign corpora (`b_chat`, `b_code`) take both routes too, so the false-positive cost is measured on the same footing as the recovery. Every rate below carries its interval and the `k/n` it was measured over.
 
@@ -32,7 +32,7 @@ the results block the tables live in.
 
 |  | `protectai-deberta-v3` | `testsavantai-bert-small` |
 | --- | --- | --- |
-| `bound` chains that return to the clean row, layer on | 8 of 9 — the exception is `base64+base64+base64+base64` | 8 of 9 — the exception is `base64+base64+base64+base64` |
+| `bound` chains that return to the clean row, layer on | 8 of 9 (the exception is `base64+base64+base64+base64`) | 8 of 9 (the exception is `base64+base64+base64+base64`) |
 | recall on the clean row, layer on | 83.17% [80.94%, 85.18%] 998/1,200 | 87.58% [85.60%, 89.33%] 1,051/1,200 |
 | false positives on `b_chat`, layer on | 3.00% [1.83%, 4.89%] 15/500 | 18.60% [15.43%, 22.25%] 93/500 |
 | false positives on `b_code`, layer on | 35.20% [31.14%, 39.48%] 176/500 | 11.00% [8.55%, 14.05%] 55/500 |
@@ -42,7 +42,7 @@ the results block the tables live in.
 
 **The conclusions.**
 
-- With the layer on, `protectai-deberta-v3` returns to its clean-text row on 8 of 9 declared chains; `testsavantai-bert-small` returns to its clean-text row on 8 of 9 declared chains — the recovery on the attack side and the collapse of the dressed-benign false positives are the same event, because the canonicalized input *is* the clean input.
+- With the layer on, `protectai-deberta-v3` returns to its clean-text row on 8 of 9 declared chains; `testsavantai-bert-small` returns to its clean-text row on 8 of 9 declared chains. The recovery on the attack side and the collapse of the dressed-benign false positives are the same event, because the canonicalized input *is* the clean input.
 - Across the 3 held-out dressing chains, turning the layer on moves no column by more than 1 document: the layer recovers only what it declares to recover, and buys nothing against encodings it does not.
 - Of the 4 pre-registered falsification conditions, `N3` came out `triggered`; the other 3 read `not_triggered`. Each is decided under the tables below, from the figures the tables carry.
 - The layer itself prices at p50 338.51 us and p95 18.39 ms per document, over 28,600 documents; the priciest class is `b_code`, at p50 6.02 ms.
@@ -57,9 +57,9 @@ wrapped in base64, split with zero-width characters, or spelled with Cyrillic ho
 tokenizer, a different string than the attack it carries.
 
 There are two broad answers: teach the model to read the encodings, with another fine-tuning round per
-encoding family, or **canonicalize the input before the model sees it** — NFKC, strip zero-width and bidi
+encoding family, or **canonicalize the input before the model sees it**: NFKC, strip zero-width and bidi
 overrides, map confusables, detect and decode embedded base64 and hex with a declared depth ceiling. Linear
-in the length of the text, no retraining.
+in the length of the text, and it needs no retraining.
 
 **Normalizing input before classification is not a new idea, and framing the field as reflexively reaching
 for another fine-tuning round is a caricature a reviewer in this area will recognize as one.** The claim
@@ -103,8 +103,8 @@ positives, and a result that reports only route B's recall is misleading rather 
 otherwise.** Both are pinned by revision in [`pins.toml`](pins.toml), which records the architecture and
 tokenizer family of each: a DeBERTa-v3 with a SentencePiece-unigram vocabulary, and a BERT with a WordPiece
 one. The second one's card declares a DeBERTa base model in its metadata; that is boilerplate inherited
-from a family card and it is wrong, and the pinned revision's own `config.json` — a BERT, with a WordPiece
-vocabulary and no SentencePiece model beside it — is what was verified and what the pin carries. **The
+from a family card and it is wrong; the pinned revision's own `config.json` (a BERT, with a WordPiece
+vocabulary and no SentencePiece model beside it) is what was verified and what the pin carries. **The
 independence is real; one of the two cards says it is not**, and a reviewer auditing this from the cards
 alone would conclude the two baselines are the same architecture. It matters because the mechanism under
 suspicion is how encoded text tokenizes, and two models that tokenize alike cannot corroborate each other.
@@ -142,7 +142,7 @@ an attacker who encodes twice gets the same treatment twice.
 
 **That last property is why the ceiling is a security parameter and not a tuning knob:** recursion into a
 segment the layer just produced is unbounded work unless something bounds it, so the depth is a declared
-default in one place — [`src/nbc/canon/pipeline.py`](src/nbc/canon/pipeline.py), read by nothing else — and
+default in one place, [`src/nbc/canon/pipeline.py`](src/nbc/canon/pipeline.py), read by nothing else, and
 a candidate refused only for depth is recorded as a ceiling hit rather than dropped silently. It bounds
 expansion and that is all it bounds: caveat 6 in ["what this does not show"](#what-this-does-not-show) says
 plainly that the layer is itself an attack surface in the other direction, and that this repository does
@@ -154,10 +154,10 @@ A false-positive rate can always be made to look reasonable by growing the corpu
 paragraph refutes that, so the sampling frame is declared in `pins.toml` under `[benign_frame]`,
 hashed into a `frame_id`, and fixed before anything is measured. `python -m nbc.pins` recomputes the
 digest on every read and refuses the file when it does not match the block, and the corpus, when it is
-built, carries the same id in `data/manifest.json` — so a frame edited after the corpus was drawn
+built, carries the same id in `data/manifest.json`, so a frame edited after the corpus was drawn
 stops the run rather than publishing a table over a sample from a frame nobody declared. One level up,
-`build_id` covers the whole build declaration — the attack draw, the benign frame, both dressing
-registries, the confirmatory cell and the exclusion set — because a `frame_id` guarding only the
+`build_id` covers the whole build declaration (the attack draw, the benign frame, both dressing
+registries, the confirmatory cell and the exclusion set), because a `frame_id` guarding only the
 benign half would let an edit to the attack sample size publish a table computed over the previous
 corpus with every check still green.
 
@@ -178,9 +178,9 @@ licensed**, **containing code that legitimately embeds base64 or hex**, and **no
 guardrail repositories**. The first is a build abort: every pinned source declares a licence
 identifier and its attribution, and the build refuses to write a corpus when anything it
 redistributes carries a licence that is absent, unrecognized or incompatible with an MIT
-repository — naming the source. The third is a human reading applied when the list was pinned, and
+repository, naming the source. The third is a human reading applied when the list was pinned, and
 the only part of it this repository can enforce is that no B-code repository is also a pinned
-baseline, attack pool or exclusion source — which `nbc.pins` refuses.
+baseline, attack pool or exclusion source, which `nbc.pins` refuses.
 
 The second criterion is enforced per file, by the layer itself: a file is eligible only if the
 canonicalization layer's decode stage examines a run in it. **What that costs is stated rather than
@@ -192,24 +192,24 @@ against this project's own thesis, which is the direction to err in.
 
 **B-chat** is the benign-labelled rows of the pinned dataset **that survive the training-overlap
 filter**, drawn by a declared deterministic rule. Hand-authored material is restricted to what no
-public dataset carries — messages legitimately containing a JWT, a content hash, a data URI or an SSH
-public key — it lives in `src/nbc/corpus/sources/`, its size is declared in the frame and compared
+public dataset carries: messages legitimately containing a JWT, a content hash, a data URI or an SSH
+public key. It lives in `src/nbc/corpus/sources/`, its size is declared in the frame and compared
 against what that directory holds, and every item is verified against the kind it declares rather
 than trusted: a JWT header is decoded and required to carry an `alg`, an SSH key's base64 blob must
 name its own algorithm in its first length-prefixed field, a data URI must decode under strict
 base64, and a content hash is recomputed from the bytes the message says it is the digest of.
 
 **A benign item that carries an attack payload stops the build.** The builder labels benign material
-benign *by construction* — the file came from a repository pinned as benign material, not because
-anything read the text — so a public source file that happens to embed an injection payload becomes a
+benign *by construction*, because the file came from a repository pinned as benign material and not
+because anything read the text. A public source file that happens to embed an injection payload becomes a
 benign item that is actually an attack. The classifier then fires on it correctly and the run records
 a false positive: the counter-metric gets worse for being right. Before a single row is rendered, the
-build therefore cross-checks every drawn benign **source** — the undressed text — against every drawn
+build therefore cross-checks every drawn benign **source**, the undressed text, against every drawn
 attack payload in its clean form, and **aborts** naming the file and the payload when the source
 carries it or matches it above a declared threshold. Reading the source is what makes the check work
 at all: once an item is dressed, a base64, hex, base32, rot13, percent-encoded, homoglyph or
 zero-width row never literally carries a plaintext payload, every comparison returns false, and the
-gate passes silently on the corpus it exists to stop —
+gate passes silently on the corpus it exists to stop.
 [`tests/corpus/test_crosscheck.py`](tests/corpus/test_crosscheck.py) demonstrates that rather than
 asserting it. It is enough, because dressing is a pure function of the source. The metric
 (`shingle-containment`, the fraction of the payload's five-token shingles present in the source), its
@@ -219,13 +219,13 @@ rebuild at a different threshold is visible rather than invisible. It aborts rat
 because this is a gold-label error and nothing here can say which of the two labels is wrong: a
 silent exclusion would reshape the benign corpus exactly the way a silent inclusion reshapes the
 number, and an abort forces a human to look. When it fires on a drawn B-code file the frame cannot be
-topped up — 500 per class is exact — so the frame is edited deliberately, `frame_id` changes, and the
+topped up (500 per class is exact), so the frame is edited deliberately, `frame_id` changes, and the
 change lands in the diff. That is the intended path, not a deadlock.
 
 ## Reproducing this
 
-The published run is three commands. The entrypoint that performs the sequence exists — it arrived with
-the measurement harness — and `results/results.json`, which the block below is a pure function of, is what
+The published run is three commands. The entrypoint that performs the sequence exists (it arrived with
+the measurement harness), and `results/results.json`, which the block below is a pure function of, is what
 it wrote:
 
 ```
@@ -235,25 +235,25 @@ uv run python -m nbc.harness.run all
 ```
 
 The middle line is copy-pasteable as written and is run once per shard, `--shard 0` through `--shard 7`
-for the `--shards 8` above it. The shard count is yours to choose rather than something pinned here —
-eight is what fits one card comfortably, not a declared constant — because shard membership is derived
+for the `--shards 8` above it. The shard count is yours to choose rather than something pinned here,
+because eight is what fits one card comfortably rather than a declared constant: shard membership is derived
 from each key's digest, so the same count always produces the same partition, and a shard already scored
 is not scored again. `all` then merges the shards, runs the timing pass, aggregates, evaluates the
 pre-registered conditions and writes `results/results.json`. Rendering the table is a separate act on that
-file and deliberately not a step of producing one — `python -m nbc.report.readme` replaces the bytes
-between the two markers below and no byte outside them — so a measuring run leaves this page alone and a
+file and deliberately not a step of producing one. `python -m nbc.report.readme` replaces the bytes
+between the two markers below and no byte outside them, so a measuring run leaves this page alone and a
 test, not a step, is what stops the published block drifting from the file it claims to be a function of.
 
 **Two of the three lines need the declared execution path, not one.** `score-shard` is the obvious one.
 `all` is the other, though not for the reason the step name suggests: its `measure` step scores nothing.
 It reads the shard files, refuses if one of them is missing, and merges. What needs the card is the pass
-after it, which opens both baselines and times the layer and inference over every document — the
+after it, which opens both baselines and times the layer and inference over every document. The
 providers it opens them with are `CUDAExecutionProvider` first, `CPUExecutionProvider` second, declared in
 [`src/nbc/baselines/onnx_adapter.py`](src/nbc/baselines/onnx_adapter.py). Only `uv sync` is device-agnostic.
 The next section is the list of what genuinely runs with no card at all, and neither of these two is on it.
 
 **And the file those three commands write will not be the file the block below was rendered from.** The
-committed `results/results.json` records its steps as `verify`, `build`, `reaggregate` — it came from a
+committed `results/results.json` records its steps as `verify`, `build`, `reaggregate`: it came from a
 `python -m nbc.harness.run aggregate`, which re-derived every cell from the committed scores and carried
 the latency figures forward from the invocation that measured them. `all` records `preflight`, `verify`,
 `build`, `measure`, `time`, `aggregate`, and measures those latencies itself. So a reader who runs the
@@ -264,14 +264,14 @@ the reader to discover by diffing. The block says the same thing in its own word
 `reaggregated` field.
 
 `all` also writes `results/traces.jsonl`, one object per corpus row, recording every edit the layer made to
-that row. It is deliberately not committed — see [`.gitignore`](.gitignore) — because its consumer is a
-person debugging one document, not a reader recomputing the table, and what the table needs from it is
+that row. It is deliberately not committed (see [`.gitignore`](.gitignore)), because its consumer is a
+person debugging one document rather than a reader recomputing the table, and what the table needs from it is
 already in `results/results.json` as census cells. `python -m nbc.harness.run aggregate` re-derives the
 whole results file from the scores and traces a previous run already produced: it aggregates, re-evaluates
 the conditions and rewrites the file without opening a model, scoring an item or timing anything, and it
 records in `run.reaggregated` that it did, which is why the block below says in its own words that its
 latency figures were measured by another invocation. It takes no shard count and no profile, because it
-measures nothing — and on a fresh clone, where `traces.jsonl` is absent, it refuses rather than publishing
+measures nothing. On a fresh clone, where `traces.jsonl` is absent, it refuses rather than publishing
 a table quietly missing a whole family of cells.
 
 What runs with no CUDA device at all, on a clean CPU-only Linux machine:
@@ -286,50 +286,50 @@ uv run python -m nbc.corpus.build build-corpus   # draws data/*.jsonl and data/m
 uv run python -m nbc.corpus.build verify-corpus  # the guarded read; touches no network
 ```
 
-**The two measuring passes are the exception, and both need a CUDA device.** Everything in the block above —
-the platform floor, the pins, the offline unit suite, the corpus build and its guarded read — runs
+**The two measuring passes are the exception, and both need a CUDA device.** Everything in the block above
+(the platform floor, the pins, the offline unit suite, the corpus build and its guarded read) runs
 on a CPU-only machine and is checked that way on every push. The table itself is not: as of
 2026-08-30 the published execution path is `CUDAExecutionProvider` on an `NVIDIA GeForce RTX 3060
 (8.6)`, declared in `baselines/onnx_adapter.py` and recorded per shard, and a reviewer without that
 card cannot reproduce the numbers by re-running the pass.
 
 Why it moved, since a reader is owed the reason: measured on a 16-thread CPU, one process scores 18
-of the 114,400 keys a minute and ten processes score about 47 — the pass is memory-bandwidth bound,
+of the 114,400 keys a minute and ten processes score about 47: the pass is memory-bandwidth bound,
 so the parallelism runs out well before the cores do, and the full matrix lands near twenty hours.
 The same pass on one RTX 3060 is roughly an hour.
 
 What it cost, measured rather than waved at: over a fixed fifteen-item sample scored on both
 devices, **all thirty probabilities differ, by up to 3.61e-4**, with `n_windows` identical. What it
-did not cost is determinism — two processes on one RTX 3060 and two different RTX 3060s give
+did not cost is determinism: two processes on one RTX 3060 and two different RTX 3060s give
 bit-identical scores, which is what makes splitting the pass across cards legitimate. A shard
 produced on a different device is refused by name at merge, and the check has a test that fires it
 with a Tesla P40.
 
 `build-corpus` reaches the network and is the only way to produce a corpus anything can measure over:
-it writes `data/manifest.json`, and `verify-corpus` — the same guarded read every consumer goes
-through — refuses without one.
+it writes `data/manifest.json`, and `verify-corpus`, the same guarded read every consumer goes
+through, refuses without one.
 
 `attack-pool-report` is the cheap half of that: it reads the pinned attack pool and runs every gate
-that needs no exclusion index — the declared splits, the declared withdrawals and the gold-label
-contradiction gate — then prints the accounting without drawing or writing anything. It is what CI
+that needs no exclusion index (the declared splits, the declared withdrawals and the gold-label
+contradiction gate), then prints the accounting without drawing or writing anything. It is what CI
 runs to check that the two decisions recorded in `pins.toml` still describe the dataset they were
 taken about.
 
 Both aborts that used to stop `build-corpus` were answered on 2026-08-30 by a person, and both
 answers are in `pins.toml` with a name and a date on them: the licence question in
 "redistribution of undeclared material" below, and the two contradictory texts withdrawn whole in
-the subsection under it. Neither gate was removed or loosened — the suite still asserts that each
+the subsection under it. Neither gate was removed or loosened: the suite still asserts that each
 one fires when its decision is taken away.
 
 `uv` is pinned to an exact version by `pyproject.toml` and refuses to run under any other, so the
 environment a table came from is the environment you get. The models and the corpus are pinned by
 revision in `pins.toml`, and `nbc.pins --verify` reports whether each one was checked against the hub or read
-off a directory name in this machine's cache — those are different guarantees and it says which.
+off a directory name in this machine's cache. Those are different guarantees and it says which.
 
 Linux specifically, and the reason is stated rather than implied: the pinned `onnxruntime`
 publishes only `manylinux_2_28` wheels and no source distribution at any version, so the floor is
-**glibc 2.28 or newer** on `x86_64` or `aarch64`. The interpreter is **CPython 3.13 exactly** —
-not the 3.11-to-3.14 the wheels would admit — because the vendored Unicode confusables table is
+**glibc 2.28 or newer** on `x86_64` or `aarch64`. The interpreter is **CPython 3.13 exactly**,
+not the 3.11-to-3.14 the wheels would admit, because the vendored Unicode confusables table is
 pinned to a revision that moves with the interpreter's minor version. All of that is checked
 before anything else runs, and it names what it found:
 
@@ -360,7 +360,7 @@ the bytes between the markers below against what that results file renders today
 **One caveat has to be read before the table rather than after it.** Everything below measures whether a
 classifier fires, not whether an attack works. A payload the classifier misses is a recall failure by
 construction, but it is a *threat* only if a downstream model decodes it and obeys, and nothing in this
-repository tests that — no downstream model is run and no definition of attack success is offered. That is
+repository tests that: no downstream model is run and no definition of attack success is offered. That is
 caveat 3c in ["what this does not show"](#what-this-does-not-show), it is the strongest objection to the
 whole table, and a reader who meets it only after forming a verdict has met it too late.
 
@@ -915,8 +915,8 @@ The cells, the limits and the four verdicts were re-derived from the committed s
 - **[197]** baseline=`testsavantai-bert-small`, dressing_chain=`base64+homoglyph`, benign_class=`b_code`, population=`all` ; baseline=`testsavantai-bert-small`, dressing_chain=`base64+homoglyph`, benign_class=`b_code`, population=`single_window`: `value_all_items` -0.838000, `value_single_window` -0.990476, `gap` 0.152476, `matched_half_width` 0.031528, `n_single_window_interval` [-0.998317, -0.935261] `newcombe-paired-score`
 <!-- RESULTS:END -->
 
-Every row above is repeated for each dressing chain the block lists — the clean text, the single dressings,
-the bound combinations, and the held-out encodings the layer was never written against — and for each of
+Every row above is repeated for each dressing chain the block lists (the clean text, the single dressings,
+the bound combinations, and the held-out encodings the layer was never written against) and for each of
 the two pinned baselines, whose independence, and the model card that contradicts it, are stated above the
 block rather than under it.
 
@@ -941,20 +941,20 @@ inference latency, and condition N3 is decided on them.
 - [x] attack corpus from pinned public datasets, in every dressing chain the generated block above lists:
       the clean text, the single dressings, the bound combinations, and the held-out encodings
 - [x] benign corpus, two classes reported separately: real pinned public source files, and conversational
-      text carrying legitimate encoded content — the frame is declared, hashed and enforced, and the
+      text carrying legitimate encoded content. The frame is declared, hashed and enforced, and the
       builder is written. The two gates that stopped it are answered, both by a person and both in
       `pins.toml`: the attack pool declares **no licence** at its pinned revision and is published
-      anyway under a stated, signed position — see "redistribution of undeclared material" below,
-      and note that the identifier still reads `not-declared` everywhere it appears — and the two
+      anyway under a stated, signed position (see "redistribution of undeclared material" below,
+      and note that the identifier still reads `not-declared` everywhere it appears), and the two
       texts the pool labels both ways are withdrawn whole rather than adjudicated. The corpus is
       committed, and [`data/ATTRIBUTION.md`](data/ATTRIBUTION.md) credits it
 - [x] canonicalization layer with a declared recursion ceiling
-- [x] measurement harness, run, and results table, every rate with its n and interval — generated
+- [x] measurement harness, run, and results table, every rate with its n and interval, generated
       between the `RESULTS` markers above and never typed by hand. The run has happened: the block is
       a pure function of `results/results.json`, its provenance says which invocation measured what,
       and each pre-registered condition is named above the first table with the outcome it came out
       as, rather than only under the tables
-- [x] "what this does not show" — the eleven caveats that do not depend on the result, written
+- [x] "what this does not show": the eleven caveats that do not depend on the result, written
       before the first run, and the twelfth in slot 8, the one that had to wait for numbers: the
       run produced them and it is written below, where the reserved placeholder used to be
 - [ ] the five-minute read this page claims: its protocol, its three questions and every result are
@@ -975,7 +975,7 @@ carries a stated budget, in lines, over the modules that actually run in front o
 <!-- SIZE-BUDGET:END -->
 
 `total_physical_lines` is every line a reviewer scrolls. `total_code_lines` counts only the lines
-that are neither blank, nor comments, nor docstrings — the part that has to be reasoned about. The
+that are neither blank, nor comments, nor docstrings, the part that has to be reasoned about. The
 third is a ceiling on any single module, because "read it end to end" degrades far faster with one
 1500-line file than with five 300-line ones. The build-time script that derives the vendored
 confusables table is excluded and the exclusion is checked, not asserted: it must be exactly the set
@@ -989,7 +989,7 @@ one of the three without the other two fails.
 
 **What the budget does not prove.** It is a ceiling on growth, not evidence that the layer reads in
 one sitting: a ceiling in the low thousands of lines is a couple of hours of careful reading, not
-twenty minutes. No measurement is transcribed into this paragraph on purpose — a number written here
+twenty minutes. No measurement is transcribed into this paragraph on purpose: a number written here
 would go stale the next time a docstring changes, and a stale number beside a checked one is worse
 than no number. Run the command above for where the layer actually stands. The point is that this is
 now a budget to disagree with rather than a claim the repository makes about itself.
@@ -997,15 +997,15 @@ now a budget to disagree with rather than a claim the repository makes about its
 ## What this does not show
 
 These eleven do not depend on the result, so they were written before the first measurement rather than
-after it, and the numbering is the PRD's — a reader moving between the two documents lands on the same
+after it, and the numbering is the PRD's, so a reader moving between the two documents lands on the same
 caveat. The section is hand-written and sits outside the generated block above; slot 8 is reserved for
 what the run actually reveals. The run will not start without it: `python -m nbc.report.caveats` checks
 that the section is here and complete, and aborts with its own exit code when it is not.
 
 **1. The corpus is constructed, not sampled from production traffic.** Attack payloads come from public,
 revision-pinned datasets and are re-rendered here in each dressing. The benign corpus is drawn the same
-way — real public source files pinned by repository, commit and path for the code half, and the
-benign-labelled rows of the same pinned datasets for the conversational half — under a sampling frame
+way (real public source files pinned by repository, commit and path for the code half, and the
+benign-labelled rows of the same pinned datasets for the conversational half) under a sampling frame
 fixed and recorded before any measurement. Hand-authored material is confined to what no public dataset
 carries: messages legitimately containing a JWT, a content hash, a data URI or an SSH public key. Nothing
 here is a sample of what real traffic looks like, and the rates below should be read as a comparison
@@ -1030,7 +1030,7 @@ tokenizer families (SentencePiece 128k, WordPiece 30k), because the mechanism un
 encoded text tokenizes, and models that tokenize alike cannot corroborate each other. Only the first is
 downloaded at scale. **A third baseline was pinned and then dropped**, and the reason belongs here rather
 than in a commit message: its published training sources included the attack datasets used here, and its
-training augmentations were the same encodings this experiment applies — so its recall on encoded payloads
+training augmentations were the same encodings this experiment applies, so its recall on encoded payloads
 would have measured robustness it had been trained for, not the effect under study. Dropping it also cost
 one of the two attack datasets, which a second baseline had likewise trained on. Two independent
 baselines is a floor, not a comfortable margin, and a reader is entitled to weigh the result accordingly.
@@ -1052,52 +1052,52 @@ success, and that is a different experiment. Read the rates as a comparison betw
 classifier, and nothing further.
 
 **3d. Training-data overlap is filtered where it can be measured, and one source cannot be.** A classifier
-scored on text it was trained on reports memory, not detection — and it cuts both ways: recall looks better
+scored on text it was trained on reports memory rather than detection, and it cuts both ways: recall looks better
 on attacks it has seen, and the false-positive rate looks better on benign text it was taught to call safe.
 Reading model cards is not enough to catch this. The attack corpus used here declares on its own card that
 it was seeded from two datasets that one of the baselines declares training on, one hop that no model card
 reveals. Two figures for the size of the problem, each traceable to the file that carries it rather than to
 this paragraph. Before the filter ran, and against a probe of the benign pool taken on 2026-08-24,
 `pins.toml` records the measured reach of **`VMware/open-instruct`
-alone at 3,424 of 7,066 unique benign rows — 48%** — a source one baseline declares training on directly,
+alone at 3,424 of 7,066 unique benign rows, 48%**, a source one baseline declares training on directly,
 with three further declared seeds unmeasured at that point. On the attack side `data/manifest.json` records
-**515 of 3,071 unique positives removed — 17%** — which is the one-hop reach through
+**515 of 3,071 unique positives removed, 17%**, which is the one-hop reach through
 `jackhhao/jailbreak-classification`. Read both as a floor rather than as the removal: each was measured
-against part of the declaration, and the exclusion set the build actually applies is wider — every source either baseline
+against part of the declaration, and the exclusion set the build actually applies is wider: every source either baseline
 declares training on, plus every seed the attack dataset's own card names, twelve today, each pinned in
-`pins.toml` by repository and — where the hub will resolve one — revision, and derived from those
+`pins.toml` by repository and, where the hub will resolve one, revision, and derived from those
 declarations rather than listed beside them,
 so a lineage that grows and an exclusion set that does not is a file that no longer loads. Two texts are
 the same row under a declared normalization: NFKC, lowercased, whitespace collapsed. So the build downloads
 every declared training source it can and removes every corpus row that appears in one, and reports how
 many rows each source removed. What it removed is in `data/manifest.json` under `reports.exclusion`:
-**4,061 of 10,135 rows**, leaving **6,074** — **3,546 of 7,064** on the conversational benign half and
+**4,061 of 10,135 rows**, leaving **6,074**: **3,546 of 7,064** on the conversational benign half and
 **515 of 3,071** on the attack half. The two benign denominators are two stages and not a discrepancy:
 **7,066** is the 2026-08-24 probe recorded in `pins.toml`, **7,064** is `rows_in` for B-chat in the build
 that produced this table, a difference of 2 rows. The per-source table beside those totals attributes far
 less than they come to: `jackhhao/jailbreak-classification` 515 matched rows, `rubend18/ChatGPT-Jailbreak-Prompts`
-47 matched rows, zero for every other source the build could read and no count for the two it could not —
+47 matched rows, zero for every other source the build could read and no count for the two it could not:
 **562 attributed against 4,061 removed**. The totals are what the build acted on; the attribution beside them
 does not account for the rest, and that gap is stated here rather than left for a reader to add up.
 **`VMware/open-instruct` is one of those zeros.** The source this caveat's 48% is measured on was read at
-its pinned revision — 357,453 texts loaded — and the exclusion report attributes **0 matched rows** to it.
+its pinned revision (357,453 texts loaded), and the exclusion report attributes **0 matched rows** to it.
 A reader who opens `data/manifest.json` finds the headline source of the largest figure in this paragraph
 sitting at zero. That is the same attribution gap and not a second one, and it is the reason the 48% is
 labelled a pre-filter probe above rather than a removal.
 **The gap is also not spread evenly across the two halves, and the single figure hides that.** On the
 attack half the attribution is complete: **515 attributed against 515 removed**. On the conversational
-benign half **3,546 rows were removed and at most 47 are attributed** — `rubend18/ChatGPT-Jailbreak-Prompts`
+benign half **3,546 rows were removed and at most 47 are attributed**: `rubend18/ChatGPT-Jailbreak-Prompts`
 is the only non-zero source that is not the attack half's own 515, so the benign attribution is
 near-total absence. Averaging the halves into one ratio is what makes it look partial.
 What remains undeclared or unreachable remains a limit, and there are two
 of those. One training source common to **both** baselines is access-restricted and returns HTTP 401, so
-overlap against it is unmeasurable for any corpus this experiment could have chosen. A second — one of the
-four seeds the attack dataset names — resolves at its pinned commit and publishes its rows through a
+overlap against it is unmeasurable for any corpus this experiment could have chosen. A second, one of the
+four seeds the attack dataset names, resolves at its pinned commit and publishes its rows through a
 loading script the pinned reader refuses, so its overlap is unmeasurable too, for a different reason and
 with a different remedy. Both are stated here rather than quietly assumed to be zero: each is named in the
 results with the status it returned and the refusal it raised, its removal count is reported as absent
 rather than as zero, and the pins record which of the two failures it is. Neither is one of the two seeds
-the declared one-hop reach runs through — those two the build may not proceed without, and it aborts if it
+the declared one-hop reach runs through: the build may not proceed without those two, and it aborts if it
 cannot read them. And that one source is a floor on what is missing, not a
 full accounting: the primary baseline's card names far fewer training datasets in prose than its own
 metadata tallies, so the number of sources this filter never sees is itself unknown. What the filter
@@ -1113,14 +1113,14 @@ important follow-up.
 model's sequence limit are scored in fixed non-overlapping windows and the document takes the maximum
 window score. An instruction that straddles a boundary is seen by neither window in full. The direction of
 this bias was stated here before the run as a universal, and the run falsified it. The claim was that
-canonicalization *shortens* documents in tokens rather than lengthening them — an encoded payload
-tokenizes into several times the tokens of its decoded form — so it is the **encoded** condition that
+canonicalization *shortens* documents in tokens rather than lengthening them (an encoded payload
+tokenizes into several times the tokens of its decoded form), so it is the **encoded** condition that
 spills into extra windows and the un-canonicalized baseline that collects those extra chances at the
 maximum. **That holds for one of the two baselines and inverts for the other, and the corrected version is
 worse for the result rather than better.** Aggregated over the `window_overflow` census cells in the block
 above, matched so that every cell contributes both canon states, the share of items needing more than one
-window moves, with the layer off and then on, **28.94% → 20.57% for `protectai-deberta-v3`** — shortening,
-as claimed — and **10.70% → 16.74% for `testsavantai-bert-small`**, which is the reverse. The mechanism is
+window moves, with the layer off and then on, **28.94% → 20.57% for `protectai-deberta-v3`**, shortening,
+as claimed, and **10.70% → 16.74% for `testsavantai-bert-small`**, which is the reverse. The mechanism is
 visible where it happens: `testsavantai-bert-small` on `b_code` with `base64` goes from **3 of 500** items
 over one window with the layer **off** to **395 of 500** with it **on**, once the layer decodes the blob
 back into source, which is far longer in that model's 30k WordPiece vocabulary than the blob was;
@@ -1129,11 +1129,11 @@ half of the corpus where the false-positive story lives, the layer is what lengt
 of the two baselines. **Stating only the flattering half would be the kind of selective candour this
 section exists to avoid.** Benign items are dressed in the same encodings, so wherever the un-canonicalized
 condition is the one that spills, encoded benign documents spill with it, take an inflated maximum, and
-produce extra false positives without the layer — which makes the layer's false-positive *cost* look
+produce extra false positives without the layer, which makes the layer's false-positive *cost* look
 smaller than it is there, and larger than it is wherever the layer is what spills. The biases push the
 headline comparison in opposite directions, they differ in sign between the two baselines, and they do not
-cancel in any knowable way. A **windows-matched** twin — the same comparison restricted to documents that
-fit in a single window under both conditions — therefore accompanies **77 of the 274** delta cells the
+cancel in any knowable way. A **windows-matched** twin (the same comparison restricted to documents that
+fit in a single window under both conditions) therefore accompanies **77 of the 274** delta cells the
 block above publishes, so a reader can see how much of the trade is the window policy rather than the
 layer. It does not accompany all of them, and this sentence used to say that it did. The twins cover
 **77 of the 78** canon-on-versus-off rate deltas; the one without is
@@ -1150,14 +1150,15 @@ expansion, not this. Measuring it is future work and is not attempted here.
 
 **7. Part of the recall recovery is true by construction, and you should discount it accordingly.** The
 code that encodes the payloads and the layer that decodes them draw on the same character tables, bound by
-a test that fails the build if the layer does not undo its own corpus's dressing — `tests/corpus/test_roundtrip.py`,
-over the contract in `src/nbc/corpus/roundtrip.py`. That binding exists for a good reason — without it the layer could silently fail to strip a character it emitted, quietly depressing
-the headline number with nothing failing loudly — but it has a consequence worth stating plainly: on the
+a test that fails the build if the layer does not undo its own corpus's dressing: `tests/corpus/test_roundtrip.py`,
+over the contract in `src/nbc/corpus/roundtrip.py`. That binding exists for a good reason: without it
+the layer could silently fail to strip a character it emitted, quietly depressing the headline number
+with nothing failing loudly. But it has a consequence worth stating plainly: on the
 dressings the layer was written for, the canonicalized encoded document *is* the canonicalized clean
 document, so recovery is total by definition and could not have come out any other way. That column shows
 the layer was implemented as specified. It is not evidence that canonicalization is a good idea. The
 columns that could have gone differently are the recall **lost** without the layer, the false-positive cost
-of adding it, the behaviour on nested chains past the recursion ceiling, and the **held-out encodings** —
+of adding it, the behaviour on nested chains past the recursion ceiling, and the **held-out encodings**,
 a separate block of the table built from encodings the layer was deliberately never written against, kept
 in their own registry (`src/nbc/corpus/heldout.py`, under the opposite import rule: it may not import
 anything under `nbc.canon`, which `tests/corpus/test_heldout.py` asserts transitively and in a subprocess)
@@ -1177,29 +1178,29 @@ held out from, and a test compares the layer's decoder set against the recorded 
 rather than showing up only as a larger number.
 
 Two things the binding does **not** cover, named here rather than left for a reader to find. A chain is
-exempt only by being held out — the scope is a filter over the registries, so a bound chain cannot be
+exempt only by being held out: the scope is a filter over the registries, so a bound chain cannot be
 excused by anyone adding it to anything. And a payload the layer declines to decode by its own published
-candidate floor — shorter than sixteen bytes, or repetitive enough to fall under the entropy floor — is
+candidate floor (shorter than sixteen bytes, or repetitive enough to fall under the entropy floor) is
 exempt from the round trip and **counted**: the corpus build's draw report publishes
 `payloads_below_decode_floor`, how many drawn payloads carry rows that no ceiling and no character mapping
 will recover. Divide it by the drawn positives before reading the encoded columns.
 
-**8. On part of the axis the baselines are not detecting injection, they are detecting encoding — and the
+**8. On part of the axis the baselines are not detecting injection, they are detecting encoding, and the
 recall column there carries no information.** This is the slot the section reserved before the first
 measurement, and this is what the measurement put in it. Of the **104** published false-positive rates,
 **29 sit at or above 0.99**; for **19 of those** the attack cell at the same baseline, chain and canon
 state reports a recall at or above 0.99 as well, and **16 of the 19** read exactly 1.0000 on both. A
-false-positive rate and a recall are never one cell — the pairing here is a benign cell against the attack
+false-positive rate and a recall are never one cell: the pairing here is a benign cell against the attack
 cell sharing its baseline, its dressing chain, its chain class, its canon state, its window policy and its
 population, which is one attack cell per benign cell and no ambiguity about which. A classifier that
 answers "attack" to every document scores a perfect
 recall and a perfect false-positive rate at the same time, and that is what those cells are: no
 discrimination whatever, published as a recall of 100%. Every one of the 19 is the layer **off**, which
-reverses the plain reading of the table on those chains — the layer's contribution there is not recovering
-recall, it is returning the model to a regime where it separates anything at all, at a nominal cost in
-recall that a saturated cell was never entitled to charge. The threshold-free column says the same thing
+reverses the plain reading of the table on those chains: the layer's contribution there is to return
+the model to a regime where it separates anything at all rather than to recover recall, at a nominal
+cost in recall that a saturated cell was never entitled to charge. The threshold-free column says the same thing
 independently rather than by re-reading the same rates: **the AUC for attacks at `protectai-deberta-v3`
-against `b_code` with the layer off is 0.0145 on `hex` and 0.0133 on `base64+homoglyph`** — far below
+against `b_code` with the layer off is 0.0145 on `hex` and 0.0133 on `base64+homoglyph`**, far below
 0.5, which the block's own separation lead-in names as an ordering the wrong way round. The same model
 whose recall column reads 1.0000 there ranks benign source code above real attacks. Where a recall and a
 false-positive rate saturate together, read the AUC and disregard the rate. No pre-registered condition was
@@ -1209,12 +1210,12 @@ made at.
 
 Three further questions the run settled rather than left open, each decided by figures the block above
 already publishes. First, **N3 triggered, and its relative limb never bound.** The layer's p95 is
-**18,394,582 ns against a ceiling of 1,000,000 ns — 18.4× over it** — so of the four pre-registered
+**18,394,582 ns against a ceiling of 1,000,000 ns, 18.4× over it**, so of the four pre-registered
 falsification conditions this is the one whose `outcome` reads `triggered`. The layer is far slower than
 the budget the condition set, and that is the plainest thing the run says about it. The ceiling is
 `min(0.1 × fastest baseline p95, 1 ms)`, and the run records `share_ceiling_ns` 2.28 ms against
 `absolute_ceiling_ns` 1.00 ms with `binding_ceiling` `the absolute`, so the limb that was added to keep the
-condition machine-independent was inert and N3 reduced to a figure in milliseconds — which is what a review
+condition machine-independent was inert and N3 reduced to a figure in milliseconds, which is what a review
 predicted before the run and what the run then measured. Second, **the pre-registered confirmatory cell
 could not decide anything**: the cell declared before the numbers existed is
 **`protectai-deberta-v3` on `base64+base64+base64+base64` against `b_code`**, and its false-positive rate
@@ -1223,7 +1224,7 @@ It landed on the **false-positive half** of the saturation described above and n
 `delta_recall` there is **0.1658**, so the recall on that cell moved and was never pinned. One rate with
 nowhere to go is enough to make the cell undecidable, and that is what happened. Third, **the layer
 recovered nothing on the encodings held out to test generalization**:
-`held_out_chains_recovering` is `none`, over **`base32` and `url_percent` — two of the three held out**,
+`held_out_chains_recovering` is `none`, over **`base32` and `url_percent`, two of the three held out**,
 because caveat 7's `rot13` is there to mark the boundary of what normalization can reach rather than to be
 recovered, and is excluded from the pass/fail condition for that reason. The broader claim would overstate
 the record: `chains_recovering_off_distribution` carries **`base64+base64+base64+base64`**, a chain past
@@ -1239,7 +1240,7 @@ Canonicalization recovered what it declared, and only that. On the dressing chai
 layer's declared scope, both baselines return to the row they publish on clean text: the recovery
 on the attack side and the collapse of the dressed-benign false positives are the same event, and
 the abstract at the top of this page quotes it from the results file rather than restating it here.
-Outside that scope the layer claims nothing and recovers nothing — the held-out encodings barely
+Outside that scope the layer claims nothing and recovers nothing: the held-out encodings barely
 move, and a chain past the declared decode ceiling stays where it was. What the layer costs on
 clean text sits inside the intervals the table prints beside it; what it costs in latency, the
 provenance block prices per document. None of this establishes more than it says: the section
@@ -1249,7 +1250,7 @@ read before quoting any single figure from it.
 ## License
 
 MIT. See [LICENSE](LICENSE). The MIT offer covers **this repository's own code and text**. It does
-not, and cannot, cover other people's rows that this repository redistributes — read the next
+not, and cannot, cover other people's rows that this repository redistributes. Read the next
 section before you redistribute the corpus further.
 
 ## Redistribution of undeclared material
@@ -1263,7 +1264,7 @@ incompatible stops the build. Nothing here defaults to allow.
 One pinned source does not clear that bar, and this section is the reason it is published anyway.
 
 **`xTRam1/safe-guard-prompt-injection` at revision `a3a877d6` declares no licence.** No `license`
-key in its dataset card's front matter, no `license` tag — read at the pinned sha on 2026-08-28 and
+key in its dataset card's front matter, no `license` tag, read at the pinned sha on 2026-08-28 and
 re-read against the hub API on 2026-08-30, unchanged. It is the attack pool, and it has no
 fallback: 1200 drawn attack positives out of the 3073 unique positives it carries, dressed into
 five encodings, are written into `data/`.
@@ -1278,14 +1279,14 @@ to publish the corpus with the question open and visible rather than resolved.
 **Why not one of the other three doors.** Asking the publisher to declare a licence puts the whole
 measurement behind an unbounded external wait with no assurance of an answer. Moving to another
 attack pool invalidates this project's committed OQ2 figures, forces its spike to be re-run and
-re-derives the exclusion set — a large cost paid for a licence question rather than a measurement
+re-derives the exclusion set: a large cost paid for a licence question rather than a measurement
 one. Writing a permissive identifier into `pins.toml` would have passed the gate in a single line
 and published a false statement of fact to everyone reading the credits file: it is the cheapest
 door and the only dishonest one, and it is the reason the build gained a way to record a decision
 rather than a way to record a licence.
 
 **What this means for you.** If you redistribute this corpus, or anything derived from its attack
-half, you inherit the same open question — not a resolved one. If you are the publisher of that
+half, you inherit the same open question, not a resolved one. If you are the publisher of that
 dataset and you declare a licence at a pinned revision, this becomes a two-line change and the
 section goes away. If you believe the rows should not be here at all, the contact path is an issue
 on this repository.
@@ -1303,8 +1304,8 @@ docker-terminal prompt at two (`train[2952]` at label 0, `train[3525]` at label 
 of each pair is wrong and the artifact says nothing about which.
 
 The build refuses to choose, because a builder that picks a label has an unreviewed annotation
-policy, which is the thing this project claims not to have. **Both texts are withdrawn whole** —
-all five rows — and that is not a label: it asserts nothing about what either text should have been
+policy, which is the thing this project claims not to have. **Both texts are withdrawn whole**,
+all five rows, and that is not a label: it asserts nothing about what either text should have been
 called, only that a text the pool contradicts itself about is not usable evidence in either
 direction. The withdrawal is declared in `pins.toml`, names each row by split, index and label,
 carries the SHA-256 of the exact withdrawn text, and is checked against the pool as read before

@@ -387,7 +387,7 @@ def test_the_reserved_slot_says_n3_triggered_and_by_how_much(
     assert f"**{triggered[0]} triggered, and its relative limb never bound.**" in slot
     assert (
         f"**{computed['layer_p95_ns']:,} ns against a ceiling of "
-        f"{computed['ceiling_ns']:,.0f} ns — {over:.1f}× over it**" in slot
+        f"{computed['ceiling_ns']:,.0f} ns, {over:.1f}× over it**" in slot
     )
     assert (
         f"of the {NUMBER_WORDS[len(results['verdict'])]} pre-registered falsification conditions "
@@ -466,7 +466,7 @@ def test_the_reserved_slot_says_which_held_out_encodings_the_condition_covers(
     slot = one_caveat(caveats_section, RESERVED_LABEL)
     assert "`held_out_chains_recovering` is `none`" in slot
     assert (
-        f"over **`{held_out[0]}` and `{held_out[1]}` — {NUMBER_WORDS[len(held_out)]} of the "
+        f"over **`{held_out[0]}` and `{held_out[1]}`, {NUMBER_WORDS[len(held_out)]} of the "
         f"{NUMBER_WORDS[len(held_out) + len(excluded)]} held out**" in slot
     )
     assert (
@@ -813,7 +813,7 @@ def test_caveat_three_ds_attack_side_overlap_is_the_one_the_manifest_measured(
     body = one_caveat(caveats_section, "3d")
     assert (
         f"**{attack['removed_by_exclusion']:,} of {attack['unique_positives']:,} "
-        f"unique positives removed — {percent}%**" in body
+        f"unique positives removed, {percent}%**" in body
     )
 
     # And the caveat names the source that reach runs through, read out of the manifest rather than
@@ -847,7 +847,7 @@ def test_caveat_three_ds_pre_filter_reach_is_the_figure_pins_toml_carries(
     body = one_caveat(caveats_section, "3d")
     assert (
         f"**`{repository}` alone at {reached:,} of {total:,} "
-        f"unique benign rows — {percent}%**" in body
+        f"unique benign rows, {percent}%**" in body
     )
 
 
