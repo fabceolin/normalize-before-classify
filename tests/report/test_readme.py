@@ -2353,11 +2353,5 @@ def test_the_abstract_names_a_bound_chain_that_does_not_return_to_the_clean_row(
         pytest.fail("the committed file no longer holds the cell this test nudges")
     results, _ = write(tmp_path / "nudged", payload)
     abstract = render_abstract(load_results(results))
-    protectai = next(
-        line
-        for line in abstract.splitlines()
-        if line.startswith("- **`protectai-deberta-v3`")
-    )
-    assert "exceptions are" in protectai
-    assert "`base64`" in protectai
-    assert "7 of 9" in protectai
+    assert "7 of 9" in abstract
+    assert "exceptions are `base64`," in abstract

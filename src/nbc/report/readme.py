@@ -1965,12 +1965,13 @@ def _row_counts(row: Sequence[Cell]) -> tuple[tuple[int | None, int | None], ...
 
 
 def _abstract_lines(results: Results, failures: list[str]) -> list[str]:
-    """The abstract's lines, every figure in them a cell or a run field the file holds.
+    """The abstract's lines: the problem, the approach, the numbers in one table, the conclusions.
 
-    What is derived rather than judged: the worst layer-off AUC is the file's own minimum; a chain
-    "reads the clean row" when its `k/n` pairs equal the clean row's exactly; the held-out movement
-    is the largest `k` difference the held-out chains show anywhere. The one editorial act is which
-    facts get a sentence at all, and that list is this function's code, not its data.
+    Every figure is a cell or a run field the file holds. What is derived rather than judged: the
+    worst layer-off AUC is each baseline's own minimum; a chain "returns to the clean row" when its
+    `k/n` pairs equal the clean row's exactly; the held-out movement is the largest `k` difference
+    the held-out chains show anywhere. The one editorial act is which facts get a row at all, and
+    that list is this function's code, not its data.
     """
     where = "abstract"
     rates = [
@@ -1994,51 +1995,13 @@ def _abstract_lines(results: Results, failures: list[str]) -> list[str]:
     )
     columns: list[tuple[str, str | None]] = [("attack", None)]
     columns += [("benign", name) for name in benign_classes]
-
-    lines: list[str] = ["", _ABSTRACT_PREAMBLE, ""]
-
-    # One pair of cells, chosen by the file (its own minimum), because "the ranking inverts" is
-    # the fact a reader needs before meeting a recall column that reads well for the wrong reason.
     aucs = [
         cell
         for cell in results.cells
         if cell.kind == "auc" and cell.coord("population") == "all" and cell.value is not None
     ]
-    worst = min(
-        (cell for cell in aucs if cell.coord("canon_on") is False),
-        key=lambda cell: cell.value or 0.0,
-        default=None,
-    )
-    if worst is not None:
-        twin = next(
-            (
-                cell
-                for cell in aucs
-                if cell.coord("canon_on") is True
-                and all(
-                    cell.coord(axis) == worst.coord(axis)
-                    for axis in AXES
-                    if axis != "canon_on"
-                )
-            ),
-            None,
-        )
-        if twin is None:
-            failures.append(
-                f"{where}: the worst layer-off AUC cell has no layer-on twin to stand beside it"
-            )
-        else:
-            lines.append(
-                "**What the layer recovers, in one pair of cells.** With the layer off, the "
-                "worst cell in the file is not a miss but an inversion: on "
-                f"`{_stored_text(str(worst.coord('dressing_chain')), where, failures)}` against "
-                f"`{_stored_text(str(worst.coord('benign_class')), where, failures)}`, "
-                f"`{_stored_text(str(worst.coord('baseline')), where, failures)}` ranks the "
-                f"benign class above the attacks, ROC AUC {_render_auc(worst)}. The same cell "
-                f"with the layer on reads {_render_auc(twin)}."
-            )
-            lines.append("")
 
+    summaries: list[tuple[str, dict[str, str], int, int]] = []
     for baseline in baselines:
         at = f"{where}, baseline {baseline!r}"
         chain_class = {
@@ -2089,31 +2052,134 @@ def _abstract_lines(results: Results, failures: list[str]) -> list[str]:
                 f"is being compared against"
             )
             continue
+        worst_auc = min(
+            (cell for cell in aucs if cell.coord("baseline") == baseline
+             and cell.coord("canon_on") is False),
+            key=lambda cell: cell.value or 0.0,
+            default=None,
+        )
+        twin = None
+        if worst_auc is not None:
+            twin = next(
+                (
+                    cell
+                    for cell in aucs
+                    if cell.coord("canon_on") is True
+                    and all(
+                        cell.coord(axis) == worst_auc.coord(axis)
+                        for axis in AXES
+                        if axis != "canon_on"
+                    )
+                ),
+                None,
+            )
+        if worst_auc is None or twin is None:
+            failures.append(
+                f"{at}: the worst layer-off AUC cell has no layer-on twin to stand beside it"
+            )
+            continue
+
         lowest = min(off_recalls, key=lambda cell: cell.value or 0.0)
         highest = max(off_recalls, key=lambda cell: cell.value or 0.0)
         worst_fp = max(off_benign, key=lambda cell: cell.value or 0.0)
-        exceptions_clause = ""
+        returned = f"{len(matching)} of {len(bound)}"
         if exceptions:
             named = ", ".join(
                 f"`{_stored_text(chain, at, failures)}`" for chain in exceptions
             )
-            exceptions_clause = (
-                f"; the exception{'s are' if len(exceptions) > 1 else ' is'} {named}"
+            returned += (
+                f" — the exception{'s are' if len(exceptions) > 1 else ' is'} {named}"
             )
+        cells_by_row: dict[str, str] = {
+            "returned": returned,
+            "recall_on": _render_rate(clean_row[0]),
+            "recall_off": (
+                f"{_percent(lowest.value or 0.0)} to {_percent(highest.value or 0.0)} "
+                f"of {lowest.n:,}"
+            ),
+            "worst_fp_off": (
+                f"{_percent(worst_fp.value or 0.0)} ({worst_fp.k:,}/{worst_fp.n:,}, "
+                f"`{_stored_text(str(worst_fp.coord('benign_class')), at, failures)}` under "
+                f"`{_stored_text(str(worst_fp.coord('dressing_chain')), at, failures)}`)"
+            ),
+            "auc_pair": (
+                f"{_render_auc(worst_auc)} → {_render_auc(twin)}, on "
+                f"`{_stored_text(str(worst_auc.coord('dressing_chain')), at, failures)}` vs "
+                f"`{_stored_text(str(worst_auc.coord('benign_class')), at, failures)}`"
+            ),
+        }
+        for name, cell in zip(benign_classes, clean_row[1:]):
+            cells_by_row[f"fp_{name}"] = _render_rate(cell)
+        summaries.append((baseline, cells_by_row, len(matching), len(bound)))
+
+    bound_union = sorted(
+        {
+            str(cell.coord("dressing_chain"))
+            for cell in rates
+            if cell.coord("chain_class") == "bound" and cell.coord("dressing_chain") != "clean"
+        }
+    )
+    held_union = sorted(
+        {
+            str(cell.coord("dressing_chain"))
+            for cell in rates
+            if cell.coord("chain_class") == "held_out"
+        }
+    )
+
+    lines: list[str] = ["", _ABSTRACT_PREAMBLE, ""]
+
+    lines.append(
+        "**The problem.** Prompt-injection classifiers are trained on attack text, and a payload "
+        "wrapped in base64 or hex, split with zero-width characters, or spelled with homoglyphs "
+        "is, to the model, a different string than the attack it carries. The question is what "
+        "canonicalizing the input first — decoding and unwrapping it before the model sees it — "
+        "recovers in detection, and what it costs on benign text."
+    )
+    lines.append("")
+    lines.append(
+        f"**The approach.** Every item goes down two routes, as-is and canonicalized, over "
+        f"{len(baselines)} public baselines that share no architecture and no tokenizer. The "
+        f"attacks are dressed across {len(bound_union)} dressing chains the layer declares "
+        f"(`bound`) and {len(held_union)} it does not (`held_out`), and the benign corpora "
+        f"({', '.join(f'`{name}`' for name in benign_classes)}) take both routes too, so the "
+        f"false-positive cost is measured on the same footing as the recovery. Every rate below "
+        f"carries its interval and the `k/n` it was measured over."
+    )
+    lines.append("")
+
+    if summaries:
+        lines.append("**The numbers.**")
+        lines.append("")
+        lines.append(_row([""] + [f"`{baseline}`" for baseline, _, _, _ in summaries]))
+        lines.append("| --- " * (len(summaries) + 1) + "|")
+        for label, key in (
+            ("`bound` chains that return to the clean row, layer on", "returned"),
+            ("recall on the clean row, layer on", "recall_on"),
+            *[
+                (f"false positives on `{name}`, layer on", f"fp_{name}")
+                for name in benign_classes
+            ],
+            ("recall across `bound` chains, layer off", "recall_off"),
+            ("worst benign false-positive rate, layer off", "worst_fp_off"),
+            ("worst ROC AUC, layer off → the same cell, layer on", "auc_pair"),
+        ):
+            lines.append(
+                _row([label] + [cells_by_row[key] for _, cells_by_row, _, _ in summaries])
+            )
+        lines.append("")
+
+    lines.append("**The conclusions.**")
+    lines.append("")
+    if summaries:
+        per_baseline = "; ".join(
+            f"`{baseline}` returns to its clean-text row on {matched} of {total} declared chains"
+            for baseline, _, matched, total in summaries
+        )
         lines.append(
-            f"- **`{_stored_text(baseline, at, failures)}`.** With the layer on, "
-            f"{len(matching)} of {len(bound)} dressed `bound` chains read exactly the clean "
-            f"text's own row — recall {_render_rate(clean_row[0])}, false positives "
-            + ", ".join(
-                f"{_render_rate(cell)} on `{name}`"
-                for name, cell in zip(benign_classes, clean_row[1:])
-            )
-            + f"{exceptions_clause}. With the layer off, recall on those chains runs from "
-            f"{_percent(lowest.value or 0.0)} to {_percent(highest.value or 0.0)} of "
-            f"{lowest.n:,} attacks, and the benign false-positive rate reaches "
-            f"{_percent(worst_fp.value or 0.0)} ({worst_fp.k:,}/{worst_fp.n:,} on "
-            f"`{_stored_text(str(worst_fp.coord('benign_class')), at, failures)}` under "
-            f"`{_stored_text(str(worst_fp.coord('dressing_chain')), at, failures)}`)."
+            f"- With the layer on, {per_baseline} — the recovery on the attack side and the "
+            f"collapse of the dressed-benign false positives are the same event, because the "
+            f"canonicalized input *is* the clean input."
         )
 
     held_chains: set[str] = set()
@@ -2144,11 +2210,10 @@ def _abstract_lines(results: Results, failures: list[str]) -> list[str]:
             if moved == 0
             else f"moves no column by more than {moved:,} document{'s' if moved != 1 else ''}"
         )
-        lines.append("")
         lines.append(
-            f"Across the {len(held_chains)} held-out dressing chains — the encodings the layer "
-            f"does not declare — turning it on {movement}: the layer recovers only what it "
-            f"declares to recover."
+            f"- Across the {len(held_chains)} held-out dressing chains, turning the layer on "
+            f"{movement}: the layer recovers only what it declares to recover, and buys nothing "
+            f"against encodings it does not."
         )
 
     if results.verdicts:
@@ -2158,7 +2223,6 @@ def _abstract_lines(results: Results, failures: list[str]) -> list[str]:
             for verdict in results.verdicts
             if str(verdict["outcome"]) != QUIET_VERDICT_OUTCOME
         ]
-        lines.append("")
         if loud:
             named = "; ".join(
                 f"`{_stored_text(condition, f'{where}, verdicts', failures)}` came out "
@@ -2171,13 +2235,13 @@ def _abstract_lines(results: Results, failures: list[str]) -> list[str]:
                 else ""
             )
             lines.append(
-                f"Of the {total} pre-registered falsification conditions, {named}{rest}. "
+                f"- Of the {total} pre-registered falsification conditions, {named}{rest}. "
                 f"Each is decided under the tables below, from the figures the tables carry."
             )
         else:
             lines.append(
-                f"None of the {total} pre-registered falsification conditions triggered. Each "
-                f"is decided under the tables below, from the figures the tables carry."
+                f"- None of the {total} pre-registered falsification conditions triggered. "
+                f"Each is decided under the tables below, from the figures the tables carry."
             )
 
     timing = results.run.get("timing")
@@ -2187,7 +2251,7 @@ def _abstract_lines(results: Results, failures: list[str]) -> list[str]:
             overall = layer.get("overall")
             if isinstance(overall, Mapping):
                 sentence = (
-                    f"The layer itself prices at p50 {_duration(overall['p50_ns'])} and p95 "
+                    f"- The layer itself prices at p50 {_duration(overall['p50_ns'])} and p95 "
                     f"{_duration(overall['p95_ns'])} per document, over "
                     f"{int(overall['n']):,} documents"
                 )
@@ -2201,7 +2265,6 @@ def _abstract_lines(results: Results, failures: list[str]) -> list[str]:
                         f"`{_stored_text(str(priciest), f'{where}, timing', failures)}`, at "
                         f"p50 {_duration(by_class[priciest]['p50_ns'])}"
                     )
-                lines.append("")
                 lines.append(sentence + ".")
 
     lines.append("")

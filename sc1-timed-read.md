@@ -197,8 +197,8 @@ half a person can act on. As above, nothing below was typed: it is the `page` ha
   "page": {
     "budget_minutes": 5,
     "budget_words": 1250,
-    "lines": 1300,
-    "minutes": 49.2,
+    "lines": 1312,
+    "minutes": 49.3,
     "minutes_generated_block": 13.3,
     "minutes_hand_written": 35.9,
     "over_budget_factor_hand_written": 7.18,
@@ -260,10 +260,10 @@ half a person can act on. As above, nothing below was typed: it is the `page` ha
         "words": 685
       }
     ],
-    "words_generated_block": 3332,
+    "words_generated_block": 3335,
     "words_hand_written": 8980,
     "words_per_minute": 250,
-    "words_total": 12312
+    "words_total": 12315
   }
 }
 ```

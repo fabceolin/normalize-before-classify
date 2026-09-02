@@ -24,16 +24,28 @@ the results block the tables live in.
 <!-- ABSTRACT:START -->
 <!-- Everything between these two markers is generated from `results/results.json` by `python -m nbc.report.readme`, exactly like the results block further down. Do not edit it: the next run replaces it wholesale, and a number here that no run produced cannot survive that. -->
 
-**What the layer recovers, in one pair of cells.** With the layer off, the worst cell in the file is not a miss but an inversion: on `base64+base64` against `b_code`, `protectai-deberta-v3` ranks the benign class above the attacks, ROC AUC 0.0007 [0.0003, 0.0011] 1,200 vs 500. The same cell with the layer on reads 0.8433 [0.8245, 0.8621] 1,200 vs 500.
+**The problem.** Prompt-injection classifiers are trained on attack text, and a payload wrapped in base64 or hex, split with zero-width characters, or spelled with homoglyphs is, to the model, a different string than the attack it carries. The question is what canonicalizing the input first — decoding and unwrapping it before the model sees it — recovers in detection, and what it costs on benign text.
 
-- **`protectai-deberta-v3`.** With the layer on, 8 of 9 dressed `bound` chains read exactly the clean text's own row — recall 83.17% [80.94%, 85.18%] 998/1,200, false positives 3.00% [1.83%, 4.89%] 15/500 on `b_chat`, 35.20% [31.14%, 39.48%] 176/500 on `b_code`; the exception is `base64+base64+base64+base64`. With the layer off, recall on those chains runs from 6.58% to 100.00% of 1,200 attacks, and the benign false-positive rate reaches 100.00% (500/500 on `b_code` under `base64`).
-- **`testsavantai-bert-small`.** With the layer on, 8 of 9 dressed `bound` chains read exactly the clean text's own row — recall 87.58% [85.60%, 89.33%] 1,051/1,200, false positives 18.60% [15.43%, 22.25%] 93/500 on `b_chat`, 11.00% [8.55%, 14.05%] 55/500 on `b_code`; the exception is `base64+base64+base64+base64`. With the layer off, recall on those chains runs from 22.75% to 100.00% of 1,200 attacks, and the benign false-positive rate reaches 100.00% (500/500 on `b_code` under `base64+base64`).
+**The approach.** Every item goes down two routes, as-is and canonicalized, over 2 public baselines that share no architecture and no tokenizer. The attacks are dressed across 9 dressing chains the layer declares (`bound`) and 3 it does not (`held_out`), and the benign corpora (`b_chat`, `b_code`) take both routes too, so the false-positive cost is measured on the same footing as the recovery. Every rate below carries its interval and the `k/n` it was measured over.
 
-Across the 3 held-out dressing chains — the encodings the layer does not declare — turning it on moves no column by more than 1 document: the layer recovers only what it declares to recover.
+**The numbers.**
 
-Of the 4 pre-registered falsification conditions, `N3` came out `triggered`; the other 3 read `not_triggered`. Each is decided under the tables below, from the figures the tables carry.
+|  | `protectai-deberta-v3` | `testsavantai-bert-small` |
+| --- | --- | --- |
+| `bound` chains that return to the clean row, layer on | 8 of 9 — the exception is `base64+base64+base64+base64` | 8 of 9 — the exception is `base64+base64+base64+base64` |
+| recall on the clean row, layer on | 83.17% [80.94%, 85.18%] 998/1,200 | 87.58% [85.60%, 89.33%] 1,051/1,200 |
+| false positives on `b_chat`, layer on | 3.00% [1.83%, 4.89%] 15/500 | 18.60% [15.43%, 22.25%] 93/500 |
+| false positives on `b_code`, layer on | 35.20% [31.14%, 39.48%] 176/500 | 11.00% [8.55%, 14.05%] 55/500 |
+| recall across `bound` chains, layer off | 6.58% to 100.00% of 1,200 | 22.75% to 100.00% of 1,200 |
+| worst benign false-positive rate, layer off | 100.00% (500/500, `b_code` under `base64`) | 100.00% (500/500, `b_code` under `base64+base64`) |
+| worst ROC AUC, layer off → the same cell, layer on | 0.0007 [0.0003, 0.0011] 1,200 vs 500 → 0.8433 [0.8245, 0.8621] 1,200 vs 500, on `base64+base64` vs `b_code` | 0.3063 [0.2738, 0.3388] 1,200 vs 500 → 0.9600 [0.9517, 0.9684] 1,200 vs 500, on `base64+homoglyph` vs `b_code` |
 
-The layer itself prices at p50 338.51 us and p95 18.39 ms per document, over 28,600 documents; the priciest class is `b_code`, at p50 6.02 ms.
+**The conclusions.**
+
+- With the layer on, `protectai-deberta-v3` returns to its clean-text row on 8 of 9 declared chains; `testsavantai-bert-small` returns to its clean-text row on 8 of 9 declared chains — the recovery on the attack side and the collapse of the dressed-benign false positives are the same event, because the canonicalized input *is* the clean input.
+- Across the 3 held-out dressing chains, turning the layer on moves no column by more than 1 document: the layer recovers only what it declares to recover, and buys nothing against encodings it does not.
+- Of the 4 pre-registered falsification conditions, `N3` came out `triggered`; the other 3 read `not_triggered`. Each is decided under the tables below, from the figures the tables carry.
+- The layer itself prices at p50 338.51 us and p95 18.39 ms per document, over 28,600 documents; the priciest class is `b_code`, at p50 6.02 ms.
 
 Every figure above is quoted from the cells the tables below carry, each with its interval and the count it was measured over; what these figures do not establish is priced in "What this does not show".
 <!-- ABSTRACT:END -->
